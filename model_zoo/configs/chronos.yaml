@@ -1,0 +1,6 @@
+models:
+  - name: chronos_bolt_small
+    hf_repo: amazon/chronos-bolt-small
+    input: close_pct_change
+    context_length: 64
+    prediction_length: 5

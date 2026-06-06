@@ -1,0 +1,5 @@
+models:
+  - name: timesfm_2_0_500m
+    hf_repo: google/timesfm-2.0-500m-pytorch
+    input: close_pct_change
+    prediction_length: 5

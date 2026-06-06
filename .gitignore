@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environments
+.venv/
+.venv*/
+venv/
+env/
+ENV/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Agent handoff notes
+codex_handoff_files/
+project.md
+github_auth_*.ps1
+github_auth_*.log
+
+# Local secrets and machine-specific settings
+.env
+.env.*
+local_app_config.json
+local_config.json
+rolling_update_time_history.json
+*.secret
+*.token
+
+# Runtime data, model artifacts, generated outputs and logs
+data/*
+models/*
+outputs/*
+logs/*
+external_repos/*
+
+# Keep placeholder directories in Git
+!data/.gitkeep
+!models/.gitkeep
+!outputs/.gitkeep
+!logs/.gitkeep
+!external_repos/.gitkeep
+
+# Large model/checkpoint formats
+*.pt
+*.pth
+*.pkl
+*.joblib
+*.bin
+*.safetensors
+*.onnx
+*.ckpt
+
+# Databases and generated documents
+*.db
+*.sqlite
+*.sqlite3
+*.docx
+*.pdf

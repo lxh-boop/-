@@ -1,0 +1,5 @@
+models:
+  - name: moirai_small
+    hf_repo: Salesforce/moirai-1.0-R-small
+    input: close_pct_change_or_multivariate
+    prediction_length: 5

@@ -1,0 +1,9 @@
+models:
+  - name: moment_small
+    hf_repo: AutonLab/MOMENT-1-small
+    input: ohlcv_return_sequence
+    prediction_length: 5
+  - name: moment_base
+    hf_repo: AutonLab/MOMENT-1-base
+    input: ohlcv_return_sequence
+    prediction_length: 5

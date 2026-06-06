@@ -1,0 +1,4 @@
+rank,date,code,name,close,pred_5d_ret,raw_score,up_prob,up_prob_calibrated,score,confidence_score,confidence,risk_score,risk_level,risk_detail,confidence_detail,model_name,ret_5,ret_20,vol_20,drawdown_20
+1,2026-06-01,000001,样本A,10.0,0.02,0.80,0.61,0.60,0.90,0.72,高,0.20,低,{},{},"test_model",0.01,0.03,0.10,-0.02
+2,2026-06-01,000002,样本B,20.0,0.01,0.50,0.52,0.51,0.50,0.50,中,0.55,中,{},{},"test_model",-0.01,0.02,0.20,-0.05
+3,2026-06-01,000003,样本C,30.0,-0.01,0.20,0.45,0.44,0.10,0.30,低,0.88,高,{},{},"test_model",-0.02,-0.04,0.30,-0.10

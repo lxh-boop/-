@@ -1,0 +1,3 @@
+run_id,model_name,model_category,topk,holding_days,annual_return,cum_return,sharpe,max_drawdown,target_hit,daily_returns_csv,prediction_csv,status
+run1,model,A,1,5,10.0,0.2089,1.0,0.0,True,tests/fixtures/sample_daily_returns.csv,tests/fixtures/pred.csv,success
+run_failed,bad_model,B,1,5,,,,,False,missing.csv,,failed
