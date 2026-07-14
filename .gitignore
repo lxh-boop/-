@@ -31,6 +31,7 @@ github_auth_*.log
 # Local secrets and machine-specific settings
 .env
 .env.*
+.streamlit/
 local_app_config.json
 local_config.json
 rolling_update_time_history.json
@@ -42,7 +43,13 @@ data/*
 models/*
 outputs/*
 logs/*
+runtime/
 external_repos/*
+build/
+dist/
+installer_output/
+_backup_*/
+streamlit_*.log
 
 # Keep placeholder directories in Git
 !data/.gitkeep

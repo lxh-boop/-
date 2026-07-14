@@ -1,0 +1,49 @@
+experiment:
+  name: full_rag_eval_chinese_adapt
+  mode: all
+
+retrieval:
+  top_k: 10
+  decision_time_filter: true
+  use_existing_project_config: true
+
+metrics:
+  deterministic:
+    - id_context_precision
+    - id_context_recall
+    - recall_at_k
+    - precision_at_k
+    - hit_rate_at_k
+    - mrr
+    - ndcg_at_k
+    - future_leak_rate
+    - wrong_stock_rate
+    - duplicate_event_rate
+    - direct_evidence_rate
+  llm_based:
+    - context_precision
+    - context_recall
+    - content_faithfulness
+    - response_relevancy
+
+quality_gates:
+  future_leak_rate:
+    max: 0.0
+  wrong_stock_rate:
+    max: 0.02
+  duplicate_event_rate:
+    max: 0.10
+  recall_at_10:
+    min: 0.80
+  content_faithfulness:
+    min: 0.85
+
+runtime:
+  max_workers: 1
+  timeout_seconds: 180
+  retry_count: 1
+  judge_language: chinese
+  adapt_prompts: true
+  adapt_prompt_instruction: false
+  response_relevancy_strictness: 1
+  save_intermediate_results: true

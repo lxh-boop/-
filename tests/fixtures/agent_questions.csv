@@ -1,0 +1,12 @@
+question,expected_intent,expected_tool
+今天模型推荐哪些股票,query_latest_ranking,tool_query_latest_ranking
+你认为这个预测的准吗？为什么？,query_backtest,tool_query_backtest
+为什么推荐排名第一的股票,explain_stock,tool_explain_stock
+当前有哪些模型,query_model_zoo,tool_query_model_zoo
+当前Model Zoo状态是什么,query_model_zoo,tool_query_model_zoo
+默认回测方案表现怎么样,query_backtest,tool_query_backtest
+哪个模型回测表现最好,compare_models,tool_compare_models
+生成今天的Agent报告,generate_daily_report,tool_generate_daily_report
+最近稀土涨价会影响哪些股票,query_news_mapping,tool_query_news_mapping
+根据研报知识库回答问题,query_rag,tool_query_rag
+当前市场环境怎么样,query_market_context,tool_query_market_context

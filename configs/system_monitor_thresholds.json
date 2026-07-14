@@ -1,0 +1,67 @@
+{
+  "rules": [
+    {
+      "rule_id": "data_full_text_ratio_low",
+      "layer": "data",
+      "metric": "full_text_ratio",
+      "operator": "min",
+      "warning": 0.2,
+      "critical": 0.05,
+      "message": "News full-text coverage is low."
+    },
+    {
+      "rule_id": "data_feature_nan_ratio_high",
+      "layer": "data",
+      "metric": "feature_nan_ratio",
+      "operator": "max",
+      "warning": 0.1,
+      "critical": 0.3,
+      "message": "Feature NaN ratio is high."
+    },
+    {
+      "rule_id": "rag_empty_rate_high",
+      "layer": "rag",
+      "metric": "rag_empty_rate",
+      "operator": "max",
+      "warning": 0.2,
+      "critical": 0.5,
+      "message": "RAG empty-result rate is high."
+    },
+    {
+      "rule_id": "rag_source_trace_rate_low",
+      "layer": "rag",
+      "metric": "source_trace_rate",
+      "operator": "min",
+      "warning": 0.8,
+      "critical": 0.5,
+      "message": "RAG source traceability is low."
+    },
+    {
+      "rule_id": "agent_failed_rate_high",
+      "layer": "agent",
+      "metric": "failed_rate",
+      "operator": "max",
+      "warning": 0.2,
+      "critical": 0.5,
+      "message": "Agent failed-run rate is high."
+    },
+    {
+      "rule_id": "portfolio_drawdown_high",
+      "layer": "portfolio",
+      "metric": "max_drawdown",
+      "operator": "min",
+      "warning": -0.1,
+      "critical": -0.2,
+      "message": "Portfolio drawdown is elevated."
+    },
+    {
+      "rule_id": "portfolio_single_stock_concentration_high",
+      "layer": "portfolio",
+      "metric": "single_stock_concentration",
+      "operator": "max",
+      "warning": 0.25,
+      "critical": 0.3,
+      "message": "Single-stock concentration is high."
+    }
+  ]
+}

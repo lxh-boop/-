@@ -1,0 +1,23 @@
+{
+  "account_id": "paper_sample_user",
+  "user_id": "sample_user",
+  "initial_cash": 100000.0,
+  "cash": 68311.62580000001,
+  "total_assets": 242935.6258,
+  "daily_return": 0.0,
+  "cumulative_return": 0.6195708386666667,
+  "max_drawdown": -0.00023988600000002247,
+  "cumulative_deposit": 50000.0,
+  "cumulative_withdrawal": 0.0,
+  "net_contribution": 150000.0,
+  "absolute_profit": 92935.62580000001,
+  "time_weighted_return": 0.7155980577845376,
+  "daily_fee": 0.0,
+  "cumulative_fee": 2311.3741999999997,
+  "position_market_value": 174624.0,
+  "composite_nav": 1.7155980577845376,
+  "nav": 1.7155980577845376,
+  "drawdown": 0.7155980577845376,
+  "is_paper_trading": 1,
+  "updated_at": "2026-06-16 04:28:34"
+}

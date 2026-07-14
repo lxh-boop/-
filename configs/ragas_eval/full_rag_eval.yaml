@@ -1,0 +1,59 @@
+experiment:
+  name: full_rag_eval
+  mode: all
+
+retrieval:
+  top_k: 10
+  decision_time_filter: true
+  use_existing_project_config: true
+
+metrics:
+  deterministic:
+    - id_context_precision
+    - id_context_recall
+    - recall_at_k
+    - precision_at_k
+    - hit_rate_at_k
+    - mrr
+    - ndcg_at_k
+    - future_leak_rate
+    - wrong_stock_rate
+    - duplicate_event_rate
+    - direct_evidence_rate
+  llm_based:
+    - context_precision
+    - context_recall
+    - content_faithfulness
+    - response_relevancy
+
+quality_gates:
+  future_leak_rate:
+    max: 0.0
+  wrong_stock_rate:
+    max: 0.02
+  duplicate_event_rate:
+    max: 0.10
+  recall_at_10:
+    min: 0.80
+  context_precision:
+    min: 0.70
+  context_recall:
+    min: 0.70
+  content_faithfulness:
+    min: 0.80
+  response_relevancy:
+    min: 0.70
+
+runtime:
+  max_workers: 2
+  timeout_seconds: 120
+  retry_count: 2
+  embedding_model: local:sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+  judge_language: chinese
+  # Ragas prompt adaptation calls the judge LLM to translate examples before
+  # scoring. Keep it off for routine runs; enable only for a dedicated prompt
+  # adaptation experiment after the judge endpoint is confirmed stable.
+  adapt_prompts: false
+  adapt_prompt_instruction: false
+  response_relevancy_strictness: 1
+  save_intermediate_results: true

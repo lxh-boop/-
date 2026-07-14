@@ -1,0 +1,5 @@
+﻿cost_price,current_price,industry,market_value,position_id,position_ratio,quantity,stock_code,stock_name,unrealized_pnl,updated_at,user_id
+139.5353125,151.28,,60512.0,pos_sample_user_600183,0.2490865627498262,400.0,600183,生益科技,4697.875,2026-06-16 04:28:34,sample_user
+40.11666666666667,41.61,,24966.0,pos_sample_user_600176,0.1027679654549868,600.0,600176,中国巨石,896.0,2026-06-16 04:28:34,sample_user
+63.13,63.13,,63130.0,pos_sample_user_600498,0.2598630801559447,1000.0,600498,烽火通信,0.0,2026-06-16 04:28:34,sample_user
+43.36,43.36,,26016.0,pos_sample_user_603260,0.10709009810449958,600.0,603260,合盛硅业,0.0,2026-06-16 04:28:34,sample_user

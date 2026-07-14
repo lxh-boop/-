@@ -1,0 +1,15 @@
+{
+  "generated_at": "2026-06-16 14:11:05",
+  "source_note": "Samples are small, local, redacted handoff examples generated from existing outputs. They are not full datasets and are not investment advice.",
+  "files": [
+    "docs\\sample_data\\ranking_latest_sample.csv",
+    "docs\\sample_data\\historical_ranking_sample.csv",
+    "docs\\sample_data\\final_recommendations_sample.csv",
+    "docs\\sample_data\\paper_account_latest_sample.json",
+    "docs\\sample_data\\paper_positions_latest_sample.csv",
+    "docs\\sample_data\\paper_orders_sample.csv",
+    "docs\\sample_data\\ai_paper_decisions_latest_sample.json",
+    "docs\\sample_data\\news_stock_mapping_sample.csv",
+    "docs\\sample_data\\news_event_sample.csv"
+  ]
+}

@@ -30,6 +30,7 @@ class LLMClient:
             or os.environ.get(LLM_MODEL_ENV, DEFAULT_LLM_MODEL)
             or DEFAULT_LLM_MODEL
         ).strip()
+        self.last_usage: dict[str, int] = {}
 
     def _build_client(self):
         if not self.api_key:
@@ -81,6 +82,7 @@ class LLMClient:
         temperature: float = 0.2,
         max_tokens: int = 1200,
     ) -> str:
+        self.last_usage = {}
         client = self._build_client()
 
         try:
@@ -101,6 +103,12 @@ class LLMClient:
             response = client.chat.completions.create(
                 **request_kwargs,
             )
+            usage = getattr(response, "usage", None)
+            self.last_usage = {
+                "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+                "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+                "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+            }
         except Exception as exc:
             raise RuntimeError(f"大模型调用失败：{exc}") from exc
 

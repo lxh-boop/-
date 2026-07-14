@@ -7,12 +7,21 @@ from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from runtime_paths import (
+    ensure_runtime_directories,
+    get_logs_dir,
+    get_resource_root,
+    get_user_data_root,
+    is_frozen_app,
+)
 
-BASE_DIR = Path(__file__).resolve().parent
+ensure_runtime_directories()
+BASE_DIR = get_resource_root()
+RUN_CWD = get_user_data_root() if is_frozen_app() else BASE_DIR
 ROLLING_UPDATE_SCRIPT = BASE_DIR / "daily_incremental_update.py"
-LOG_DIR = BASE_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
-TORCH_MLP_BACKEND = "torch_mlp_alpha158"
+LOG_DIR = get_logs_dir()
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+DEFAULT_EXTERNAL_BACKEND = "zoo:chronos_bolt_small"
 DFT_UNET_BACKEND = "dft_unet_external"
 
 
@@ -30,7 +39,7 @@ def run_command(cmd):
 
     result = subprocess.run(
         cmd,
-        cwd=str(BASE_DIR),
+        cwd=str(RUN_CWD),
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -56,7 +65,7 @@ def mask_sensitive_command(cmd):
 def auto_retrain_job(
     token: str,
     version: str = "latest",
-    model_backend: str = TORCH_MLP_BACKEND,
+    model_backend: str = DEFAULT_EXTERNAL_BACKEND,
     checkpoint_path: str | None = None,
 ):
     """
@@ -72,16 +81,19 @@ def auto_retrain_job(
         write_log("[Error] Tushare token is empty. Skip auto daily update.")
         return
 
-    update_cmd = [
-        sys.executable,
-        str(ROLLING_UPDATE_SCRIPT),
+    update_cmd = [sys.executable]
+    if is_frozen_app():
+        update_cmd.append("--daily-update-child")
+    else:
+        update_cmd.append(str(ROLLING_UPDATE_SCRIPT))
+    update_cmd.extend([
         "--token",
         token,
         "--base-version",
         version,
         "--model-backend",
         model_backend,
-    ]
+    ])
     if model_backend == DFT_UNET_BACKEND and checkpoint_path:
         update_cmd.extend(["--checkpoint-path", checkpoint_path])
 
@@ -122,7 +134,7 @@ def set_daily_retrain_job(
     hour: int,
     minute: int,
     enabled: bool,
-    model_backend: str = TORCH_MLP_BACKEND,
+    model_backend: str = DEFAULT_EXTERNAL_BACKEND,
     checkpoint_path: str | None = None,
 ):
     """

@@ -1,0 +1,41 @@
+[
+  {
+    "rule_id": "rule_user_risk_mismatch",
+    "rule_name": "用户风险等级不匹配",
+    "rule_type": "用户适当性",
+    "condition": {
+      "user_risk_level_max": "C2",
+      "asset_risk_level_min": "R4"
+    },
+    "action": "exclude",
+    "priority": 100,
+    "is_active": true,
+    "description": "低风险承受能力用户不展示高风险资产为推荐候选。"
+  },
+  {
+    "rule_id": "rule_negative_major_news",
+    "rule_name": "重大负面新闻",
+    "rule_type": "新闻约束",
+    "condition": {
+      "mapping_confidence_gte": 0.8,
+      "impact_direction": "negative",
+      "is_major_event": true
+    },
+    "action": "down_weight",
+    "priority": 90,
+    "is_active": true,
+    "description": "高置信重大负面新闻触发降权或观察，最终动作由融合层结合模型和用户约束决定。"
+  },
+  {
+    "rule_id": "rule_low_model_confidence",
+    "rule_name": "模型置信度低",
+    "rule_type": "模型可靠性",
+    "condition": {
+      "model_confidence": "low"
+    },
+    "action": "watch",
+    "priority": 70,
+    "is_active": true,
+    "description": "低置信模型预测只进入观察或解释，不作为强推荐信号。"
+  }
+]

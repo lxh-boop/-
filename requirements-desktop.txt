@@ -1,0 +1,4 @@
+# Desktop packaging/runtime additions.
+# Install together with requirements.txt when building Windows installer.
+pywebview
+pyinstaller

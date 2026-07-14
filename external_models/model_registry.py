@@ -7,22 +7,17 @@ from model_zoo_backend import (
     zoo_model_name_from_backend,
 )
 
-from .dft_unet_adapter import DFTUNetAdapter
-
-
-TORCH_MLP_BACKEND = "torch_mlp_alpha158"
 DFT_UNET_BACKEND = "dft_unet_external"
 
 
 def list_available_model_backends():
-    return [TORCH_MLP_BACKEND, DFT_UNET_BACKEND, *registered_zoo_backends().values()]
+    return [DFT_UNET_BACKEND, *registered_zoo_backends().values()]
 
 
 def load_model_backend(model_backend: str, **kwargs):
-    if model_backend == TORCH_MLP_BACKEND:
-        return None
-
     if model_backend == DFT_UNET_BACKEND:
+        from .dft_unet_adapter import DFTUNetAdapter
+
         adapter = DFTUNetAdapter(
             checkpoint_path=kwargs.get("checkpoint_path"),
             device=kwargs.get("device", "cpu"),

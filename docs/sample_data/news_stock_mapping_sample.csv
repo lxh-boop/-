@@ -1,0 +1,9 @@
+﻿date,publish_time,news_id,title,source,code,name,link_type,confidence,reason,evidence,mapper,status
+2026-06-03,2026-06-03 00:00:00,news_9b153e6c9d348778,北京市嘉源律师事务所关于TCL科技集团股份有限公司2026年合伙人持股计划的法律意见书,tushare_anns_d,000100,TCL科技,direct_company,1.0,规则命中股票别名/代码：TCL科技,TCL科技,rule_alias,auto_confirmed
+2026-06-03,2026-06-03 00:00:00,news_9b153e6c9d348778,北京市嘉源律师事务所关于TCL科技集团股份有限公司2026年合伙人持股计划的法律意见书,tushare_anns_d,000100,TCL科技,direct_company,1.0,新闻标题和正文直接提及TCL科技集团股份有限公司，且候选股票中已匹配到该公司,新闻标题为“北京市嘉源律师事务所关于TCL科技集团股份有限公司2026年合伙人持股计划的法律意见书”,llm_mapper,auto_confirmed
+2026-06-03,2026-06-03 00:00:00,news_204cdd874419b1e0,申万宏源证券承销保荐有限责任公司关于TCL科技发行股份及支付现金购买资产之独立财务顾问报告（修订稿）,tushare_anns_d,000100,TCL科技,direct_company,1.0,规则命中股票别名/代码：TCL科技,TCL科技,rule_alias,auto_confirmed
+2026-06-03,2026-06-03 00:00:00,news_204cdd874419b1e0,申万宏源证券承销保荐有限责任公司关于TCL科技发行股份及支付现金购买资产之独立财务顾问报告（修订稿）,tushare_anns_d,000166,申万宏源,direct_company,1.0,规则命中股票别名/代码：申万宏源,申万宏源,rule_alias,auto_confirmed
+2026-06-03,2026-06-03 00:00:00,news_445541dd68a22e80,申万宏源证券承销保荐有限责任公司关于《TCL科技集团股份有限公司发行股份及支付现金购买资产申请的审核问询函之回复报告》之专项核查意见,tushare_anns_d,000100,TCL科技,direct_company,1.0,规则命中股票别名/代码：TCL科技,TCL科技,rule_alias,auto_confirmed
+2026-06-03,2026-06-03 00:00:00,news_445541dd68a22e80,申万宏源证券承销保荐有限责任公司关于《TCL科技集团股份有限公司发行股份及支付现金购买资产申请的审核问询函之回复报告》之专项核查意见,tushare_anns_d,000166,申万宏源,direct_company,1.0,规则命中股票别名/代码：申万宏源,申万宏源,rule_alias,auto_confirmed
+2026-06-03,2026-06-03 00:00:00,news_27d001a0c32271e1,北京市嘉源律师事务所关于TCL科技发行股份及支付现金购买资产并募集配套资金的补充法律意见书（二）,tushare_anns_d,000100,TCL科技,direct_company,1.0,规则命中股票别名/代码：TCL科技,TCL科技,rule_alias,auto_confirmed
+2026-06-03,2026-06-03 00:00:00,news_0e27f48f10c61aba,北京市金杜律师事务所关于申通快递股份有限公司向不特定对象发行可转换公司债券的法律意见书,tushare_anns_d,002468,申通快递,direct_company,1.0,规则命中股票别名/代码：申通快递,申通快递,rule_alias,auto_confirmed

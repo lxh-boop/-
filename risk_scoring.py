@@ -18,7 +18,10 @@ RISK_COMPONENT_WEIGHTS = {
 def _numeric(series, default: float = 0.0, index=None) -> pd.Series:
     if not isinstance(series, pd.Series):
         series = pd.Series(series, index=index)
-    return pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(default)
+    result = pd.to_numeric(series, errors="coerce")
+    if not isinstance(result, pd.Series):
+        result = pd.Series(result, index=series.index)
+    return result.replace([np.inf, -np.inf], np.nan).fillna(default)
 
 
 def _rank01(series: pd.Series, ascending: bool = True, default: float = 0.5) -> pd.Series:

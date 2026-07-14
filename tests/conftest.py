@@ -6,15 +6,13 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-
-ROOT_DIR = Path(__file__).resolve().parents[1]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 @pytest.fixture
 def fixtures_dir() -> Path:
-    return ROOT_DIR / "tests" / "fixtures"
+    return ROOT / "tests" / "fixtures"
 
 
 @pytest.fixture
@@ -47,16 +45,40 @@ def sample_prediction_df() -> pd.DataFrame:
         ("000003", "C", 0.10, -0.02),
     ]
     for date in dates:
-        for code, name, pred, future in stocks:
+        for code, name, prediction, future_return in stocks:
             rows.append(
                 {
                     "date": date,
                     "code": code,
                     "name": name,
-                    "pred_5d_ret": pred,
-                    "raw_score": pred,
-                    "score": pred,
-                    "future_5d_ret": future,
+                    "pred_5d_ret": prediction,
+                    "raw_score": prediction,
+                    "score": prediction,
+                    "future_5d_ret": future_return,
                 }
             )
     return pd.DataFrame(rows)
+
+
+def pytest_collection_modifyitems(config, items):
+    del config
+    for item in items:
+        path_text = str(item.path).replace("\\", "/").lower()
+        name = item.name.lower()
+        if "/tests/e2e/" in path_text:
+            item.add_marker(pytest.mark.e2e)
+            item.add_marker(pytest.mark.slow)
+        elif "/tests/integration/" in path_text:
+            item.add_marker(pytest.mark.integration)
+        else:
+            item.add_marker(pytest.mark.fast)
+
+        if any(token in path_text or token in name for token in ["external", "live_api", "tushare", "network_api"]):
+            item.add_marker(pytest.mark.external)
+        if any(token in path_text or token in name for token in ["playwright", "streamlit_smoke", "starts_on_temp_port"]):
+            item.add_marker(pytest.mark.e2e)
+            item.add_marker(pytest.mark.slow)
+        if any(token in path_text or token in name for token in ["slow", "timeout", "long_running"]):
+            item.add_marker(pytest.mark.slow)
+        if "ragas_eval" in path_text and "optional_dependency" not in path_text:
+            item.add_marker(pytest.mark.external)

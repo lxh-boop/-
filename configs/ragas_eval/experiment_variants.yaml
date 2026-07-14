@@ -1,0 +1,11 @@
+variants:
+  baseline_hybrid:
+    description: 使用当前项目 HybridRetriever 默认配置。
+    retrieval:
+      top_k: 10
+      decision_time_filter: true
+  debug_small:
+    description: 单样本调试，建议配合 --case-id 和 --no-llm。
+    retrieval:
+      top_k: 5
+      decision_time_filter: true

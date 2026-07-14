@@ -15,6 +15,7 @@ huggingface_hub
 transformers
 safetensors
 chronos-forecasting
+sentence-transformers
 pytest
 pytest-cov
 pytest-mock

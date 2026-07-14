@@ -17,28 +17,24 @@ from config import (
     LATEST_FEATURE_DATA_PATH,
     LATEST_RAW_DATA_PATH,
     MODEL_PRED_COL,
-    MODEL_NAME,
     RAW_DATA_PATH,
     TRAIN_RAW_DATA_PATH,
     ensure_dirs,
 )
 import config as backtest_config
 from data_tushare import fetch_stock_pool_recent_daily_fast
-from external_models.dft_unet_adapter import DFTUNetAdapter
 from market_context import ensure_market_context_for_feature_data
-from model_store import load_torch_model_bundle
 from model_zoo_backend import (
     is_zoo_backend,
     predict_zoo_scores_for_dates,
     zoo_model_name_from_backend,
 )
 from news_features import add_news_event_features
-from torch_trainer import predict_torch_mlp
 from universe import get_stock_pool
 from backtest_rebalance import calculate_topk_rebalance, format_code_set
 
 ENABLE_NEWS_FEATURES = getattr(backtest_config, "ENABLE_NEWS_FEATURES", True)
-TORCH_MLP_BACKEND = "torch_mlp_alpha158"
+DEFAULT_BACKTEST_BACKEND = "zoo:chronos_bolt_small"
 DFT_UNET_BACKEND = "dft_unet_external"
 
 
@@ -237,7 +233,7 @@ def make_daily_predictions(
     raw_data: pd.DataFrame,
     model_version: str,
     backtest_days: int,
-    model_backend: str = TORCH_MLP_BACKEND,
+    model_backend: str = DEFAULT_BACKTEST_BACKEND,
     checkpoint_path: str | None = None,
     token: str | None = None,
 ) -> pd.DataFrame:
@@ -251,9 +247,11 @@ def make_daily_predictions(
 
     use_dates = dates[-backtest_days:]
 
-    model_backend = model_backend or TORCH_MLP_BACKEND
+    model_backend = model_backend or DEFAULT_BACKTEST_BACKEND
 
     if model_backend == DFT_UNET_BACKEND:
+        from external_models.dft_unet_adapter import DFTUNetAdapter
+
         feature_with_market, market_context_report = ensure_market_context_for_feature_data(
             feature_data=feature_data,
             token=token,
@@ -287,29 +285,7 @@ def make_daily_predictions(
         pred_source["model_name"] = zoo_model_name
         pred_source["model_backend"] = model_backend
     else:
-        bundle = load_torch_model_bundle(MODEL_NAME, version=model_version)
-        model = bundle["model"]
-        scaler = bundle["scaler"]
-        feature_cols = bundle["feature_cols"]
-
-        missing = [c for c in feature_cols if c not in feature_data.columns]
-
-        if missing:
-            raise RuntimeError(f"回测特征缺少训练时字段：{missing[:20]}")
-
-        pred_source = pred_source[pred_source["date"].isin(use_dates)].copy()
-
-        pred_score, up_prob = predict_torch_mlp(
-            model=model,
-            scaler=scaler,
-            df=pred_source,
-            feature_cols=feature_cols,
-        )
-        pred_source[MODEL_PRED_COL] = pred_score
-        pred_source["up_prob"] = up_prob
-        pred_source["score"] = pred_source.groupby("date")[MODEL_PRED_COL].rank(pct=True)
-        pred_source["model_name"] = MODEL_NAME
-        pred_source["model_backend"] = TORCH_MLP_BACKEND
+        raise RuntimeError(f"不支持的回测模型后端：{model_backend}")
 
     output_cols = [
         "date",
@@ -438,7 +414,7 @@ def summarize_backtest(
 def run_latest_t1_backtest(
     token: str | None = None,
     model_version: str = "latest",
-    model_backend: str = TORCH_MLP_BACKEND,
+    model_backend: str = DEFAULT_BACKTEST_BACKEND,
     checkpoint_path: str | None = None,
     topk: int = 10,
     backtest_days: int = MIN_BACKTEST_DAYS,
@@ -492,7 +468,7 @@ def run_latest_t1_backtest(
     elif is_zoo_backend(model_backend):
         backtest_model_name = zoo_model_name_from_backend(model_backend)
     else:
-        backtest_model_name = MODEL_NAME
+        raise RuntimeError(f"不支持的回测模型后端：{model_backend}")
 
     nav_rows = []
     trade_rows = []
@@ -625,7 +601,7 @@ def parse_args():
 
     parser.add_argument("--token", type=str, default=os.environ.get("TUSHARE_TOKEN", ""))
     parser.add_argument("--model-version", type=str, default="latest")
-    parser.add_argument("--model-backend", type=str, default=TORCH_MLP_BACKEND)
+    parser.add_argument("--model-backend", type=str, default=DEFAULT_BACKTEST_BACKEND)
     parser.add_argument(
         "--checkpoint-path",
         type=str,

@@ -1,0 +1,140 @@
+from __future__ import annotations
+
+import csv
+import json
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+from scoring.schemas import COMPLIANCE_DISCLAIMER
+
+
+def _stock_code(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text.split(".")[0].zfill(6)
+
+
+def _parse_jsonish(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text or text[0] not in "[{":
+        return value
+    try:
+        return json.loads(text)
+    except Exception:
+        return value
+
+
+def _recommendation_paths(output_dir: str | Path = "outputs") -> tuple[Path, Path]:
+    root = Path(output_dir) / "recommendations"
+    return root / "final_recommendations_latest.json", root / "final_recommendations_latest.csv"
+
+
+def _load_records(output_dir: str | Path = "outputs") -> tuple[list[dict[str, Any]], str, str]:
+    json_path, csv_path = _recommendation_paths(output_dir)
+    if json_path.exists():
+        try:
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return [dict(row) for row in data if isinstance(row, dict)], str(json_path), "read json"
+        except Exception as exc:
+            return [], str(json_path), f"failed to read json: {exc}"
+    if csv_path.exists():
+        try:
+            with csv_path.open("r", encoding="utf-8-sig", newline="") as file:
+                rows = []
+                for row in csv.DictReader(file):
+                    rows.append({key: _parse_jsonish(value) for key, value in row.items()})
+            return rows, str(csv_path), "read csv"
+        except Exception as exc:
+            return [], str(csv_path), f"failed to read csv: {exc}"
+    return [], str(json_path), "final recommendation file not found"
+
+
+def get_latest_recommendations(
+    output_dir: str | Path = "outputs",
+    top_k: int | None = None,
+    risk_level: str | None = None,
+) -> dict[str, Any]:
+    records, path, message = _load_records(output_dir)
+    filtered = list(records)
+    if risk_level and risk_level != "all":
+        filtered = [
+            row
+            for row in filtered
+            if str(row.get("risk_level") or row.get("confidence") or "").lower()
+            == str(risk_level).lower()
+        ]
+    if top_k is not None:
+        filtered = filtered[: int(top_k)]
+    adjustment_counts = Counter()
+    for row in records:
+        try:
+            value = float(row.get("combined_adjustment") or 0.0)
+        except Exception:
+            value = 0.0
+        if value > 0:
+            adjustment_counts["positive"] += 1
+        elif value < 0:
+            adjustment_counts["negative"] += 1
+        else:
+            adjustment_counts["neutral"] += 1
+    return {
+        "ok": bool(records),
+        "message": message,
+        "path": path,
+        "records": filtered,
+        "total_count": len(records),
+        "display_count": len(filtered),
+        "adjustment_counts": dict(adjustment_counts),
+        "compliance_disclaimer": COMPLIANCE_DISCLAIMER,
+        "note": "numeric adjustments are scoring outputs, not real trading instructions.",
+    }
+
+
+def get_recommendation_by_stock(
+    stock_code: str,
+    output_dir: str | Path = "outputs",
+) -> dict[str, Any]:
+    target = _stock_code(stock_code)
+    latest = get_latest_recommendations(output_dir=output_dir)
+    for row in latest.get("records", []):
+        code = _stock_code(row.get("stock_code") or row.get("code"))
+        if code == target:
+            return {
+                "ok": True,
+                "record": row,
+                "path": latest.get("path", ""),
+                "compliance_disclaimer": COMPLIANCE_DISCLAIMER,
+                "note": "This is not investment advice or a real trading instruction.",
+            }
+    return {
+        "ok": False,
+        "record": {},
+        "message": f"no recommendation found for stock_code={target}",
+        "path": latest.get("path", ""),
+        "compliance_disclaimer": COMPLIANCE_DISCLAIMER,
+    }
+
+
+def explain_recommendation_fields() -> dict[str, Any]:
+    return {
+        "fields": {
+            "original_pred_score": "Raw model score before user, news, and risk adjustments.",
+            "original_pred_rank": "Raw model ranking before signal fusion.",
+            "news_adjustment": "Raw numeric adjustment from mapped news or event evidence.",
+            "effective_news_adjustment": "News adjustment after ai_reliability_weight scaling.",
+            "user_adjustment": "Deterministic numeric adjustment from suitability and user constraints.",
+            "combined_adjustment": "effective_news_adjustment + user_adjustment.",
+            "position_adjustment_ratio": "clip(1 + combined_adjustment, 0.0, 2.0).",
+            "target_weight": "Paper-trading target weight generated by rules, not a broker order.",
+            "confidence": "Reliability summary for this fused result.",
+            "triggered_rules": "Agent or scoring rules triggered during fusion.",
+            "evidence_chunk_ids": "Long-lived evidence chunk ids used by scoring or Agent review.",
+        },
+        "compliance_disclaimer": COMPLIANCE_DISCLAIMER,
+        "note": "numeric adjustments are not real trading instructions; target_weight is paper-trading context only.",
+    }

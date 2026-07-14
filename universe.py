@@ -269,8 +269,8 @@ def get_stock_pool(token: str | None = None, enrich_name: bool = False) -> dict:
     """
     统一股票池入口。
 
-    - train_model.py 用这个读取 CSI300；
-    - rolling_update.py 也用这个读取 CSI300；
+    - daily_incremental_update.py 用这个读取 CSI300；
+    - APP 展示和外部模型更新也用这个读取 CSI300；
     - APP 展示 TopK 也基于这个股票池生成的结果。
     """
     universe = UNIVERSE.lower().strip()

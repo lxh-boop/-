@@ -1,15 +1,12 @@
 from __future__ import annotations
 
+from importlib import import_module
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from confidence_scoring import add_confidence_scores
-from model_zoo.adapters.chronos_adapter import ChronosAdapter
-from model_zoo.adapters.moirai_adapter import MoiraiAdapter
-from model_zoo.adapters.moment_adapter import MOMENTAdapter
-from model_zoo.adapters.timesfm_adapter import TimesFMAdapter
 from model_zoo.metadata import get_model_metadata
 from model_zoo.registry import get_model_entry, list_model_entries
 from ranking_schema import normalize_ranking_columns, validate_ranking_schema
@@ -34,6 +31,12 @@ ZOO_OPTIONAL_DEPENDENCIES = {
         "uni2ts",
         "Moirai 适配器需要 uni2ts；Windows/Python 3.12 下建议使用独立 Python 3.10/3.11 环境。",
     ),
+}
+ZOO_ADAPTER_CLASSES = {
+    "chronos": ("model_zoo.adapters.chronos_adapter", "ChronosAdapter"),
+    "timesfm": ("model_zoo.adapters.timesfm_adapter", "TimesFMAdapter"),
+    "moment": ("model_zoo.adapters.moment_adapter", "MOMENTAdapter"),
+    "moirai": ("model_zoo.adapters.moirai_adapter", "MoiraiAdapter"),
 }
 
 
@@ -96,43 +99,25 @@ def load_zoo_adapter(
     entry = get_model_entry(model_name)
     meta = get_model_metadata(entry.name) or {}
     local_path = meta.get("local_path") or entry.local_path
-    if entry.adapter == "chronos":
-        return ChronosAdapter(
-            model_name=entry.name,
-            local_path=local_path,
-            device=device,
-            context_length=context_length,
-            batch_size=batch_size,
-        ).load()
+    adapter_def = ZOO_ADAPTER_CLASSES.get(entry.adapter)
+    if not adapter_def:
+        raise RuntimeError(f"{entry.name} adapter is not registered.")
 
-    if entry.adapter == "timesfm":
-        return TimesFMAdapter(
-            model_name=entry.name,
-            local_path=local_path,
-            device=device,
-            context_length=context_length,
-            batch_size=batch_size,
-        ).load()
+    module_name, class_name = adapter_def
+    try:
+        adapter_cls = getattr(import_module(module_name), class_name)
+    except Exception as exc:
+        raise RuntimeError(
+            f"{entry.name} adapter could not be loaded: {type(exc).__name__}: {exc}"
+        ) from exc
 
-    if entry.adapter == "moment":
-        return MOMENTAdapter(
-            model_name=entry.name,
-            local_path=local_path,
-            device=device,
-            context_length=context_length,
-            batch_size=batch_size,
-        ).load()
-
-    if entry.adapter == "moirai":
-        return MoiraiAdapter(
-            model_name=entry.name,
-            local_path=local_path,
-            device=device,
-            context_length=context_length,
-            batch_size=batch_size,
-        ).load()
-
-    raise RuntimeError(f"{entry.name} adapter is not registered.")
+    return adapter_cls(
+        model_name=entry.name,
+        local_path=local_path,
+        device=device,
+        context_length=context_length,
+        batch_size=batch_size,
+    ).load()
 
 
 def _merge_feature_columns(pred: pd.DataFrame, feature_data: pd.DataFrame) -> pd.DataFrame:
@@ -232,6 +217,7 @@ def make_zoo_latest_ranking(
     out["calibration_method"] = "cross_sectional_rank_fallback"
     out["score"] = out["raw_score"].rank(pct=True)
     out["model_name"] = get_model_entry(model_name).name
+    out["prediction_date"] = (latest_date + pd.offsets.BDay(1)).strftime("%Y-%m-%d")
 
     out = add_risk_scores(out)
     out = add_confidence_scores(out, calibration_report={"calibrated": False, "method": "none"})
@@ -264,6 +250,7 @@ def make_zoo_latest_ranking(
         "ret_20",
         "vol_20",
         "drawdown_20",
+        "prediction_date",
     ]
     out = out[[col for col in output_cols if col in out.columns]].copy()
     validate_ranking_schema(out)

@@ -1,0 +1,83 @@
+from __future__ import annotations
+
+
+TABLE_PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
+    "user_profile": ("user_id",),
+    "risk_assessment": ("assessment_id",),
+    "investment_goal": ("goal_id",),
+    "portfolio_position": ("position_id",),
+    "paper_account": ("account_id",),
+    "paper_order": ("order_id",),
+    "paper_decision_log": ("decision_id",),
+    "paper_cash_flow": ("cash_flow_id",),
+    "paper_nav_history": ("nav_id",),
+    "paper_trading_settings": ("settings_id",),
+    "paper_account_snapshot": ("snapshot_id",),
+    "paper_replay_run": ("run_id",),
+    "paper_daily_replay_audit": ("daily_audit_id",),
+    "paper_stock_decision_audit": ("stock_decision_audit_id",),
+    "paper_order_reason_audit": ("order_reason_audit_id",),
+    "trading_behavior": ("behavior_id",),
+    "stock_basic": ("stock_code",),
+    "stock_alias": ("alias_id",),
+    "market_data_daily": ("trade_date", "stock_code"),
+    "model_prediction": ("prediction_id",),
+    "news_event": ("news_id",),
+    "news_chunk": ("chunk_id",),
+    "news_embedding": ("embedding_id",),
+    "news_stock_mapping": ("mapping_id",),
+    "industry_event_rule": ("rule_id",),
+    "agent_rule": ("rule_id",),
+    "agent_decision_log": ("decision_id",),
+    "agent_action_log": ("action_id",),
+    "agent_tool_call_log": ("call_id",),
+    "agent_confirmation_log": ("confirmation_id",),
+    "conversations": ("conversation_id",),
+    "messages": ("message_id",),
+    "agent_runs": ("run_id",),
+    "agent_steps": ("run_id", "step_id"),
+    "agent_tool_calls": ("tool_call_id",),
+    "agent_sources": ("source_id",),
+    "agent_sandbox_runs": ("sandbox_run_id",),
+    "action_proposals": ("plan_id",),
+    "action_approvals": ("approval_id",),
+    "action_commits": ("commit_id",),
+    "conversation_summaries": ("summary_id",),
+    "memory_items": ("memory_id",),
+    "memory_links": ("link_id",),
+    "user_feedback": ("feedback_id",),
+    "artifacts": ("artifact_id",),
+    "strategy_registry": ("strategy_id", "version"),
+    "system_monitor_snapshots": ("snapshot_id",),
+    "system_monitor_alerts": ("alert_id",),
+    "backtest_evaluation": ("eval_id",),
+    "rag_retrieval_log": ("retrieval_id",),
+}
+
+CORE_TABLES = tuple(TABLE_PRIMARY_KEYS)
+
+PRIORITY_STAGE_2A_TABLES = (
+    "risk_assessment",
+    "portfolio_position",
+    "paper_account",
+    "paper_order",
+    "paper_decision_log",
+    "paper_nav_history",
+    "paper_trading_settings",
+    "paper_account_snapshot",
+    "model_prediction",
+    "news_event",
+    "news_chunk",
+    "news_stock_mapping",
+    "agent_rule",
+    "agent_decision_log",
+    "backtest_evaluation",
+    "rag_retrieval_log",
+)
+
+
+def primary_key_for(table: str) -> tuple[str, ...]:
+    try:
+        return TABLE_PRIMARY_KEYS[table]
+    except KeyError as exc:
+        raise ValueError(f"unknown database table: {table}") from exc

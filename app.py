@@ -14,16 +14,38 @@ import sys
 import time
 from pathlib import Path
 
-if get_script_run_ctx(suppress_warning=True) is None:
+from runtime_paths import (
+    ensure_runtime_directories,
+    get_logs_dir,
+    get_resource_root,
+    get_runtime_dir,
+    get_user_data_root,
+    is_frozen_app,
+)
+
+APP_TOP_LEVEL_PAGES = ["首页 / 预测排名", "AI 模拟盘", "AI Agent", "系统监控"]
+
+
+def get_app_top_level_pages() -> list[str]:
+    return list(APP_TOP_LEVEL_PAGES)
+
+
+if get_script_run_ctx(suppress_warning=True) is None and __name__ == "__main__":
     print("Run this app with: streamlit run app.py  (not: python app.py)")
     raise SystemExit(0)
 
-BASE_DIR = Path(__file__).resolve().parent
+ensure_runtime_directories()
+BASE_DIR = get_resource_root()
+RUN_CWD = get_user_data_root() if is_frozen_app() else BASE_DIR
 ROLLING_UPDATE_SCRIPT = BASE_DIR / "daily_incremental_update.py"
-PROGRESS_HISTORY_PATH = BASE_DIR / "rolling_update_time_history.json"
+PROGRESS_HISTORY_PATH = (
+    get_runtime_dir() / "rolling_update_time_history.json"
+    if is_frozen_app()
+    else BASE_DIR / "rolling_update_time_history.json"
+)
 
-LOG_DIR = BASE_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+LOG_DIR = get_logs_dir()
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 ROLLING_UPDATE_LOG_PATH = LOG_DIR / "rolling_update_app.log"
 
 from app.services.model_search_results import (
@@ -35,10 +57,16 @@ from app.services.model_search_results import (
     load_daily_returns_for_strategy,
     load_selected_strategy,
 )
-from app.pages.model_search import render_model_search_page
-from app.services.backtest_display import build_display_date_options, is_prediction_only_date
+
+try:
+    from app.services.backtest_display import build_display_date_options, is_prediction_only_date
+except ImportError:
+    def is_prediction_only_date(selected_date, backtest_trades=None):
+        return True
+    from app.services.backtest_display import build_display_date_options
 from config import (
     ANNOUNCEMENT_CACHE_PATH,
+    AGENT_QUANT_DB_PATH,
     BACKTEST_DAILY_PREDICTIONS_PATH,
     BACKTEST_METRICS_PATH,
     BACKTEST_NAV_PATH,
@@ -54,8 +82,8 @@ from config import (
     MARKET_CONTEXT_FEATURE_CACHE_PATH,
     MARKET_CONTEXT_INDEX_DAILY_CACHE_PATH,
     METRICS_PATH,
-    MODEL_NAME,
     NEWS_CACHE_PATH,
+    OUTPUT_DIR,
     RANKING_LATEST_PATH,
     RAG_DOCUMENTS_PATH,
     RAG_INDEX_PATH,
@@ -64,7 +92,6 @@ from config import (
 import config as app_config
 from backtest import run_latest_t1_backtest
 from data_tushare import A_SHARE_DAILY_DATA_READY_TIME, validate_tushare_token
-from external_models.dft_unet_adapter import DFTUNetAdapter
 from llm_client import LLMClient
 from llm_explainer import (
     build_stock_explanation_prompt,
@@ -73,6 +100,7 @@ from llm_explainer import (
 )
 from market_context import MARKET_CONTEXT_COLUMNS, ensure_market_context_for_feature_data
 from model_zoo_backend import (
+    downloaded_zoo_backends,
     is_zoo_backend,
     make_zoo_latest_ranking,
     registered_zoo_backends,
@@ -80,19 +108,110 @@ from model_zoo_backend import (
 )
 from model_zoo.metadata import bootstrap_registered_metadata, load_metadata
 from model_zoo.registry import list_model_names
-from model_store import list_model_versions
-from news_data import load_event_cache
-from rag_retriever import retrieve_stock_context
 from backtest_rebalance import calculate_topk_rebalance
 
 ENABLE_NEWS_FEATURES = getattr(app_config, "ENABLE_NEWS_FEATURES", True)
 ENABLE_RAG = getattr(app_config, "ENABLE_RAG", True)
 ENABLE_LLM_EXPLAINER = getattr(app_config, "ENABLE_LLM_EXPLAINER", True)
 
+DATA_CACHE_TTL_SECONDS = 300
+NEWS_CACHE_TTL_SECONDS = 600
+RAG_CACHE_TTL_SECONDS = 600
+MODEL_METADATA_CACHE_TTL_SECONDS = 600
+
+
+def _path_cache_version(path: str | Path) -> tuple[str, int, int]:
+    resolved = Path(path)
+    try:
+        stat = resolved.stat()
+        size = stat.st_size if resolved.is_file() else 0
+        return str(resolved), int(stat.st_mtime_ns), int(size)
+    except OSError:
+        return str(resolved), 0, 0
+
+
+@st.cache_resource
+def _get_news_event_cache_loader():
+    from news_data import load_event_cache as loaded_load_event_cache
+
+    return loaded_load_event_cache
+
+
+@st.cache_resource
+def _get_rag_context_retriever():
+    from rag_retriever import retrieve_stock_context as loaded_retrieve_stock_context
+
+    return loaded_retrieve_stock_context
+
+
+@st.cache_resource
+def _get_ai_agent_page_renderer():
+    from app.pages.ai_agent import render_ai_agent_page
+
+    return render_ai_agent_page
+
+
+@st.cache_resource
+def _get_ai_paper_trading_page_renderer():
+    from app.pages.ai_paper_trading import render_ai_paper_trading_page
+
+    return render_ai_paper_trading_page
+
+
+@st.cache_resource
+def _get_model_search_page_renderer():
+    from app.pages.model_search import render_model_search_page
+
+    return render_model_search_page
+
+
+@st.cache_resource
+def _get_system_monitor_page_renderer():
+    from app.pages.system_monitor import render_system_monitor_page
+
+    return render_system_monitor_page
+
+
+def load_event_cache():
+    return _get_news_event_cache_loader()()
+
+
+def retrieve_stock_context(*args, **kwargs):
+    return _get_rag_context_retriever()(*args, **kwargs)
+
+
+@st.cache_data(ttl=RAG_CACHE_TTL_SECONDS)
+def _cached_retrieve_stock_context(
+    code: str,
+    query: str,
+    top_k: int,
+    rag_index_version: tuple[str, int, int],
+    rag_documents_version: tuple[str, int, int],
+) -> pd.DataFrame:
+    del rag_index_version, rag_documents_version
+    return retrieve_stock_context(code=code, query=query, top_k=int(top_k))
+
+
+def cached_retrieve_stock_context(
+    *,
+    code: str,
+    query: str,
+    top_k: int,
+) -> pd.DataFrame:
+    return _cached_retrieve_stock_context(
+        str(code).zfill(6),
+        str(query or ""),
+        int(top_k),
+        _path_cache_version(RAG_INDEX_PATH),
+        _path_cache_version(RAG_DOCUMENTS_PATH),
+    )
+
 
 from datetime import datetime, time as datetime_time
 
 from local_config import load_local_config, save_local_config
+from agent.mcp.config import build_mcp_context_from_local_config, mcp_sdk_version
+from agent.mcp.discovery import discover_mcp_tools, reset_discovery_cache
 from scheduler_manager import (
     create_scheduler,
     set_daily_retrain_job,
@@ -112,6 +231,37 @@ def get_app_scheduler():
 
 scheduler = get_app_scheduler()
 local_cfg = load_local_config()
+
+
+def normalize_page_zoom(value) -> int:
+    try:
+        zoom = int(value)
+    except (TypeError, ValueError):
+        zoom = 100
+    return max(80, min(150, zoom))
+
+
+def apply_page_zoom(percent: int) -> None:
+    zoom = normalize_page_zoom(percent) / 100.0
+    st.markdown(
+        f"""
+        <style>
+        [data-testid="stAppViewContainer"] .main .block-container {{
+            zoom: {zoom:.2f};
+        }}
+        section[data-testid="stSidebar"] > div {{
+            zoom: {zoom:.2f};
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+page_zoom_percent = normalize_page_zoom(
+    st.session_state.get("page_zoom_percent", local_cfg.get("page_zoom_percent", 100))
+)
+apply_page_zoom(page_zoom_percent)
 
 def load_time_estimate(default_seconds: int = 300) -> int:
     """
@@ -233,10 +383,62 @@ def read_log_tail(path: Path, max_chars: int = 2000) -> str:
         return ""
 
 
+def get_ranking_file_snapshot(path: str | Path = RANKING_LATEST_PATH) -> dict:
+    ranking_path = Path(path)
+    if not ranking_path.exists():
+        return {
+            "exists": False,
+            "path": str(ranking_path),
+            "mtime": 0.0,
+            "mtime_text": "不存在",
+            "rows": 0,
+            "signal_date": "",
+            "prediction_date": "",
+        }
+
+    stat = ranking_path.stat()
+    snapshot = {
+        "exists": True,
+        "path": str(ranking_path),
+        "mtime": float(stat.st_mtime),
+        "mtime_text": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+        "rows": 0,
+        "signal_date": "",
+        "prediction_date": "",
+    }
+    try:
+        ranking = pd.read_csv(ranking_path, dtype={"code": str}, encoding="utf-8-sig")
+        snapshot["rows"] = int(len(ranking))
+        if not ranking.empty:
+            if "date" in ranking.columns:
+                snapshot["signal_date"] = str(ranking["date"].iloc[0])
+            if "prediction_date" in ranking.columns:
+                snapshot["prediction_date"] = str(ranking["prediction_date"].iloc[0])
+    except Exception as exc:
+        snapshot["read_error"] = str(exc)
+    return snapshot
+
+
+def format_ranking_file_snapshot(snapshot: dict) -> str:
+    if not snapshot.get("exists"):
+        return "ranking_latest.csv 不存在"
+    parts = [
+        f"文件时间：{snapshot.get('mtime_text')}",
+        f"行数：{snapshot.get('rows', 0)}",
+    ]
+    if snapshot.get("signal_date"):
+        parts.append(f"信号日期：{snapshot.get('signal_date')}")
+    if snapshot.get("prediction_date"):
+        parts.append(f"预测日期：{snapshot.get('prediction_date')}")
+    if snapshot.get("read_error"):
+        parts.append(f"读取提示：{snapshot.get('read_error')}")
+    return " ｜ ".join(parts)
+
+
 def run_rolling_update_with_time_progress(
     token: str,
     base_version: str = "latest",
-    model_backend: str = "torch_mlp_alpha158",
+    model_backend: str = "zoo:chronos_bolt_small",
     checkpoint_path: str | None = None,
     default_estimate_seconds: int = 300,
     timeout_seconds: int = 3600,
@@ -258,17 +460,21 @@ def run_rolling_update_with_time_progress(
     time_box = st.empty()
 
     start_time = time.time()
+    ranking_before = get_ranking_file_snapshot()
 
-    cmd = [
-        sys.executable,
-        str(ROLLING_UPDATE_SCRIPT),
+    cmd = [sys.executable]
+    if is_frozen_app():
+        cmd.append("--daily-update-child")
+    else:
+        cmd.append(str(ROLLING_UPDATE_SCRIPT))
+    cmd.extend([
         "--token",
         token,
         "--base-version",
         base_version,
         "--model-backend",
         model_backend,
-    ]
+    ])
     if model_backend == "dft_unet_external" and checkpoint_path:
         cmd.extend(["--checkpoint-path", checkpoint_path])
     masked_cmd = [
@@ -287,7 +493,7 @@ def run_rolling_update_with_time_progress(
 
         process = subprocess.Popen(
             cmd,
-            cwd=str(BASE_DIR),
+            cwd=str(RUN_CWD),
             stdout=log_file,
             stderr=subprocess.STDOUT,
             text=True,
@@ -352,10 +558,31 @@ def run_rolling_update_with_time_progress(
         save_time_cost(elapsed)
 
         progress_bar.progress(100)
+        metrics = load_selected_model_metrics(model_backend) or {}
+        ranking_after = get_ranking_file_snapshot()
+        ranking_status_text = format_ranking_file_snapshot(ranking_after)
+        if str(metrics.get("status") or "").startswith("prediction_skipped"):
+            status_box.warning("每日数据缓存已更新，但预测阶段被跳过，ranking_latest.csv 没有刷新。")
+            time_box.caption(
+                f"本次实际耗时：{format_seconds(elapsed)} ｜ "
+                f"{ranking_status_text} ｜ 详情请查看模型指标或更新日志。"
+            )
+            return False, read_log_tail(ROLLING_UPDATE_LOG_PATH)
+        if not ranking_after.get("exists"):
+            status_box.error("每日更新进程结束，但没有生成 ranking_latest.csv。")
+            time_box.caption(f"本次实际耗时：{format_seconds(elapsed)}")
+            return False, read_log_tail(ROLLING_UPDATE_LOG_PATH)
+        if ranking_after.get("mtime", 0.0) <= ranking_before.get("mtime", 0.0):
+            status_box.warning("每日更新进程结束，但未检测到 ranking_latest.csv 被改写。")
+            time_box.caption(
+                f"本次实际耗时：{format_seconds(elapsed)} ｜ "
+                f"{ranking_status_text} ｜ 请查看更新日志确认原因。"
+            )
+            return False, read_log_tail(ROLLING_UPDATE_LOG_PATH)
         status_box.success("每日更新完成，预测排名已生成：100%")
         time_box.caption(
             f"本次实际耗时：{format_seconds(elapsed)} ｜ "
-            f"下次将根据本次耗时自动估计进度"
+            f"{ranking_status_text} ｜ 下次将根据本次耗时自动估计进度"
         )
 
         return True, ""
@@ -365,38 +592,67 @@ def run_rolling_update_with_time_progress(
 
     return False, read_log_tail(ROLLING_UPDATE_LOG_PATH)
 
-def load_ranking():
-    if not os.path.exists(RANKING_LATEST_PATH):
-        return None
 
-    df = pd.read_csv(RANKING_LATEST_PATH, dtype={"code": str})
+
+def render_top_level_page_selector() -> str | None:
+    """Render the top-level page selector for prediction / AI 模拟盘 / AI Agent."""
+    selected = st.radio("页面", options=APP_TOP_LEVEL_PAGES, horizontal=True)
+    return None if selected == "首页 / 预测排名" else selected
+
+
+@st.cache_data(ttl=DATA_CACHE_TTL_SECONDS)
+def _load_ranking_cached(path: str, mtime_ns: int, size: int) -> pd.DataFrame:
+    del mtime_ns, size
+    df = pd.read_csv(path, dtype={"code": str})
     df["code"] = df["code"].astype(str).str.zfill(6)
+    if "prediction_date" not in df.columns and "date" in df.columns:
+        dates = pd.to_datetime(df["date"], errors="coerce")
+        df["prediction_date"] = (dates + pd.offsets.BDay(1)).dt.strftime("%Y-%m-%d")
     return df
 
 
-def load_metrics():
-    if not os.path.exists(METRICS_PATH):
+def load_ranking():
+    path, mtime_ns, size = _path_cache_version(RANKING_LATEST_PATH)
+    if not mtime_ns:
         return None
 
+    return _load_ranking_cached(path, mtime_ns, size)
+
+
+@st.cache_data(ttl=MODEL_METADATA_CACHE_TTL_SECONDS)
+def _load_metrics_cached(path: str, mtime_ns: int, size: int):
+    del mtime_ns, size
     try:
-        return joblib.load(METRICS_PATH)
+        return joblib.load(path)
+    except Exception:
+        return None
+
+
+def load_metrics():
+    path, mtime_ns, size = _path_cache_version(METRICS_PATH)
+    if not mtime_ns:
+        return None
+
+    return _load_metrics_cached(path, mtime_ns, size)
+
+
+@st.cache_data(ttl=DATA_CACHE_TTL_SECONDS)
+def _load_json_file_cached(path: str, mtime_ns: int, size: int) -> dict | None:
+    del mtime_ns, size
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
     except Exception:
         return None
 
 
 def load_json_file(path: str | Path) -> dict | None:
-    path = Path(path)
-    if not path.exists():
+    path_text, mtime_ns, size = _path_cache_version(path)
+    if not mtime_ns:
         return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    return _load_json_file_cached(path_text, mtime_ns, size)
 
 
 def backend_display_name(model_backend: str) -> str:
-    if model_backend == "torch_mlp_alpha158":
-        return "Alpha158 MLP"
     if model_backend == "dft_unet_external":
         return "DFT_UNET"
     if is_zoo_backend(model_backend):
@@ -405,11 +661,8 @@ def backend_display_name(model_backend: str) -> str:
 
 
 def load_selected_model_metrics(model_backend: str) -> dict | None:
-    if model_backend == "torch_mlp_alpha158":
-        return load_metrics()
-
     if model_backend == "dft_unet_external":
-        data = load_json_file(BASE_DIR / "outputs" / "external_dft_unet_latest_metrics.json")
+        data = load_json_file(Path(OUTPUT_DIR) / "external_dft_unet_latest_metrics.json")
         if data:
             return data
         return {
@@ -420,7 +673,7 @@ def load_selected_model_metrics(model_backend: str) -> dict | None:
 
     if is_zoo_backend(model_backend):
         zoo_model_name = zoo_model_name_from_backend(model_backend)
-        data = load_json_file(BASE_DIR / "outputs" / "model_zoo_latest_metrics.json")
+        data = load_json_file(Path(OUTPUT_DIR) / "model_zoo_latest_metrics.json")
         if data and data.get("model_backend") == model_backend:
             return data
 
@@ -440,30 +693,36 @@ def load_selected_model_metrics(model_backend: str) -> dict | None:
     return None
 
 
-def load_backtest_outputs():
+@st.cache_data(ttl=DATA_CACHE_TTL_SECONDS)
+def _load_backtest_outputs_cached(
+    nav_version: tuple[str, int, int],
+    trades_version: tuple[str, int, int],
+    metrics_version: tuple[str, int, int],
+    predictions_version: tuple[str, int, int],
+):
     nav_df = None
     trades_df = None
     metrics_data = None
     predictions_df = None
 
-    if os.path.exists(BACKTEST_NAV_PATH):
-        nav_df = pd.read_csv(BACKTEST_NAV_PATH)
+    if nav_version[1]:
+        nav_df = pd.read_csv(nav_version[0])
         if "date" in nav_df.columns:
             nav_df["date"] = pd.to_datetime(nav_df["date"])
 
-    if os.path.exists(BACKTEST_TRADES_PATH):
-        trades_df = pd.read_csv(BACKTEST_TRADES_PATH, dtype={"code": str})
+    if trades_version[1]:
+        trades_df = pd.read_csv(trades_version[0], dtype={"code": str})
         trades_df["code"] = trades_df["code"].astype(str).str.zfill(6)
 
-    if os.path.exists(BACKTEST_METRICS_PATH):
+    if metrics_version[1]:
         try:
-            with open(BACKTEST_METRICS_PATH, "r", encoding="utf-8") as f:
+            with open(metrics_version[0], "r", encoding="utf-8") as f:
                 metrics_data = json.load(f)
         except Exception:
             metrics_data = None
 
-    if os.path.exists(BACKTEST_DAILY_PREDICTIONS_PATH):
-        predictions_df = pd.read_csv(BACKTEST_DAILY_PREDICTIONS_PATH, dtype={"code": str})
+    if predictions_version[1]:
+        predictions_df = pd.read_csv(predictions_version[0], dtype={"code": str})
         predictions_df["code"] = predictions_df["code"].astype(str).str.zfill(6)
         if "date" in predictions_df.columns:
             predictions_df["date"] = pd.to_datetime(predictions_df["date"])
@@ -471,6 +730,16 @@ def load_backtest_outputs():
     return nav_df, metrics_data, trades_df, predictions_df
 
 
+def load_backtest_outputs():
+    return _load_backtest_outputs_cached(
+        _path_cache_version(BACKTEST_NAV_PATH),
+        _path_cache_version(BACKTEST_TRADES_PATH),
+        _path_cache_version(BACKTEST_METRICS_PATH),
+        _path_cache_version(BACKTEST_DAILY_PREDICTIONS_PATH),
+    )
+
+
+@st.cache_data(ttl=MODEL_METADATA_CACHE_TTL_SECONDS)
 def load_model_zoo_table() -> pd.DataFrame:
     try:
         bootstrap_registered_metadata()
@@ -483,20 +752,26 @@ def load_model_zoo_table() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def load_external_backtest_summary() -> pd.DataFrame:
-    path = BASE_DIR / "outputs" / "backtests" / "backtest_summary.csv"
-    if not path.exists():
-        return pd.DataFrame()
+@st.cache_data(ttl=DATA_CACHE_TTL_SECONDS)
+def _load_external_backtest_summary_cached(path: str, mtime_ns: int, size: int) -> pd.DataFrame:
+    del mtime_ns, size
     try:
         return pd.read_csv(path, encoding="utf-8-sig")
     except Exception:
         return pd.DataFrame()
 
 
-def load_external_daily_returns(model_name: str, topk: int) -> pd.DataFrame:
-    path = BASE_DIR / "outputs" / "backtests" / f"{model_name}_top{int(topk)}_daily_returns.csv"
-    if not path.exists():
+def load_external_backtest_summary() -> pd.DataFrame:
+    path = Path(OUTPUT_DIR) / "backtests" / "backtest_summary.csv"
+    path_text, mtime_ns, size = _path_cache_version(path)
+    if not mtime_ns:
         return pd.DataFrame()
+    return _load_external_backtest_summary_cached(path_text, mtime_ns, size)
+
+
+@st.cache_data(ttl=DATA_CACHE_TTL_SECONDS)
+def _load_external_daily_returns_cached(path: str, mtime_ns: int, size: int) -> pd.DataFrame:
+    del mtime_ns, size
     try:
         df = pd.read_csv(path, encoding="utf-8-sig")
         if "date" in df.columns:
@@ -504,6 +779,14 @@ def load_external_daily_returns(model_name: str, topk: int) -> pd.DataFrame:
         return df
     except Exception:
         return pd.DataFrame()
+
+
+def load_external_daily_returns(model_name: str, topk: int) -> pd.DataFrame:
+    path = Path(OUTPUT_DIR) / "backtests" / f"{model_name}_top{int(topk)}_daily_returns.csv"
+    path_text, mtime_ns, size = _path_cache_version(path)
+    if not mtime_ns:
+        return pd.DataFrame()
+    return _load_external_daily_returns_cached(path_text, mtime_ns, size)
 
 
 def calc_drawdown_series(nav_series: pd.Series) -> pd.Series:
@@ -853,6 +1136,8 @@ def run_external_backend_ranking(
             feature_data=feature_data,
             token=token,
         )
+        from external_models.dft_unet_adapter import DFTUNetAdapter
+
         adapter = DFTUNetAdapter(checkpoint_path=checkpoint_path, device="cpu").load()
         ranking_df = adapter.predict(raw_data=raw_data, feature_data=feature_data)
         backend_report = dict(adapter.load_report)
@@ -916,6 +1201,40 @@ if selected_strategy:
     )
 
 # ============================================================
+# 侧边栏：用户
+# ============================================================
+
+st.sidebar.header("用户设置")
+
+page_zoom_percent = st.sidebar.slider(
+    "页面缩放",
+    min_value=80,
+    max_value=150,
+    value=page_zoom_percent,
+    step=5,
+    key="page_zoom_percent",
+)
+if st.sidebar.button("保存页面缩放"):
+    local_cfg["page_zoom_percent"] = int(page_zoom_percent)
+    save_local_config(local_cfg)
+    st.sidebar.success("页面缩放已保存。")
+
+default_current_user_id = str(
+    local_cfg.get("current_user_id") or local_cfg.get("user_id") or "default"
+).strip() or "default"
+
+current_user_id = st.sidebar.text_input(
+    "当前用户 ID",
+    value=default_current_user_id,
+    help="AI 模拟盘和 AI Agent 会使用该用户的模拟账户、持仓和偏好配置。",
+).strip() or "default"
+
+if st.sidebar.button("保存用户 ID"):
+    local_cfg["current_user_id"] = current_user_id
+    save_local_config(local_cfg)
+    st.sidebar.success("用户 ID 已保存。")
+
+# ============================================================
 # 侧边栏：Tushare Token
 # ============================================================
 
@@ -927,12 +1246,15 @@ st.sidebar.header("Tushare 连接")
 
 default_token = local_cfg.get("tushare_token") or os.environ.get("TUSHARE_TOKEN", "")
 
-token = st.sidebar.text_input(
+token_input = st.sidebar.text_input(
     "填写 Tushare Token",
-    value=default_token,
+    value="",
     type="password",
-    help="Token 可保存到本地 local_app_config.json，请不要上传到 GitHub。"
+    placeholder="已配置时可留空；输入新 Token 才会覆盖",
+    help="Token 可保存到本地 local_app_config.json，请不要上传到 GitHub。",
 )
+token = token_input.strip() or default_token
+st.sidebar.caption("Token 状态：已配置" if default_token else "Token 状态：未配置")
 
 col_token_1, col_token_2 = st.sidebar.columns(2)
 
@@ -954,9 +1276,10 @@ if validate_button:
     st.session_state["token_message"] = msg
 
 if save_token_button:
-    local_cfg["tushare_token"] = token
+    if token_input.strip():
+        local_cfg["tushare_token"] = token_input.strip()
     save_local_config(local_cfg)
-    st.sidebar.success("Token 已保存到本地配置。")
+    st.sidebar.success("Token 已保存到本地配置。" if token_input.strip() else "未输入新 Token，已保留现有配置。")
 
 if st.session_state["token_message"]:
     if st.session_state["token_valid"]:
@@ -987,12 +1310,15 @@ default_llm_model = (
     or DEFAULT_LLM_MODEL
 )
 
-llm_api_key = st.sidebar.text_input(
+llm_api_key_input = st.sidebar.text_input(
     "AI API Key",
-    value=default_llm_api_key,
+    value="",
     type="password",
+    placeholder="已配置时可留空；输入新 Key 才会覆盖",
     help="支持 OpenAI-compatible API。Key 只来自输入、本地配置或环境变量。",
 )
+llm_api_key = llm_api_key_input.strip() or default_llm_api_key
+st.sidebar.caption("AI Key 状态：已配置" if default_llm_api_key else "AI Key 状态：未配置")
 llm_base_url = st.sidebar.text_input(
     "Base URL",
     value=default_llm_base_url,
@@ -1024,7 +1350,8 @@ if validate_ai_button:
         st.sidebar.error(msg)
 
 if save_ai_button:
-    local_cfg["llm_api_key"] = llm_api_key
+    if llm_api_key_input.strip():
+        local_cfg["llm_api_key"] = llm_api_key_input.strip()
     local_cfg["llm_base_url"] = llm_base_url
     local_cfg["llm_model"] = llm_model
     save_local_config(local_cfg)
@@ -1032,20 +1359,70 @@ if save_ai_button:
 
 
 # ============================================================
+# Sidebar: MCP read-only evidence tools
+# ============================================================
+
+st.sidebar.divider()
+st.sidebar.header("MCP Evidence Tools")
+st.sidebar.caption("Read-only financial evidence for Agent planning; write tools are blocked.")
+mcp_example_enabled = st.sidebar.checkbox(
+    "Enable local read-only MCP example",
+    value=bool(local_cfg.get("mcp_example_enabled", False)),
+)
+mcp_cols = st.sidebar.columns(2)
+with mcp_cols[0]:
+    save_mcp_button = st.button("Save MCP")
+with mcp_cols[1]:
+    check_mcp_button = st.button("Check MCP")
+
+if save_mcp_button:
+    local_cfg["mcp_example_enabled"] = bool(mcp_example_enabled)
+    local_cfg["mcp_example_allowed_tools"] = ["market_risk_summary"]
+    local_cfg["mcp_example_timeout_seconds"] = float(local_cfg.get("mcp_example_timeout_seconds") or 5.0)
+    save_local_config(local_cfg)
+    reset_discovery_cache()
+    st.sidebar.success("MCP settings saved.")
+
+if check_mcp_button:
+    check_cfg = dict(local_cfg)
+    check_cfg["mcp_example_enabled"] = bool(mcp_example_enabled)
+    mcp_context = {"mcp": build_mcp_context_from_local_config(check_cfg)}
+    results = discover_mcp_tools(mcp_context, force=True)
+    usable_tools = [
+        tool.to_dict()
+        for result in results
+        for tool in result.tools
+        if tool.mapped
+    ]
+    if usable_tools:
+        st.sidebar.success(f"MCP discovery OK: {len(usable_tools)} read-only tool(s).")
+    else:
+        st.sidebar.info("No enabled MCP read-only tool is currently available.")
+    with st.sidebar.expander("MCP discovery details", expanded=True):
+        st.json({
+            "sdk_version": mcp_sdk_version(),
+            "servers": [result.to_dict() for result in results],
+        })
+
+
+# ============================================================
 # 侧边栏：模型库
 # ============================================================
 
-st.sidebar.header("模型库")
+st.sidebar.header("模型库管理")
+st.sidebar.caption("只管理本地模型文件、模型库选择和依赖状态；不会拉取行情，也不会刷新排名或模拟盘。")
 
 backend_labels = {
-    "Alpha158 MLP": "torch_mlp_alpha158",
     "DFT_UNET": "dft_unet_external",
 }
-backend_labels.update(registered_zoo_backends())
-default_backend_value = local_cfg.get("model_backend", "torch_mlp_alpha158")
+downloaded_backend_labels = downloaded_zoo_backends()
+backend_labels.update(downloaded_backend_labels or registered_zoo_backends())
+default_backend_value = local_cfg.get("model_backend", "zoo:chronos_bolt_small")
+if default_backend_value not in set(backend_labels.values()):
+    default_backend_value = "zoo:chronos_bolt_small"
 default_backend_label = next(
     (label for label, value in backend_labels.items() if value == default_backend_value),
-    "Alpha158 MLP",
+    next((label for label, value in backend_labels.items() if value == "zoo:chronos_bolt_small"), next(iter(backend_labels))),
 )
 
 selected_backend_label = st.sidebar.selectbox(
@@ -1063,35 +1440,28 @@ dft_checkpoint_path = (
     or DEFAULT_DFT_UNET_CHECKPOINT_PATH
 )
 
-if selected_backend == "torch_mlp_alpha158":
-    versions = list_model_versions(MODEL_NAME)
-    version_options = ["latest"] + list(reversed(versions))
-
-    selected_version = st.sidebar.selectbox(
-        "选择模型版本",
-        options=version_options,
-        index=0,
+if selected_backend == "dft_unet_external":
+    dft_checkpoint_path = st.sidebar.text_input(
+        "DFT_UNET checkpoint 路径",
+        value=dft_checkpoint_path,
     )
+elif is_zoo_backend(selected_backend):
+    selected_model_name = zoo_model_name_from_backend(selected_backend)
+    selected_row = pd.DataFrame()
+    if not zoo_table.empty and "name" in zoo_table.columns:
+        selected_row = zoo_table[zoo_table["name"].astype(str) == selected_model_name].tail(1)
+    if selected_row.empty:
+        st.sidebar.info("当前选择的是模型库模型；未找到 metadata 时，运行预测会给出具体原因。")
+    else:
+        selected_status = str(selected_row.iloc[0].get("status", "registered"))
+        st.sidebar.caption(f"模型状态：{selected_status}")
 
-else:
-    if selected_backend == "dft_unet_external":
-        dft_checkpoint_path = st.sidebar.text_input(
-            "DFT_UNET checkpoint 路径",
-            value=dft_checkpoint_path,
-        )
-    elif is_zoo_backend(selected_backend):
-        selected_model_name = zoo_model_name_from_backend(selected_backend)
-        selected_row = pd.DataFrame()
-        if not zoo_table.empty and "name" in zoo_table.columns:
-            selected_row = zoo_table[zoo_table["name"].astype(str) == selected_model_name].tail(1)
-        if selected_row.empty:
-            st.sidebar.info("当前选择的是模型库模型；未找到 metadata 时，运行预测会给出具体原因。")
-        else:
-            selected_status = str(selected_row.iloc[0].get("status", "registered"))
-            st.sidebar.caption(f"模型状态：{selected_status}")
+save_model_settings_button = st.sidebar.button("保存模型选择")
+check_model_button = st.sidebar.button("检查模型文件/依赖")
 
-save_model_settings_button = st.sidebar.button("保存模型库设置")
-check_model_button = st.sidebar.button("检查当前模型")
+st.sidebar.divider()
+st.sidebar.header("手动生成预测排名")
+st.sidebar.caption("拉取最新行情并重写 outputs/ranking_latest.csv；不会执行 AI 模拟盘。")
 refresh_button = st.sidebar.button(
     "每日更新并生成预测排名",
     type="primary",
@@ -1105,17 +1475,9 @@ if save_model_settings_button:
 
 if check_model_button:
     try:
-        if selected_backend == "torch_mlp_alpha158":
-            versions = list_model_versions(MODEL_NAME)
-            st.sidebar.success("Alpha158 MLP 模型可读取。")
-            with st.sidebar.expander("模型检查结果", expanded=True):
-                st.json({
-                    "model_backend": selected_backend,
-                    "model_name": MODEL_NAME,
-                    "selected_version": selected_version,
-                    "available_versions": ["latest"] + list(reversed(versions)),
-                })
-        elif selected_backend == "dft_unet_external":
+        if selected_backend == "dft_unet_external":
+            from external_models.dft_unet_adapter import DFTUNetAdapter
+
             adapter = DFTUNetAdapter(checkpoint_path=dft_checkpoint_path, device="cpu")
             report = adapter.inspect()
             adapter.load()
@@ -1169,11 +1531,13 @@ st.sidebar.caption(
     "模型下载示例：python -m model_zoo.downloader --model chronos_bolt_small。"
 )
 
-st.sidebar.header("每日自动更新")
+st.sidebar.divider()
+st.sidebar.header("每日自动任务")
+st.sidebar.caption("只配置定时运行“每日更新并生成预测排名”；不会立即执行，也不会更新模拟盘。")
 st.sidebar.info(build_daily_data_cutoff_notice())
 
 auto_enabled = st.sidebar.checkbox(
-    "开启每日自动更新",
+    "开启定时预测排名更新",
     value=bool(local_cfg.get("auto_retrain_enabled", False)),
 )
 
@@ -1181,11 +1545,11 @@ default_hour = int(local_cfg.get("auto_retrain_hour", 20))
 default_minute = int(local_cfg.get("auto_retrain_minute", 0))
 
 auto_time = st.sidebar.time_input(
-    "每日更新时间",
+    "定时运行时间",
     value=datetime_time(hour=default_hour, minute=default_minute),
 )
 
-save_auto_config_button = st.sidebar.button("保存自动更新设置")
+save_auto_config_button = st.sidebar.button("保存定时任务设置")
 
 if save_auto_config_button:
     local_cfg["tushare_token"] = token
@@ -1209,9 +1573,9 @@ if save_auto_config_button:
     )
 
     if auto_enabled:
-        st.sidebar.success(f"已开启每日自动更新：{auto_time.strftime('%H:%M')}")
+        st.sidebar.success(f"已开启定时预测排名更新：{auto_time.strftime('%H:%M')}")
     else:
-        st.sidebar.info("已关闭每日自动更新。")
+        st.sidebar.info("已关闭定时预测排名更新。")
 
 
 # 每次 APP 刷新时，根据本地配置恢复调度任务
@@ -1222,12 +1586,12 @@ if local_cfg.get("auto_retrain_enabled", False) and local_cfg.get("tushare_token
         hour=int(local_cfg.get("auto_retrain_hour", 20)),
         minute=int(local_cfg.get("auto_retrain_minute", 0)),
         enabled=True,
-        model_backend=local_cfg.get("model_backend", "torch_mlp_alpha158"),
+        model_backend=local_cfg.get("model_backend", "zoo:chronos_bolt_small"),
         checkpoint_path=local_cfg.get("dft_unet_checkpoint_path") or DEFAULT_DFT_UNET_CHECKPOINT_PATH,
     )
 
 
-manual_retrain_button = st.sidebar.button("立即执行一次每日更新")
+manual_retrain_button = st.sidebar.button("立即运行一次定时更新流程")
 
 if manual_retrain_button:
     if not token:
@@ -1242,11 +1606,11 @@ if manual_retrain_button:
             default_estimate_seconds=300,
         )
         if ok:
-            st.success("每日更新完成，预测下一交易日排名已刷新。")
+            st.success("定时更新流程执行完成，预测下一交易日排名已刷新。")
             time.sleep(1)
             st.rerun()
         else:
-            st.error("每日更新失败。")
+            st.error("定时更新流程执行失败。")
             if error_text:
                 with st.expander("查看错误摘要"):
                     st.code(error_text)
@@ -1297,10 +1661,47 @@ if refresh_button:
                     st.code(error_text)
 
 # ============================================================
-# 加载结果
+# Page navigation dispatch
+# ============================================================
+selected_top_level_page = render_top_level_page_selector()
+if selected_top_level_page == "AI 模拟盘":
+    try:
+        _get_ai_paper_trading_page_renderer()(
+            user_id=current_user_id,
+            output_dir=OUTPUT_DIR,
+            db_path=AGENT_QUANT_DB_PATH,
+            top_k=50,
+        )
+        st.stop()
+    except (ImportError, Exception) as _page_err:
+        st.warning(f"AI 模拟盘页面暂不可用: {_page_err}")
+        st.stop()
+if selected_top_level_page == "AI Agent":
+    _get_ai_agent_page_renderer()(
+        user_id=current_user_id,
+        output_dir=OUTPUT_DIR,
+        db_path=AGENT_QUANT_DB_PATH,
+        default_topk=50,
+        ranking=None,
+    )
+    st.stop()
+if selected_top_level_page == "系统监控":
+    _get_system_monitor_page_renderer()(
+        user_id=current_user_id,
+        output_dir=OUTPUT_DIR,
+        db_path=AGENT_QUANT_DB_PATH,
+    )
+    st.stop()
+
+
+# ============================================================
+# 加载首页结果
 # ============================================================
 
+
 ranking = load_ranking()
+
+
 metrics = load_selected_model_metrics(selected_backend)
 
 if ranking is None:
@@ -1341,9 +1742,7 @@ ranking_model_names = []
 if "model_name" in ranking.columns:
     ranking_model_names = ranking["model_name"].dropna().astype(str).unique().tolist()
 
-if selected_backend == "torch_mlp_alpha158":
-    expected_ranking_model_names = {MODEL_NAME, "torch_mlp", "torch_mlp_alpha158"}
-elif selected_backend == "dft_unet_external":
+if selected_backend == "dft_unet_external":
     expected_ranking_model_names = {"dft_unet_external", "dft_unet", "DFT_UNET"}
 elif is_zoo_backend(selected_backend):
     expected_ranking_model_names = {zoo_model_name_from_backend(selected_backend)}
@@ -1373,21 +1772,25 @@ if not ranking_matches_selected_model:
     )
 
 
-tab_home, tab_stock, tab_model, tab_model_search, tab_backtest, tab_news, tab_rag, tab_ai, tab_settings = st.tabs(
-    [
-        "\u9996\u9875 / \u9884\u6d4b\u6392\u540d",
-        "\u4e2a\u80a1\u8be6\u60c5",
-        "\u6a21\u578b\u6307\u6807",
-        "\u6a21\u578b\u641c\u7d22\u4e0e\u56de\u6d4b",
-        "\u56de\u6d4b\u5206\u6790",
-        "\u65b0\u95fb\u4e8b\u4ef6",
-        "RAG \u68c0\u7d22",
-        "AI \u89e3\u91ca",
-        "\u7cfb\u7edf\u8bbe\u7f6e",
-    ]
+HOME_SECTION_LABELS = [
+    "\u9996\u9875 / \u9884\u6d4b\u6392\u540d",
+    "\u4e2a\u80a1\u8be6\u60c5",
+    "\u6a21\u578b\u6307\u6807",
+    "\u6a21\u578b\u641c\u7d22\u4e0e\u56de\u6d4b",
+    "\u56de\u6d4b\u5206\u6790",
+    "\u65b0\u95fb\u4e8b\u4ef6",
+    "\u7cfb\u7edf\u8bbe\u7f6e",
+]
+if st.session_state.get("home_section") not in HOME_SECTION_LABELS:
+    st.session_state["home_section"] = HOME_SECTION_LABELS[0]
+selected_home_section = st.radio(
+    "\u9996\u9875\u6a21\u5757",
+    options=HOME_SECTION_LABELS,
+    horizontal=True,
+    key="home_section",
 )
 
-with tab_model:
+if selected_home_section == "\u6a21\u578b\u6307\u6807":
     st.subheader("一、模型与数据状态")
 
     if selected_backend == "dft_unet_external":
@@ -1529,10 +1932,10 @@ with tab_model:
     # ============================================================
 
 
-with tab_model_search:
-    render_model_search_page()
+if selected_home_section == "\u6a21\u578b\u641c\u7d22\u4e0e\u56de\u6d4b":
+    _get_model_search_page_renderer()()
 
-with tab_home:
+if selected_home_section == "\u9996\u9875 / \u9884\u6d4b\u6392\u540d":
     st.subheader("二、预测下一交易日股票排名")
     st.caption(prediction_scope_text)
 
@@ -1690,7 +2093,7 @@ with tab_home:
     # 四、个股走势
     # ============================================================
 
-with tab_stock:
+if selected_home_section == "\u4e2a\u80a1\u8be6\u60c5":
     st.subheader("五、个股走势查看")
 
     if os.path.exists(LATEST_RAW_DATA_PATH):
@@ -1859,7 +2262,7 @@ with tab_stock:
 
                 if st.button("检索资料", key=f"rag_search_{selected_code}"):
                     try:
-                        rag_results = retrieve_stock_context(
+                        rag_results = cached_retrieve_stock_context(
                             code=selected_code,
                             query=rag_query,
                             top_k=int(rag_top_k),
@@ -1897,14 +2300,7 @@ with tab_stock:
                 rag_results_for_prompt = st.session_state.get(rag_state_key)
 
                 if rag_results_for_prompt is None:
-                    try:
-                        rag_results_for_prompt = retrieve_stock_context(
-                            code=selected_code,
-                            query=rag_query,
-                            top_k=int(rag_top_k),
-                        )
-                    except Exception:
-                        rag_results_for_prompt = pd.DataFrame()
+                    rag_results_for_prompt = pd.DataFrame()
 
                 risk_detail_for_prompt = {
                     "risk_detail": parse_detail_json(latest_info.get("risk_detail")),
@@ -1913,6 +2309,18 @@ with tab_stock:
                 prompt_state_key = f"editable_prompt_{selected_code}"
 
                 if st.button("生成 Prompt", key=f"generate_prompt_{selected_code}"):
+                    if rag_results_for_prompt.empty and ENABLE_RAG:
+                        try:
+                            rag_results_for_prompt = cached_retrieve_stock_context(
+                                code=selected_code,
+                                query=rag_query,
+                                top_k=int(rag_top_k),
+                            )
+                            st.session_state[rag_state_key] = rag_results_for_prompt
+                        except Exception as e:
+                            st.warning(f"RAG data is unavailable in this runtime: {e}")
+                            rag_results_for_prompt = pd.DataFrame()
+
                     st.session_state[prompt_state_key] = build_stock_explanation_prompt(
                         ranking_row=latest_info,
                         rag_results=rag_results_for_prompt,
@@ -1959,7 +2367,7 @@ with tab_stock:
     # 六、基础回测分析
     # ============================================================
 
-with tab_backtest:
+if selected_home_section == "\u56de\u6d4b\u5206\u6790":
     st.subheader("六、基础 T+1 回测分析")
     st.warning(
         "本回测仅用于模型评估和项目展示，不构成投资建议，不用于实盘交易。"
@@ -2025,8 +2433,6 @@ with tab_backtest:
     backtest_metrics_backend = ""
     if backtest_metrics:
         backtest_metrics_backend = backtest_metrics.get("model_backend", "")
-        if not backtest_metrics_backend and backtest_metrics.get("model_name") == "torch_mlp":
-            backtest_metrics_backend = "torch_mlp_alpha158"
         if not backtest_metrics_backend and backtest_metrics.get("model_name") == "dft_unet_external":
             backtest_metrics_backend = "dft_unet_external"
         if (
@@ -2247,7 +2653,7 @@ with tab_backtest:
     else:
         st.info("暂无回测结果。")
 
-with tab_news:
+if selected_home_section == "\u65b0\u95fb\u4e8b\u4ef6":
     st.subheader("\u65b0\u95fb\u4e8b\u4ef6")
     st.caption("\u5c55\u793a\u672c\u5730\u7f13\u5b58\u4e2d\u7684\u65b0\u95fb/\u516c\u544a\u4e8b\u4ef6\uff0c\u4e0d\u89e6\u53d1\u8054\u7f51\u4e0b\u8f7d\u3002")
 
@@ -2377,7 +2783,7 @@ with tab_news:
             st.dataframe(show_events_all, width="stretch")
 
 
-with tab_rag:
+if selected_home_section == "RAG \u68c0\u7d22":
     st.subheader("RAG \u68c0\u7d22")
     st.caption("\u4ece\u672c\u5730\u65b0\u95fb/\u516c\u544a\u7f13\u5b58\u4e2d\u68c0\u7d22\u8d44\u6599\uff0c\u53ea\u8fd4\u56de\u4f9d\u636e\uff0c\u4e0d\u53c2\u4e0e\u6a21\u578b\u9884\u6d4b\u3002")
 
@@ -2408,7 +2814,7 @@ with tab_rag:
     if st.button("\u68c0\u7d22", key="rag_page_search"):
         try:
             rag_page_code = ranking.loc[ranking["name"].astype(str) == rag_page_stock, "code"].iloc[0]
-            rag_page_results = retrieve_stock_context(
+            rag_page_results = cached_retrieve_stock_context(
                 code=str(rag_page_code).zfill(6),
                 query=rag_page_query,
                 top_k=int(rag_page_topk),
@@ -2434,7 +2840,7 @@ with tab_rag:
             st.error(f"RAG \u68c0\u7d22\u5931\u8d25\uff1a{e}")
 
 
-with tab_ai:
+if selected_home_section == "AI \u89e3\u91ca":
     st.subheader("AI \u89e3\u91ca")
     st.warning("\u8c03\u7528\u5df2\u914d\u7f6e\u7684 AI \u63a5\u53e3\u751f\u6210\u89e3\u91ca\uff0c\u4ec5\u7528\u4e8e\u673a\u5668\u5b66\u4e60\u548c\u6570\u636e\u5206\u6790\u5c55\u793a\uff0c\u4e0d\u6784\u6210\u6295\u8d44\u5efa\u8bae\u3002")
 
@@ -2465,13 +2871,12 @@ with tab_ai:
     try:
         ai_row = ranking[ranking["name"].astype(str) == ai_stock].iloc[0]
         ai_code = str(ai_row["code"]).zfill(6)
-        ai_rag_results = retrieve_stock_context(
-            code=ai_code,
-            query=ai_query,
-            top_k=int(ai_topk),
-        )
     except Exception:
         ai_row = None
+        ai_code = ""
+
+    ai_rag_results = st.session_state.get("ai_page_rag_results")
+    if ai_rag_results is None:
         ai_rag_results = pd.DataFrame()
 
     if ai_row is not None:
@@ -2487,6 +2892,18 @@ with tab_ai:
         }
 
         if st.button("\u751f\u6210 Prompt", key="ai_page_generate_prompt"):
+            ai_rag_results = pd.DataFrame()
+            if ENABLE_RAG:
+                try:
+                    ai_rag_results = cached_retrieve_stock_context(
+                        code=ai_code,
+                        query=ai_query,
+                        top_k=int(ai_topk),
+                    )
+                    st.session_state["ai_page_rag_results"] = ai_rag_results
+                except Exception as e:
+                    st.warning(f"RAG data is unavailable in this runtime: {e}")
+
             st.session_state["ai_page_prompt_text"] = build_stock_explanation_prompt(
                 ranking_row=ai_row,
                 rag_results=ai_rag_results,
@@ -2525,7 +2942,7 @@ with tab_ai:
                     st.markdown(ai_text)
 
 
-with tab_settings:
+if selected_home_section == "\u7cfb\u7edf\u8bbe\u7f6e":
     st.subheader("\u7cfb\u7edf\u8bbe\u7f6e")
 
     rag_ready = os.path.exists(RAG_DOCUMENTS_PATH) and os.path.exists(RAG_INDEX_PATH)

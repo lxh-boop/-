@@ -1,0 +1,6 @@
+rule_id,event_keyword,affected_industry,relation_type,impact_direction,base_strength,description
+rule_lithium_price_down_battery,锂价下跌,动力电池,下游,positive,0.65,锂价下跌可能缓解动力电池成本压力
+rule_lithium_price_down_mining,锂价下跌,锂矿,上游,negative,0.80,锂价下跌可能压缩锂矿企业盈利
+rule_oil_price_up_energy,油价上涨,石油开采,上游,positive,0.70,油价上涨可能改善石油开采企业收入
+rule_oil_price_up_airline,油价上涨,航空,下游,negative,0.60,油价上涨可能抬升航空燃油成本
+rule_rate_cut_real_estate,利率下调,地产,宏观政策,positive,0.50,利率下调可能改善地产融资和需求预期

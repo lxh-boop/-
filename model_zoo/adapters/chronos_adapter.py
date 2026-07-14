@@ -155,6 +155,115 @@ class ChronosAdapter(ExternalTimeSeriesModelAdapter):
         out = self.merge_future_labels(out, feature_data)
         return out.sort_values(["date", "score"], ascending=[True, False]).reset_index(drop=True)
 
+
+    def fine_tune(self, raw_data, feature_data=None, epochs=1, lr=1e-5, save_path=None):
+        """
+        Fine-tune the Chronos model on the latest labeled data.
+        Uses future_5d_ret from feature_data as training targets.
+        """
+        if not self.loaded:
+            self.load()
+
+        import torch
+        from torch.utils.data import DataLoader, TensorDataset
+        from model_zoo.ohlcv_windows import build_windows, UNIVARIATE_RETURN_COL
+
+        # Get dates with labels
+        if feature_data is None or feature_data.empty or "future_5d_ret" not in feature_data.columns:
+            return {"fine_tuned": False, "reason": "No labeled data available"}
+
+        label_data = feature_data.dropna(subset=["future_5d_ret"]).copy()
+        if label_data.empty:
+            return {"fine_tuned": False, "reason": "No labels in feature data"}
+
+        # Build windows for labeled dates (these dates have known future_5d_ret)
+        data = self.normalize_raw_data(raw_data)
+        label_dates = sorted(pd.to_datetime(label_data["date"]).unique())
+        batch = build_windows(
+            raw_data=data,
+            prediction_dates=label_dates,
+            context_length=self.context_length,
+            min_context=min(32, self.context_length),
+            feature_columns=[UNIVARIATE_RETURN_COL],
+        )
+
+        if not batch.windows:
+            return {"fine_tuned": False, "reason": "No valid context windows"}
+
+        # Prepare tensors
+        contexts = [w[:, 0].astype(np.float32) for w in batch.windows]
+        targets = []
+        for row in batch.rows:
+            d = pd.to_datetime(row["date"])
+            label_row = label_data[pd.to_datetime(label_data["date"]) == d]
+            if not label_row.empty:
+                targets.append(float(label_row["future_5d_ret"].iloc[0]))
+            else:
+                targets.append(0.0)
+
+        context_tensors = torch.tensor(np.stack(contexts), dtype=torch.float32)
+        target_tensors = torch.tensor(targets, dtype=torch.float32).unsqueeze(1)
+
+        dataset = TensorDataset(context_tensors, target_tensors)
+        dataloader = DataLoader(dataset, batch_size=min(32, len(dataset)), shuffle=True)
+
+        # Set model to train mode
+        self.pipeline.model.train()
+        optimizer = torch.optim.AdamW(self.pipeline.model.parameters(), lr=lr)
+        loss_fn = torch.nn.MSELoss()
+
+        total_samples = len(dataset)
+        final_loss = 0.0
+
+        for epoch in range(epochs):
+            epoch_loss = 0.0
+            for batch_ctx, batch_target in dataloader:
+                optimizer.zero_grad()
+                # Forward pass: use predict with gradient tracking trick
+                # We need gradients; attempt to get forecast
+                try:
+                    # Some chronos versions support return_dict or training mode
+                    if hasattr(self.pipeline, "model"):
+                        with torch.set_grad_enabled(True):
+                            forecast = self.pipeline.predict(
+                                inputs=list(batch_ctx),
+                                prediction_length=self.prediction_length,
+                            )
+                    else:
+                        # Fallback: skip fine-tuning if predict doesn't support grad
+                        return {"fine_tuned": False, "reason": "Training mode not supported"}
+                except Exception:
+                    return {"fine_tuned": False, "reason": "Training failed during forward"}
+
+                # Compute loss: compare forecast (compounded) to target return
+                if hasattr(forecast, "detach"):
+                    pred_ret = self._forecast_to_pred_ret(forecast)
+                    pred_tensor = torch.tensor(pred_ret, dtype=torch.float32)
+                else:
+                    pred_tensor = torch.tensor(np.asarray(forecast, dtype=np.float32))
+
+                loss = loss_fn(pred_tensor.view(-1, 1), batch_target.view(-1, 1))
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.pipeline.model.parameters(), 1.0)
+                optimizer.step()
+                epoch_loss += loss.item()
+
+            final_loss = epoch_loss / max(len(dataloader), 1)
+
+        # Save fine-tuned model
+        if save_path:
+            save_dir = Path(save_path).parent
+            save_dir.mkdir(parents=True, exist_ok=True)
+            torch.save(self.pipeline.model.state_dict(), save_path)
+
+        return {
+            "fine_tuned": True,
+            "epochs": epochs,
+            "final_loss": round(final_loss, 6),
+            "samples": total_samples,
+            "save_path": str(save_path) if save_path else None,
+        }
+
     def predict(self, raw_data, feature_data=None):
         data = self.normalize_raw_data(raw_data)
         latest_date = pd.to_datetime(data["date"].max())

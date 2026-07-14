@@ -14,7 +14,7 @@ def create_kline_models(model_name: str):
     1. 回归模型：预测 future_5d_ret
     2. 分类模型：预测 future_5d_up
 
-    daily_update.py 不直接关心具体模型细节。
+    每日更新流程不直接关心具体模型细节。
     """
 
     model_name = model_name.lower().strip()
@@ -115,6 +115,6 @@ def create_kline_models(model_name: str):
 def model_supports_predict_proba(cls_model):
     """
     检查分类模型是否支持 predict_proba。
-    如果后面换成某些模型不支持 predict_proba，可以在 daily_update.py 里做兼容。
+    如果后面换成某些模型不支持 predict_proba，可以在每日更新流程里做兼容。
     """
     return hasattr(cls_model, "predict_proba")

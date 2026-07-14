@@ -1,6 +1,7 @@
 import os
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, time as datetime_time, timedelta
 
 import numpy as np
@@ -61,6 +62,75 @@ def validate_tushare_token(token: str) -> tuple[bool, str]:
 
     except Exception as e:
         return False, f"连接失败：{e}"
+
+
+def _format_trade_date_text(value: str) -> str:
+    text = str(value or "").replace("-", "")[:8]
+    if len(text) != 8:
+        return str(value or "")
+    return f"{text[:4]}-{text[4:6]}-{text[6:8]}"
+
+
+def build_market_data_window(
+    pro,
+    now: datetime | None = None,
+    exchange: str = "SSE",
+) -> dict:
+    now = now or datetime.now()
+    today = now.strftime("%Y%m%d")
+    start_date = (now - timedelta(days=60)).strftime("%Y%m%d")
+    end_date = (now + timedelta(days=60)).strftime("%Y%m%d")
+    cal = pro.trade_cal(
+        exchange=exchange,
+        start_date=start_date,
+        end_date=end_date,
+        is_open="1",
+        fields="cal_date,is_open",
+    )
+    if cal is None or cal.empty:
+        raise RuntimeError("无法从 Tushare trade_cal 获取交易日历。")
+
+    trade_dates = (
+        cal[cal["is_open"].astype(str) == "1"]["cal_date"]
+        .astype(str)
+        .sort_values()
+        .tolist()
+    )
+    if not trade_dates:
+        raise RuntimeError("Tushare trade_cal 未返回开市交易日。")
+
+    is_trade_day = today in trade_dates
+    previous_dates = [date for date in trade_dates if date < today]
+    next_dates = [date for date in trade_dates if date > today]
+
+    if is_trade_day and now.time() >= A_SHARE_DAILY_DATA_READY_TIME:
+        expected_signal_date = today
+        data_status = "after_close_expect_today"
+        target_candidates = [date for date in trade_dates if date > expected_signal_date]
+    elif is_trade_day:
+        if not previous_dates:
+            raise RuntimeError("交易日历中没有上一交易日。")
+        expected_signal_date = previous_dates[-1]
+        data_status = "before_close_or_data_ready"
+        target_candidates = [today]
+    else:
+        if not previous_dates:
+            raise RuntimeError("交易日历中没有最近已完成交易日。")
+        expected_signal_date = previous_dates[-1]
+        data_status = "non_trading_day"
+        target_candidates = next_dates
+
+    if not target_candidates:
+        target_candidates = [date for date in trade_dates if date > expected_signal_date]
+    if not target_candidates:
+        raise RuntimeError("交易日历中没有下一交易日。")
+
+    return {
+        "data_status": data_status,
+        "expected_signal_date": _format_trade_date_text(expected_signal_date),
+        "prediction_target_date": _format_trade_date_text(target_candidates[0]),
+        "ready_time": A_SHARE_DAILY_DATA_READY_TIME.strftime("%H:%M"),
+    }
 
 
 def format_code(code) -> str:
@@ -189,6 +259,95 @@ def get_recent_trade_dates(
     raise RuntimeError("没有获取到足够的最近交易日，请检查 Tushare trade_cal 接口。")
 
 
+def _resolve_daily_fetch_workers(max_workers: int | None, task_count: int) -> int:
+    if task_count <= 0:
+        return 1
+    if max_workers is None:
+        env_value = os.environ.get("TUSHARE_DAILY_FETCH_WORKERS", "").strip()
+        if env_value:
+            try:
+                max_workers = int(float(env_value))
+            except ValueError:
+                max_workers = None
+    if max_workers is None:
+        max_workers = min(4, task_count)
+    return max(1, min(int(max_workers), task_count))
+
+
+def _fetch_one_trade_date_daily_fast(
+    token: str,
+    trade_date: str,
+    ts_codes: set[str],
+    include_turnover: bool,
+    include_adj_factor: bool,
+    max_retries: int,
+) -> tuple[str, pd.DataFrame, str]:
+    pro = init_tushare_pro(token)
+    last_error = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            df = pro.daily(
+                trade_date=trade_date,
+                fields=(
+                    "ts_code,trade_date,open,high,low,close,"
+                    "pct_chg,vol,amount"
+                ),
+            )
+
+            if df is None or df.empty:
+                return trade_date, pd.DataFrame(), "empty_daily"
+
+            df = df[df["ts_code"].isin(ts_codes)].copy()
+            if df.empty:
+                return trade_date, pd.DataFrame(), "empty_stock_pool"
+
+            if include_turnover:
+                try:
+                    basic = pro.daily_basic(
+                        trade_date=trade_date,
+                        fields="ts_code,trade_date,turnover_rate",
+                    )
+
+                    if basic is not None and not basic.empty:
+                        df = df.merge(
+                            basic,
+                            on=["ts_code", "trade_date"],
+                            how="left",
+                        )
+                except Exception as e:
+                    print(f"[Warning] daily_basic failed, trade_date={trade_date}: {e}")
+
+            if include_adj_factor:
+                try:
+                    adj = pro.adj_factor(
+                        trade_date=trade_date,
+                        fields="ts_code,trade_date,adj_factor",
+                    )
+
+                    if adj is not None and not adj.empty:
+                        df = df.merge(
+                            adj,
+                            on=["ts_code", "trade_date"],
+                            how="left",
+                        )
+                except Exception as e:
+                    print(f"[Warning] adj_factor failed, trade_date={trade_date}: {e}")
+
+            return trade_date, df, "ok"
+
+        except Exception as e:
+            last_error = e
+            wait_seconds = 1.0 + attempt * 1.5 + random.random()
+            print(
+                f"[Retry {attempt}/{max_retries}] "
+                f"trade_date={trade_date} failed: {e}"
+            )
+            time.sleep(wait_seconds)
+
+    return trade_date, pd.DataFrame(), f"failed:{last_error}"
+
+
 def fetch_stock_pool_recent_daily_fast(
     token: str,
     stock_pool: dict | None = None,
@@ -196,6 +355,7 @@ def fetch_stock_pool_recent_daily_fast(
     end_date: str | None = None,
     include_adj_factor: bool = False,
     include_turnover: bool = True,
+    max_workers: int | None = None,
     max_retries: int = 3,
     sleep_seconds: float = 0.2,
 ) -> pd.DataFrame:
@@ -227,81 +387,71 @@ def fetch_stock_pool_recent_daily_fast(
     print(f"[Fetch Fast] recent trade dates = {trade_dates}")
     print(f"[Fetch Fast] stock pool size = {len(ts_codes)}")
 
-    all_data = []
+    worker_count = _resolve_daily_fetch_workers(max_workers, len(trade_dates))
+    print(f"[Fetch Fast] parallel workers = {worker_count}")
 
-    for i, trade_date in enumerate(trade_dates, start=1):
-        print(f"[Fetch Fast] {i}/{len(trade_dates)} trade_date={trade_date}")
-        last_error = None
+    fetched_by_date: dict[str, pd.DataFrame] = {}
 
-        for attempt in range(1, max_retries + 1):
-            try:
-                df = pro.daily(
-                    trade_date=trade_date,
-                    fields=(
-                        "ts_code,trade_date,open,high,low,close,"
-                        "pct_chg,vol,amount"
-                    ),
-                )
+    if worker_count <= 1:
+        for i, trade_date in enumerate(trade_dates, start=1):
+            print(f"[Fetch Fast] {i}/{len(trade_dates)} trade_date={trade_date}")
+            date, df, status = _fetch_one_trade_date_daily_fast(
+                token=token,
+                trade_date=trade_date,
+                ts_codes=ts_codes,
+                include_turnover=include_turnover,
+                include_adj_factor=include_adj_factor,
+                max_retries=max_retries,
+            )
+            if status == "ok" and not df.empty:
+                fetched_by_date[date] = df
+                print(f"[OK][Fetch Fast] trade_date={date}, rows={len(df)}")
+            else:
+                print(f"[Warning][Fetch Fast] trade_date={date}, status={status}")
 
-                if df is None or df.empty:
-                    print(f"[Warning] pro.daily empty, trade_date={trade_date}")
-                    break
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_map = {
+                executor.submit(
+                    _fetch_one_trade_date_daily_fast,
+                    token,
+                    trade_date,
+                    ts_codes,
+                    include_turnover,
+                    include_adj_factor,
+                    max_retries,
+                ): trade_date
+                for trade_date in trade_dates
+            }
+            completed = 0
+            for future in as_completed(future_map):
+                requested_date = future_map[future]
+                completed += 1
+                try:
+                    date, df, status = future.result()
+                except Exception as e:
+                    print(f"[Error][Fetch Fast] trade_date={requested_date}, failed: {e}")
+                    continue
 
-                df = df[df["ts_code"].isin(ts_codes)].copy()
+                if status == "ok" and not df.empty:
+                    fetched_by_date[date] = df
+                    print(
+                        f"[OK][Fetch Fast] {completed}/{len(trade_dates)} "
+                        f"trade_date={date}, rows={len(df)}"
+                    )
+                else:
+                    print(
+                        f"[Warning][Fetch Fast] {completed}/{len(trade_dates)} "
+                        f"trade_date={date}, status={status}"
+                    )
 
-                if df.empty:
-                    print(f"[Warning] no stock pool rows, trade_date={trade_date}")
-                    break
-
-                if include_turnover:
-                    try:
-                        basic = pro.daily_basic(
-                            trade_date=trade_date,
-                            fields="ts_code,trade_date,turnover_rate",
-                        )
-
-                        if basic is not None and not basic.empty:
-                            df = df.merge(
-                                basic,
-                                on=["ts_code", "trade_date"],
-                                how="left",
-                            )
-                    except Exception as e:
-                        print(f"[Warning] daily_basic failed, trade_date={trade_date}: {e}")
-
-                if include_adj_factor:
-                    try:
-                        adj = pro.adj_factor(
-                            trade_date=trade_date,
-                            fields="ts_code,trade_date,adj_factor",
-                        )
-
-                        if adj is not None and not adj.empty:
-                            df = df.merge(
-                                adj,
-                                on=["ts_code", "trade_date"],
-                                how="left",
-                            )
-                    except Exception as e:
-                        print(f"[Warning] adj_factor failed, trade_date={trade_date}: {e}")
-
-                all_data.append(df)
-                print(f"[OK][Fetch Fast] trade_date={trade_date}, rows={len(df)}")
-                break
-
-            except Exception as e:
-                last_error = e
-                wait_seconds = 1.0 + attempt * 1.5 + random.random()
-                print(
-                    f"[Retry {attempt}/{max_retries}] "
-                    f"trade_date={trade_date} failed: {e}"
-                )
-                time.sleep(wait_seconds)
-        else:
-            print(f"[Error] trade_date={trade_date} final failed: {last_error}")
-
-        if sleep_seconds > 0:
-            time.sleep(sleep_seconds)
+    all_data = [
+        fetched_by_date[trade_date]
+        for trade_date in trade_dates
+        if trade_date in fetched_by_date
+    ]
 
     if not all_data:
         raise RuntimeError("没有获取到任何最近日线数据。")

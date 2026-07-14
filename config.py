@@ -1,5 +1,21 @@
 import os
 
+from core.config.paths import (
+    ensure_runtime_directories,
+    get_config_dir,
+    get_data_dir,
+    get_database_dir,
+    get_logs_dir,
+    get_models_dir,
+    get_outputs_dir,
+    get_runtime_dir,
+    is_frozen_app,
+)
+
+
+def _mode_path(path, dev_value: str) -> str:
+    return str(path) if is_frozen_app() else dev_value
+
 
 # ============================================================
 # 股票池设置
@@ -60,6 +76,16 @@ EPS = 1e-12
 # 第一版只做标题级关键词规则；接口失败时自动退化为全 0 特征。
 ENABLE_NEWS_FEATURES = True
 NEWS_EVENT_LOOKBACK_DAYS = 5
+ENABLE_AKSHARE_NEWS_FALLBACK = True
+AKSHARE_FETCH_ANNOUNCEMENTS = True
+AKSHARE_FETCH_STOCK_NEWS = True
+AKSHARE_NOTICE_RECENT_PAGES = 20
+AKSHARE_NOTICE_MAX_DAYS = 10
+AKSHARE_STOCK_NEWS_MAX_CODES = 300
+AKSHARE_REQUEST_SLEEP_SECONDS = 0.05
+AKSHARE_FETCH_WORKERS = 4
+ENABLE_COLD_START_NEWS_ADJUSTMENT = True
+COLD_START_NEWS_RELIABILITY_WEIGHT = 1.0
 ENABLE_RAG = True
 ENABLE_LLM_EXPLAINER = True
 
@@ -103,27 +129,22 @@ CONFIDENCE_MEDIUM_THRESHOLD = 0.45
 
 
 # ============================================================
-# PyTorch 模型参数
+# 当前默认模型
 # ============================================================
 
-MODEL_NAME = "torch_mlp"
-
-TORCH_EPOCHS = 50
-TORCH_BATCH_SIZE = 256
-TORCH_LR = 1e-3
-TORCH_WEIGHT_DECAY = 1e-4
-TORCH_PATIENCE = 8
-TORCH_DROPOUT = 0.2
-TORCH_HIDDEN_DIMS = [256, 128, 64]
+MODEL_NAME = "chronos_bolt_small"
 
 
 # ============================================================
 # 路径
 # ============================================================
 
-DATA_DIR = "data"
-MODEL_DIR = "models"
-OUTPUT_DIR = "outputs"
+DATA_DIR = _mode_path(get_data_dir(), "data")
+MODEL_DIR = _mode_path(get_models_dir(), "models")
+OUTPUT_DIR = _mode_path(get_outputs_dir(), "outputs")
+LOG_DIR = _mode_path(get_logs_dir(), "logs")
+RUNTIME_DIR = _mode_path(get_runtime_dir(), "runtime")
+CONFIG_DIR = _mode_path(get_config_dir(), ".")
 AI_EXPLANATION_DIR = os.path.join(OUTPUT_DIR, "ai_explanations")
 DFT_UNET_MODEL_DIR = os.path.join(MODEL_DIR, DFT_UNET_MODEL_NAME)
 DFT_UNET_BASE_DIR = os.path.join(DFT_UNET_MODEL_DIR, "base")
@@ -160,6 +181,7 @@ METRICS_PATH = os.path.join(MODEL_DIR, "metrics.pkl")
 
 
 def ensure_dirs():
+    ensure_runtime_directories()
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(MODEL_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -177,3 +199,13 @@ QLIB_PROVIDER_URI = r"D:\qlib_data\cn_data"
 
 # 如果你不用 Qlib，也可以准备一个本地 CSV
 LOCAL_TRAIN_CSV_PATH = r"data\local_train_stock_data.csv"
+
+
+# Paper trading defaults
+DEFAULT_INITIAL_CASH = 150000.0
+DEFAULT_PAPER_TRADING_START_DATE = "2026-04-01"
+AGENT_QUANT_DB_PATH = (
+    str(get_database_dir() / "agent_quant.db")
+    if is_frozen_app()
+    else os.path.join(DATA_DIR, "agent_quant.db")
+)
