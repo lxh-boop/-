@@ -37,6 +37,11 @@ def create_paper_order(
     net_cash_change: float | None = None,
     applied_buy_cost_rate: float | None = None,
     applied_sell_cost_rate: float | None = None,
+    strategy_id: str = "",
+    strategy_version: str = "",
+    binding_id: str = "",
+    config_hash: str = "",
+    resolved_config: dict | None = None,
 ) -> PaperOrder:
     if action not in VALID_ACTIONS:
         raise ValueError(f"invalid paper order action: {action}")
@@ -88,6 +93,11 @@ def create_paper_order(
         job_id=job_id,
         run_id=run_id,
         execution_source=execution_source,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        binding_id=binding_id,
+        config_hash=config_hash,
+        resolved_config=dict(resolved_config or {}),
         is_paper_trading=True,
         created_at=now_text(),
     )

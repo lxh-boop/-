@@ -58,6 +58,13 @@ SENSITIVE_CHECKPOINT_KEYS = {
     "secret",
 }
 
+# LLM token/call quotas are intentionally disabled by default.  They used to
+# turn a recoverable provider delay or a long explanatory response into a
+# synthetic ``feature unavailable`` result.  This switch affects only model
+# token/call accounting: tool, step, timeout, retry, write-confirmation and
+# Replan limits remain enforced independently.
+ENABLE_LLM_BUDGET_LIMITS = False
+
 
 class RuntimeTimeoutError(TimeoutError):
     pass
@@ -80,10 +87,11 @@ class RuntimePolicy:
     max_run_steps: int = 30
     max_replan_count: int = 2
     max_tool_calls: int = 40
-    soft_token_budget: int = 12000
-    hard_token_budget: int = 16000
-    soft_llm_call_budget: int = 6
-    hard_llm_call_budget: int = 8
+    soft_token_budget: int | None = None
+    hard_token_budget: int | None = None
+    soft_llm_call_budget: int | None = None
+    hard_llm_call_budget: int | None = None
+    enable_llm_budget_limits: bool = ENABLE_LLM_BUDGET_LIMITS
     circuit_failure_threshold: int = 3
     circuit_recovery_seconds: float = 30.0
     recoverable_error_types: set[str] = field(default_factory=lambda: set(RECOVERABLE_ERROR_TYPES))
@@ -225,15 +233,19 @@ class RuntimeBudget:
                 raise RuntimeBudgetExceeded("budget_exceeded:max_tool_calls")
 
     def ensure_can_start_llm(self, *, additional_tokens: int = 0) -> None:
-        """Guard a paid model call using only actual/estimated LLM usage."""
+        """Guard a model call only when the optional quota policy is enabled."""
         additional = max(0, int(additional_tokens or 0))
         with self._lock:
             self._refresh_flags_unlocked()
-            if self.llm_calls >= int(self.policy.hard_llm_call_budget):
+            if not self.policy.enable_llm_budget_limits:
+                return
+            call_limit = self.policy.hard_llm_call_budget
+            token_limit = self.policy.hard_token_budget
+            if call_limit is not None and self.llm_calls >= int(call_limit):
                 self.hard_llm_budget_triggered = True
                 self.hard_budget_triggered = True
                 raise RuntimeBudgetExceeded("budget_exceeded:hard_llm_call_budget")
-            if self.token_estimate + additional > int(self.policy.hard_token_budget):
+            if token_limit is not None and self.token_estimate + additional > int(token_limit):
                 self.hard_llm_budget_triggered = True
                 self.hard_budget_triggered = True
                 raise RuntimeBudgetExceeded("budget_exceeded:hard_token_budget")
@@ -262,13 +274,24 @@ class RuntimeBudget:
         self.hard_tool_budget_triggered = (
             self.tool_calls >= int(self.policy.max_tool_calls)
         )
-        self.soft_llm_budget_triggered = (
-            self.token_estimate >= int(self.policy.soft_token_budget)
-            or self.llm_calls >= int(self.policy.soft_llm_call_budget)
+        llm_limits_enabled = bool(self.policy.enable_llm_budget_limits)
+        soft_token_limit = self.policy.soft_token_budget
+        soft_call_limit = self.policy.soft_llm_call_budget
+        hard_token_limit = self.policy.hard_token_budget
+        hard_call_limit = self.policy.hard_llm_call_budget
+        self.soft_llm_budget_triggered = bool(
+            llm_limits_enabled
+            and (
+                (soft_token_limit is not None and self.token_estimate >= int(soft_token_limit))
+                or (soft_call_limit is not None and self.llm_calls >= int(soft_call_limit))
+            )
         )
-        self.hard_llm_budget_triggered = (
-            self.token_estimate >= int(self.policy.hard_token_budget)
-            or self.llm_calls >= int(self.policy.hard_llm_call_budget)
+        self.hard_llm_budget_triggered = bool(
+            llm_limits_enabled
+            and (
+                (hard_token_limit is not None and self.token_estimate >= int(hard_token_limit))
+                or (hard_call_limit is not None and self.llm_calls >= int(hard_call_limit))
+            )
         )
         self.soft_budget_triggered = (
             self.soft_tool_budget_triggered or self.soft_llm_budget_triggered
@@ -303,6 +326,7 @@ class RuntimeBudget:
                 "hard_token_budget": self.policy.hard_token_budget,
                 "soft_llm_call_budget": self.policy.soft_llm_call_budget,
                 "hard_llm_call_budget": self.policy.hard_llm_call_budget,
+                "llm_budget_limits_enabled": bool(self.policy.enable_llm_budget_limits),
             }
 
 

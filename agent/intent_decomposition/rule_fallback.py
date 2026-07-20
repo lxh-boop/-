@@ -50,7 +50,12 @@ def extract_rule_hints(query: str) -> RuleHints:
     return RuleHints(hints=hints, explicit_entities=_extract_entities(text), warnings=[])
 
 
-def decompose_with_rules(query: str, *, warning: str = "") -> IntentDecomposition:
+def decompose_with_rules(
+    query: str,
+    *,
+    warning: str = "",
+    context: dict[str, Any] | None = None,
+) -> IntentDecomposition:
     """Deterministic fallback for registered Agent capabilities.
 
     The fallback only creates read tasks, clarification tasks, or confirmation-
@@ -60,7 +65,10 @@ def decompose_with_rules(query: str, *, warning: str = "") -> IntentDecompositio
 
     text = str(query or "").strip()
     hints = extract_rule_hints(text)
-    tasks, goal_payload, clarification = _deterministic_plan(text)
+    tasks, goal_payload, clarification = _deterministic_plan(
+        text,
+        context=context,
+    )
     warnings = [warning] if warning else []
     diagnostics = {
         "rule_hints": hints.to_dict(),
@@ -99,7 +107,7 @@ def decompose_with_rules(query: str, *, warning: str = "") -> IntentDecompositio
         task_plan=TaskPlan.from_dict(
             {
                 "tasks": [task.to_dict() for task in tasks],
-                "requires_write": any(task.intent in {"one_time_position_operation", "strategy_change", "capital_management", "backfill"} for task in tasks),
+                "requires_write": any(task.intent in {"one_time_position_operation", "capital_management", "backfill"} for task in tasks),
                 "confidence": confidence,
                 "reason_summary": "deterministic_registered_capability_fallback",
                 "completion_contract": {"must_produce": goal_payload.get("expected_outputs") or []},
@@ -173,10 +181,19 @@ def _stock_codes(text: str) -> list[str]:
     return list(dict.fromkeys(re.findall(r"(?<!\d)(\d{6})(?!\d)", text)))
 
 
-def _deterministic_plan(text: str) -> tuple[list[IntentTask], dict[str, Any], str]:
+def _deterministic_plan(
+    text: str,
+    *,
+    context: dict[str, Any] | None = None,
+) -> tuple[list[IntentTask], dict[str, Any], str]:
     from agent.parameter_extractor import extract_parameters
 
     params = extract_parameters(text)
+    ranking_parameters = (
+        {"top_k": params["top_k"]}
+        if params.get("top_k") not in (None, "")
+        else {}
+    )
     codes = _stock_codes(text)
     has_portfolio = _has_any(text, ["持仓", "组合", "模拟盘", "账户", "资产", "portfolio", "position", "holding", "account"])
     has_risk = _has_any(text, ["风险", "回撤", "集中", "稳健", "risk", "drawdown", "stable", "robust"])
@@ -218,10 +235,25 @@ def _deterministic_plan(text: str) -> tuple[list[IntentTask], dict[str, Any], st
         )
         if not direct_execution_language:
             explicit_write = False
-    strategy_change = _has_any(text, ["以后", "今后", "后续", "长期", "每次", "从现在开始", "从下次", "策略"])
+    strategy_context = dict(
+        (context or {}).get("strategy_conversation_context") or {}
+    )
+    active_proposal = dict(strategy_context.get("active_proposal") or {})
+    strategy_change = bool(active_proposal) or _has_any(
+        text,
+        ["以后", "今后", "后续", "长期", "每次", "从现在开始", "从下次", "策略"],
+    )
 
     if strategy_change:
-        parameters = {**params, "query": text, "operation_type": "strategy_change"}
+        parameters = {
+            **params,
+            "query": text,
+            "operation_type": "strategy_change",
+            "conversation_action": "llm_unavailable",
+            "proposal_id": str(active_proposal.get("proposal_id") or ""),
+            "original_request": text,
+            "user_feedback": text,
+        }
         task = _task(
             "task_1",
             "strategy_change",
@@ -229,15 +261,15 @@ def _deterministic_plan(text: str) -> tuple[list[IntentTask], dict[str, Any], st
             operation_type="strategy_change",
             persistent=True,
             apply_now=False,
-            reason="confirmation_required_strategy_change_preview",
+            reason="llm_unavailable_keep_strategy_draft",
         )
         return [task], _goal(
             text,
-            action="preview_strategy_change",
+            action="keep_strategy_draft",
             objects=["paper_strategy"],
-            expected_outputs=["confirmation_required_strategy_proposal"],
+            expected_outputs=["strategy_proposal_draft"],
             requires_current_state=True,
-            requires_write=True,
+            requires_write=False,
         ), ""
 
     if _has_any(text, ["按这个方案执行", "确认执行", "执行这个方案"]) and not params.get("plan_id"):
@@ -264,7 +296,7 @@ def _deterministic_plan(text: str) -> tuple[list[IntentTask], dict[str, Any], st
         tasks = [
             _task("task_1", "portfolio_state"),
             _task("task_2", "portfolio_risk", depends_on=["task_1"]),
-            _task("task_3", "ranking", parameters={"top_k": 10}),
+            _task("task_3", "ranking", parameters=ranking_parameters),
         ]
         return tasks, _goal(
             text,
@@ -317,7 +349,7 @@ def _deterministic_plan(text: str) -> tuple[list[IntentTask], dict[str, Any], st
         tasks = [
             _task("task_1", "portfolio_state"),
             _task("task_2", "portfolio_risk", depends_on=["task_1"]),
-            _task("task_3", "ranking", parameters={"top_k": 10 if "十" in text or "top10" in text.lower() else 50}),
+            _task("task_3", "ranking", parameters=ranking_parameters),
         ]
         action = "recommend_portfolio_adjustment" if _has_any(text, ["修改成什么样", "怎么改", "应该修改", "调仓建议"]) else "recommend_portfolio"
         return tasks, _goal(
@@ -335,7 +367,7 @@ def _deterministic_plan(text: str) -> tuple[list[IntentTask], dict[str, Any], st
     if has_ranking or has_evidence:
         tasks: list[IntentTask] = []
         if has_ranking or not codes:
-            tasks.append(_task("task_1", "ranking", parameters={"top_k": 10 if "十" in text or "top10" in text.lower() else 50}))
+            tasks.append(_task("task_1", "ranking", parameters=ranking_parameters))
         if has_evidence and codes:
             tasks.append(_task(f"task_{len(tasks) + 1}", "stock_rag", parameters={"stock_code": codes[0], "query": text, "top_k": 10}))
         return tasks, _goal(text, action="query_market_evidence", objects=["market"], expected_outputs=["market_evidence"], requires_external_evidence=True), ""

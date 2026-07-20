@@ -13,6 +13,7 @@ from agent.tools._common import (
     normalize_stock_code as _normalize_stock_code,
     safe_int,
 )
+from agent.top_k import DEFAULT_TOOL_TOP_K, resolve_requested_top_k
 from agent.tools.tool_schemas import ToolPermission, ToolResult
 
 
@@ -70,14 +71,14 @@ def _records_from_df(df: pd.DataFrame) -> list[dict[str, Any]]:
     ]
 
 
-def _read_csv_if_exists(path: str | Path) -> pd.DataFrame:
+def _read_csv_if_exists(path: str | Path, *, nrows: int | None = None) -> pd.DataFrame:
     path = Path(path)
     if not path.exists() or path.stat().st_size == 0:
         return pd.DataFrame()
     try:
-        return pd.read_csv(path, dtype={"code": str}, encoding="utf-8-sig")
+        return pd.read_csv(path, dtype={"code": str}, encoding="utf-8-sig", nrows=nrows)
     except UnicodeDecodeError:
-        return pd.read_csv(path, dtype={"code": str})
+        return pd.read_csv(path, dtype={"code": str}, nrows=nrows)
     except Exception:
         return pd.DataFrame()
 
@@ -128,8 +129,12 @@ class RankingRepository:
         output_dir: str | Path = "outputs",
         *,
         ranking_path: str | Path | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        return dataframe_records(self.ranking_path(output_dir, ranking_path))
+        path = self.ranking_path(output_dir, ranking_path)
+        if limit is None:
+            return dataframe_records(path)
+        return _records_from_df(_read_csv_if_exists(path, nrows=max(0, int(limit))))
 
     def load_latest_recommendations(
         self,
@@ -245,7 +250,16 @@ class MarketAnalysisService:
         model_name: str | None = None,
     ) -> dict[str, Any]:
         path = self.ranking_repository.ranking_path(output_dir, ranking_path)
-        rows = self.ranking_repository.load_latest_ranking(output_dir, ranking_path=ranking_path)
+        requested_top_k = resolve_requested_top_k(
+            task_top_k=top_k,
+            tool_default_top_k=DEFAULT_TOOL_TOP_K,
+        )
+        direct_limited_read = not stock_code and not model_name and str(top_k or "").lower() not in {"all", "all_rows"}
+        rows = self.ranking_repository.load_latest_ranking(
+            output_dir,
+            ranking_path=ranking_path,
+            limit=requested_top_k if direct_limited_read else None,
+        )
         rows = self._filter_model_name(rows, model_name)
         normalized = self.normalize_stock_code(stock_code)
         if normalized:
@@ -253,15 +267,16 @@ class MarketAnalysisService:
         elif str(top_k or "").lower() in {"all", "all_rows"}:
             filtered = rows
         else:
-            filtered = rows[: max(0, int(top_k or 50))]
+            filtered = rows[:requested_top_k]
         as_of_date = latest_trade_date(rows) if rows else ""
         sources = [self._source("ranking_latest", path)]
         summary = {
             "total_count": len(rows),
             "returned_count": len(filtered),
             "stock_code": normalized,
-            "top_k": top_k,
+            "top_k": top_k if str(top_k or "").lower() in {"all", "all_rows"} else requested_top_k,
             "model_name": model_name or "",
+            "source_read_limit": requested_top_k if direct_limited_read else None,
         }
         status = "success" if rows else "missing_ranking"
         data = {

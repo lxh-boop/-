@@ -127,33 +127,43 @@ class PortfolioRiskService:
         *,
         output_dir: str | Path = "outputs",
         db_path: str | Path | None = None,
+        portfolio_state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         user = str(user_id or "default")
-        state = portfolio_service.get_portfolio_state(user, output_dir=output_dir, db_path=db_path)
-        stored = self.risk_repository.load_stored_risk_report(user, output_dir=output_dir, db_path=db_path)
-        if stored:
-            risk_report = dict(stored)
-            source = "latest_snapshot"
-            status = "success"
-        else:
-            account, positions = self.risk_repository.load_risk_inputs(user, output_dir=output_dir, db_path=db_path)
-            if not account:
-                return {
-                    "status": "missing_account",
-                    "risk_report": {},
-                    "risk": {},
-                    "source": "none",
-                    "account": {},
-                    "positions": state.get("positions") or [],
-                    "summary": {"risk_level": "", "holding_count": state.get("position_count", 0)},
-                    "as_of_date": state.get("as_of_date", ""),
-                    "not_executed": True,
-                    "mutation_performed": False,
-                }
-            report = calculate_portfolio_risk(user, account, positions, self._constraints(user, db_path))
-            risk_report = report.to_dict()
-            source = "computed"
-            status = "success"
+        state = dict(portfolio_state or portfolio_service.get_portfolio_state(user, output_dir=output_dir, db_path=db_path))
+        consistency_status = str(state.get("consistency_status") or "")
+        if consistency_status in {"missing_account", "rejected"}:
+            status = "missing_account" if consistency_status == "missing_account" else "invalid_portfolio_snapshot"
+            return {
+                "status": status,
+                "risk_report": {},
+                "risk": {},
+                "source": "normalized_snapshot_rejected",
+                "account": state.get("account") or {},
+                "positions": state.get("positions") or [],
+                "summary": {"risk_level": "", "holding_count": state.get("position_count", 0)},
+                "as_of_date": state.get("as_of_date", ""),
+                "consistency_status": consistency_status,
+                "consistency_errors": list(state.get("consistency_errors") or []),
+                "snapshot_id": str(state.get("snapshot_id") or ""),
+                "calculation_trace": dict(state.get("calculation_trace") or {}),
+                "error_code": str(state.get("error_code") or "portfolio_snapshot_inconsistent"),
+                "safe_to_continue": False,
+                "safe_to_answer": False,
+                "safe_to_write": False,
+                "not_executed": True,
+                "mutation_performed": False,
+            }
+
+        report = calculate_portfolio_risk(
+            user,
+            state.get("account") or {},
+            list(state.get("positions") or []),
+            self._constraints(user, db_path),
+        )
+        risk_report = report.to_dict()
+        source = "normalized_snapshot"
+        status = "success"
 
         concentration = self.calculate_concentration(
             list(state.get("positions") or []),
@@ -174,6 +184,14 @@ class PortfolioRiskService:
             "summary": summary,
             "source": source,
             "as_of_date": state.get("as_of_date", ""),
+            "consistency_status": consistency_status,
+            "consistency_warnings": list(state.get("consistency_warnings") or []),
+            "snapshot_id": str(state.get("snapshot_id") or ""),
+            "cash_semantics": str(state.get("cash_semantics") or "uninvested_cash"),
+            "calculation_trace": dict(state.get("calculation_trace") or {}),
+            "safe_to_continue": bool(state.get("safe_to_continue", True)),
+            "safe_to_answer": bool(state.get("safe_to_answer", True)),
+            "safe_to_write": bool(state.get("safe_to_write", True)),
             "not_executed": True,
             "mutation_performed": False,
         }

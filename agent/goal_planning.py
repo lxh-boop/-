@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 from agent.console_trace import flow_event, trace_event, trace_exception
+from core.llm.runtime_settings import LLMRuntimeSettings, resolve_active_llm_settings
 
 from agent.intent_decomposition.llm_decomposer import assess_completion_with_llm
 from agent.intent_decomposition.schemas import (
@@ -350,7 +351,7 @@ def plan_from_user_goal(goal: UserGoal, *, old_decomposition: IntentDecompositio
         tasks = [
             IntentTask(task_id="task_1", intent="portfolio_state", confidence=0.86, capability_status="executable"),
             IntentTask(task_id="task_2", intent="portfolio_risk", depends_on=["task_1"], confidence=0.86, capability_status="executable"),
-            IntentTask(task_id="task_3", intent="ranking", parameters={"top_k": 10}, confidence=0.86, capability_status="executable"),
+            IntentTask(task_id="task_3", intent="ranking", confidence=0.86, capability_status="executable"),
         ]
     return TaskPlan(
         tasks=tasks,
@@ -503,15 +504,17 @@ def observe_goal_completion(
     api_key: str | None = None,
     base_url: str | None = None,
     model: str | None = None,
+    llm_settings: LLMRuntimeSettings | None = None,
     context: dict[str, Any] | None = None,
 ) -> GoalObserveResult:
     goal = goal_payload.to_dict() if isinstance(goal_payload, UserGoal) else dict(goal_payload or {})
     produced_payload = dict(produced or {})
-    saved_key, saved_base, saved_model = _load_llm_settings()
-    resolved_key = str(api_key or saved_key or "").strip() or None
-    resolved_base = str(base_url if base_url is not None else (saved_base or "")).strip() or None
-    resolved_model = str(model or saved_model or "").strip() or None
-    if not resolved_key:
+    active_llm = llm_settings or resolve_active_llm_settings(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+    )
+    if active_llm.mode == "api" and not active_llm.api_key:
         fallback = _technical_fallback_observe(goal, produced_payload)
         flow_event(
             "COMPLETION_OBSERVE",
@@ -532,9 +535,7 @@ def observe_goal_completion(
         assessment = assess_completion_with_llm(
             goal,
             produced_payload,
-            api_key=resolved_key,
-            base_url=resolved_base,
-            model=resolved_model,
+            llm_settings=active_llm,
             context=dict(context or {}),
         )
         result = GoalObserveResult(**assessment.to_dict())

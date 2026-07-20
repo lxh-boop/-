@@ -82,6 +82,11 @@ def _order_meta(
         "job_id": plan.job_id,
         "run_id": plan.run_id,
         "execution_source": plan.execution_source,
+        "strategy_id": plan.strategy_id,
+        "strategy_version": plan.strategy_version,
+        "binding_id": plan.binding_id,
+        "config_hash": plan.config_hash,
+        "resolved_config": dict(plan.resolved_config or {}),
     }
 
 

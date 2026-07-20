@@ -38,6 +38,7 @@ class PipelineContext:
     entry_top_k: int = 10
     hold_buffer_rank: int = 15
     max_positions: int = 10
+    target_invested_weight: float = 0.80
     minimum_cash_ratio: float = 0.05
     min_rebalance_weight_delta: float = 0.01
     execution_price_type: str = "close"
@@ -65,6 +66,7 @@ class PipelineContext:
             entry_top_k=self.entry_top_k,
             hold_buffer_rank=self.hold_buffer_rank,
             max_positions=self.max_positions,
+            target_invested_weight=self.target_invested_weight,
             minimum_cash_ratio=self.minimum_cash_ratio,
             min_rebalance_weight_delta=self.min_rebalance_weight_delta,
             execution_price_type=self.execution_price_type,

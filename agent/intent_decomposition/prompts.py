@@ -77,10 +77,17 @@ INTENT_CATALOG: dict[str, dict[str, Any]] = {
         "produced_outputs": ["proposal", "approval_request"],
     },
     "strategy_change": {
-        "description": "对以后/长期/每次适用的持仓策略生成变更提案，不直接生效。",
-        "operation_type": "preview",
-        "parameters": ["requirement", "top_k", "target_position_count"],
-        "produced_outputs": ["strategy_proposal", "approval_request"],
+        "description": "长期策略设计对话。由 LLM 结合策略上下文继续讨论、更新版本化草案、询问是否开始实施或明确进入隔离实施准备；草案不直接生效。",
+        "operation_type": "draft",
+        "parameters": [
+            "conversation_action", "proposal_id", "proposal_json",
+            "original_request", "user_feedback", "change_summary",
+            "base_strategy_id", "base_strategy_version",
+        ],
+        "produced_outputs": [
+            "strategy_proposal", "strategy_proposal_version",
+            "implementation_requested",
+        ],
     },
     "capital_management": {
         "description": "创建模拟资金入金或出金的待确认预览。",
@@ -265,6 +272,12 @@ PLANNER_SYSTEM_PROMPT = r'''
     - target_portfolio_source="$task_2.data.target_portfolio"
 22. 当 context_packet.target_portfolio_refs 恰好有一个明确引用时，可以把 artifact_id 放入 portfolio.load_target_portfolio；为零或多个且用户没有指定时必须澄清。
 23. 只输出 JSON，不要 Markdown。
+24. strategy_change 是长期策略设计对话，不是正式写操作。必须先读取 context.strategy_conversation_context，并结合原始请求、相关对话、当前账户/持仓、当前真实策略配置、能力说明、用户硬约束、活动 Proposal 和版本历史作决定。
+25. strategy_change 的 task.operation_type 必须为 draft，requires_write=false；parameters.conversation_action 只能是 continue_discussion、save_proposal、ask_implementation、prepare_implementation、llm_unavailable。
+26. 对“稳健、激进、少换手”等含义和 proposal_json 的业务选择只由你完成；确定性工具只能原样保存，不会根据关键词补方案。保存或修订时必须输出完整、非空 proposal_json。
+27. 用户仍在讨论或否定实施时，选择 continue_discussion 或 save_proposal；不得进入实施。短反馈在存在活动 Proposal 时仍属于同一策略对话。
+28. 用户只是认可方案但上下文无法确认是否要求实施时，选择 ask_implementation，回答必须为“那现在需要我开始调整策略吗？”。用户明确要求按已定版本实施时，选择 prepare_implementation，不得机械地重复询问，也不得直接正式写入。
+29. strategy_change 草案不创建正式 confirmation plan，不修改 Registry、Binding 或持仓。禁止新增独立实施意图分类器，禁止仅靠“开始、实施、执行、可以”等关键词决定 conversation_action。
 
 输出格式：
 {

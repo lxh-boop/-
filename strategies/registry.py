@@ -21,6 +21,7 @@ VALID_STATUSES = {
     "backtesting",
     "backtested",
     "approved",
+    "registered_disabled",
     "enabled",
     "disabled",
     "archived",

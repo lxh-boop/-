@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from hashlib import sha256
+import json
 import re
 from pathlib import Path
 from typing import Any
 
 from agent.console_trace import flow_event, trace_event, trace_exception
+from agent.llm_audit import activate_llm_audit_context
+from core.llm.runtime_settings import LLMRuntimeSettings, resolve_active_llm_settings
 
 from agent.communication.integration import (
     approval_refs_from_payload,
@@ -48,7 +52,22 @@ from agent.runtime_reliability import (
     execute_with_policy,
 )
 from agent.react.integration import record_executor_result_observation
+from agent.logic_integrity import (
+    feature_unavailable_payload,
+    is_terminal_agent_state,
+    terminal_completion_payload,
+    terminal_critic_payload,
+    validate_agent_logic_integrity,
+)
+from agent.replan_execution import consume_readonly_replan
 from agent.reflection import CriticAction, CriticEngine, CriticSanitizer
+from agent.top_k import (
+    DEFAULT_CANDIDATE_REDUNDANCY_FACTOR,
+    DEFAULT_TARGET_POSITION_COUNT,
+    DEFAULT_TOOL_TOP_K,
+    resolve_business_top_k,
+    resolve_requested_top_k,
+)
 from agent.session.pending_action_store import get_pending_plan, update_pending_plan
 from agent.agent_protocol import (
     AgentOutput,
@@ -83,6 +102,7 @@ from agent.tools.backfill_tool import preview_backfill
 from agent.tools.capital_management_tool import preview_capital_change
 from agent.tools.tool_schemas import ToolPermission, ToolResult
 from agent.tools.portfolio_comparison_tools import TargetPortfolioStore
+from agent.services.strategy_context_service import StrategyContextService
 from database.repositories.agent_repository import AgentRepository
 from agent.memory.conversation_state_manager import (
     ResolvedTurn,
@@ -93,6 +113,9 @@ from agent.memory.conversation_state_manager import (
 
 REPLY_LANGUAGE_ZH = "zh"
 REPLY_LANGUAGE_EN = "en"
+# Compatibility identifier retained for capability/audit readers. The strategy
+# conversation mainline uses strategy.save_proposal_draft, not this legacy tool.
+LEGACY_STRATEGY_BUILDER_TOOL_NAME = "strategy_builder_tool"
 
 UNAVAILABLE_MESSAGES = {
     REPLY_LANGUAGE_ZH: "目前不能回答，相关功能仍在后续开发中。",
@@ -548,9 +571,9 @@ def _requested_top_k(
     decomposition: dict[str, Any],
     default_top_k: int,
 ) -> int:
-    if _query_has_any(query, ["top10", "top 10", "\u524d\u5341"]):
-        return 10
+    del query
     tasks = decomposition.get("tasks") if isinstance(decomposition, dict) else []
+    task_top_k = None
     if isinstance(tasks, list):
         for task in tasks:
             if not isinstance(task, dict):
@@ -558,11 +581,222 @@ def _requested_top_k(
             params = task.get("parameters") if isinstance(task.get("parameters"), dict) else {}
             value = params.get("top_k")
             if value not in (None, ""):
-                try:
-                    return max(1, min(int(value), 100))
-                except (TypeError, ValueError):
-                    pass
-    return max(1, min(int(default_top_k or 10), 100))
+                task_top_k = value
+                break
+    return resolve_requested_top_k(
+        task_top_k=task_top_k,
+        request_default_top_k=default_top_k,
+        tool_default_top_k=DEFAULT_TOOL_TOP_K,
+    )
+
+
+def _logic_integrity_for_execution(
+    *,
+    intent: str,
+    decomposition: dict[str, Any],
+    orchestration: dict[str, Any],
+    result_dict: dict[str, Any],
+    completion: dict[str, Any] | None = None,
+):
+    """Collect factual execution inputs for the deterministic safety gate."""
+
+    data = dict(result_dict.get("data") or {}) if isinstance(result_dict.get("data"), dict) else {}
+    task_results = dict(orchestration.get("task_results") or {}) if isinstance(orchestration, dict) else {}
+    portfolio_state: dict[str, Any] = {}
+    risk_report: dict[str, Any] = {}
+    candidates = [data]
+    for task_result in task_results.values():
+        if isinstance(task_result, dict) and isinstance(task_result.get("data"), dict):
+            candidates.append(dict(task_result["data"]))
+    for candidate in candidates:
+        if not portfolio_state and (
+            "consistency_status" in candidate
+            or "portfolio_snapshot" in candidate
+            or candidate.get("error_code") == "portfolio_snapshot_inconsistent"
+        ):
+            portfolio_state = candidate
+        if not risk_report and ("risk_report" in candidate or "risk" in candidate):
+            risk_report = candidate
+    diagnostics = decomposition.get("diagnostics") if isinstance(decomposition.get("diagnostics"), dict) else {}
+    phase10 = diagnostics.get("phase10_goal_planning") if isinstance(diagnostics.get("phase10_goal_planning"), dict) else {}
+    task_plan = phase10.get("task_plan") or decomposition.get("task_plan") or {}
+    limits = dict(orchestration.get("replan_limits") or {}) if isinstance(orchestration, dict) else {}
+    write_intents = {
+        "confirm_execute", "reject_execute", "one_time_position_operation", "preview_add_stock",
+        "adjust_position", "capital_management", "backfill", "strategy_change",
+    }
+    return validate_agent_logic_integrity(
+        portfolio_state=portfolio_state,
+        risk_report=risk_report,
+        task_plan=task_plan if isinstance(task_plan, dict) else {},
+        task_results=task_results,
+        completion=completion,
+        replan_audit=list(orchestration.get("replan_audit") or []) if isinstance(orchestration, dict) else [],
+        replan_count=int(orchestration.get("replan_count") or 0) if isinstance(orchestration, dict) else 0,
+        replan_limit=limits.get("max_rounds"),
+        enforce_task_count=intent == "multi_intent",
+        write_requested=intent in write_intents,
+        write_allowed=bool(data.get("safe_to_write", True)),
+    )
+
+
+def _feature_unavailable_result(
+    *,
+    intent: str,
+    integrity: Any,
+    language: str,
+    previous: dict[str, Any],
+) -> dict[str, Any]:
+    payload = feature_unavailable_payload(integrity, language=language)
+    return {
+        "success": False,
+        "message": payload["message"],
+        "data": payload,
+        "llm_completion": dict(previous.get("llm_completion") or {}),
+        "errors": list(dict.fromkeys([*list(previous.get("errors") or []), *list(integrity.errors)])),
+        "warnings": list(previous.get("warnings") or []),
+        "tool_name": str(previous.get("tool_name") or intent),
+        "status": "feature_unavailable",
+        "requires_confirmation": False,
+    }
+
+
+def _consume_post_execution_replan(
+    *,
+    source: str,
+    action: Any,
+    completion: dict[str, Any] | None,
+    reflection: dict[str, Any] | None,
+    orchestration: dict[str, Any],
+    result_dict: dict[str, Any],
+    user_goal: dict[str, Any],
+    user_id: str,
+    output_dir: str | Path,
+    db_path: str | Path | None,
+    default_top_k: int,
+    session_id: str,
+    language: str,
+    context: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Execute one bounded, read-only post-completion/critic repair plan."""
+
+    current = dict(orchestration or {})
+    limits = dict(current.get("replan_limits") or {})
+    configured_limit = context.get("replan_limit")
+    if configured_limit is None:
+        configured_limit = limits.get("max_rounds") or 2
+    missing_outputs = list((completion or {}).get("missing_outputs") or [])
+    if not missing_outputs and isinstance(reflection, dict):
+        missing_outputs = ["market_evidence"] if str(reflection.get("action") or "").upper() == "REPLAN_READONLY" else []
+
+    def _execute(tasks: list[dict[str, Any]]) -> dict[str, Any]:
+        return execute_multi_intent_plan(
+            {"tasks": tasks},
+            user_id=user_id,
+            output_dir=output_dir,
+            db_path=db_path,
+            default_top_k=default_top_k,
+            session_id=session_id,
+            language=language,
+            context={**dict(context or {}), "readonly_replan": True},
+        )
+
+    integrity_state = dict(current.get("logic_integrity") or {})
+    result_data = dict(result_dict.get("data") or {}) if isinstance(result_dict.get("data"), dict) else {}
+    outcome = consume_readonly_replan(
+        source=source,
+        action=action,
+        replan_count=int(current.get("replan_count") or 0),
+        replan_limit=configured_limit,
+        replan_audit=list(current.get("replan_audit") or []),
+        task_results=dict(current.get("task_results") or {}),
+        missing_outputs=missing_outputs,
+        user_goal=user_goal,
+        execute_plan=_execute,
+        safe_to_continue=bool(integrity_state.get("safe_to_continue", result_data.get("safe_to_continue", True))),
+        safe_to_write=bool(integrity_state.get("safe_to_write", result_data.get("safe_to_write", True))),
+        goal_completed=str((completion or {}).get("status") or "").lower() in {"completed", "complete", "success"},
+        budget_exhausted=bool(context.get("budget_exhausted", False)),
+    )
+    current["replan_count"] = int(outcome.get("replan_count") or 0)
+    current["replan_audit"] = list(outcome.get("replan_audit") or [])
+    current["replan_state"] = dict(outcome.get("replan_state") or {
+        "replan_count": current["replan_count"],
+        "replan_limit": int(configured_limit or 0),
+        "executed_rounds": current["replan_count"],
+        "attempted_rounds": 0,
+        "replan_audit": current["replan_audit"],
+    })
+    current["replan_limits"] = {**limits, "max_rounds": int(configured_limit or 0)}
+    current["replan_status"] = str(outcome.get("status") or "")
+    execution = dict(outcome.get("execution") or {})
+    if execution:
+        current["task_results"] = {
+            **dict(current.get("task_results") or {}),
+            **dict(execution.get("task_results") or {}),
+        }
+        current["tool_calls"] = [
+            *list(current.get("tool_calls") or []),
+            *list(execution.get("tool_calls") or []),
+        ]
+        current["execution_batches"] = [
+            *list(current.get("execution_batches") or []),
+            *list(execution.get("execution_batches") or []),
+        ]
+        current["warnings"] = [
+            *list(current.get("warnings") or []),
+            *list(execution.get("warnings") or []),
+        ]
+        current["errors"] = [
+            *list(current.get("errors") or []),
+            *list(execution.get("errors") or []),
+        ]
+        if str(execution.get("execution_status") or "") == "partially_completed":
+            current["execution_status"] = "partially_completed"
+        elif not execution.get("success") and current.get("success"):
+            current["execution_status"] = "partially_completed"
+
+    # ``result_dict.data`` is the user-facing tool payload.  In particular,
+    # protected-operation previews keep their plan/confirmation identity there.
+    # Replan bookkeeping belongs to orchestration; replacing the payload with
+    # it would silently remove the preview data even when no replan ran.
+    updated_result = dict(result_dict)
+    public_data = (
+        dict(result_dict.get("data") or {})
+        if isinstance(result_dict.get("data"), dict)
+        else {}
+    )
+    public_data.update(
+        {
+            "replan_count": int(current.get("replan_count") or 0),
+            "replan_status": str(current.get("replan_status") or ""),
+            "replan_audit": list(current.get("replan_audit") or []),
+            "replan_limits": dict(current.get("replan_limits") or {}),
+        }
+    )
+    if execution:
+        public_data["replan_execution"] = {
+            "execution_status": str(execution.get("execution_status") or ""),
+            "task_ids": sorted(str(key) for key in (execution.get("task_results") or {})),
+        }
+        updated_result["warnings"] = list(
+            dict.fromkeys(
+                [
+                    *list(result_dict.get("warnings") or []),
+                    *list(execution.get("warnings") or []),
+                ]
+            )
+        )
+        updated_result["errors"] = list(
+            dict.fromkeys(
+                [
+                    *list(result_dict.get("errors") or []),
+                    *list(execution.get("errors") or []),
+                ]
+            )
+        )
+    updated_result["data"] = public_data
+    return current, updated_result, outcome
 
 
 def _make_task(
@@ -1502,6 +1736,7 @@ def _record_runtime_for_result(
     expanded_tool_calls: list[dict[str, Any]],
     output_dir: str | Path,
     user_id: str,
+    llm_settings: LLMRuntimeSettings | None = None,
 ) -> dict[str, Any]:
     runtime_info: dict[str, Any] = {
         "run_id": runtime.run_id,
@@ -1620,6 +1855,7 @@ def _record_runtime_for_result(
                     "task_results": orchestration.get("task_results") if isinstance(orchestration, dict) else {},
                     "result": result_dict,
                 },
+                llm_settings=llm_settings,
             ).to_dict()
         )
         runtime_info["phase10_observe"] = phase10_observe
@@ -2609,20 +2845,16 @@ def _generic_success_answer(
         return "已处理确认后的模拟盘操作。"
 
     if intent == "strategy_change":
-        registered = data.get("registered_strategies") or data.get("strategies") or []
-        if data.get("need_clarification"):
+        action = str(data.get("conversation_action") or "")
+        if action in {"ask_implementation", "llm_unavailable"}:
             if language == REPLY_LANGUAGE_EN:
-                return (
-                    "The long-term strategy request needs more concrete "
-                    "selection, weighting, or rebalancing rules."
-                )
-            return (
-                "这是长期策略变更意图，但当前缺少可执行的选股、仓位或调仓规则。"
-                f"\n\n当前可选策略数量：{len(registered) if isinstance(registered, list) else 0}"
-            )
+                return "Would you like me to start preparing the strategy adjustment now?"
+            return "那现在需要我开始调整策略吗？"
+        if message:
+            return message
         if language == REPLY_LANGUAGE_EN:
-            return "The strategy-change request has been processed."
-        return "已处理长期策略变更请求。"
+            return "The strategy proposal draft has been saved without changing formal strategy or portfolio state."
+        return "已保存策略方案草案，尚未修改正式策略或模拟盘状态。"
 
     if language == REPLY_LANGUAGE_EN:
         if message and not re.search(r"[\u4e00-\u9fff]", message):
@@ -2853,7 +3085,7 @@ _PUBLIC_PARAMETER_DENY_KEYS = {
 }
 
 
-def _public_agent_parameters(params: dict[str, Any] | None) -> dict[str, Any]:
+def _public_agent_parameters(params: Any) -> Any:
     def scrub(value: Any) -> Any:
         if isinstance(value, dict):
             cleaned: dict[str, Any] = {}
@@ -2867,7 +3099,7 @@ def _public_agent_parameters(params: dict[str, Any] | None) -> dict[str, Any]:
             return [scrub(item) for item in value[:50]]
         return value
 
-    return scrub(dict(params or {}))
+    return scrub(params if params is not None else {})
 
 
 def _run_phase16_reflection(
@@ -3025,9 +3257,15 @@ def _llm_first_report(
     llm_api_key: str | None,
     llm_base_url: str | None,
     llm_model: str | None,
+    llm_settings: LLMRuntimeSettings,
     context_payload: dict[str, Any],
 ) -> str:
     result_data = result_dict.get("data") if isinstance(result_dict.get("data"), dict) else {}
+    # Deterministic validation failures must keep their actionable remediation
+    # wording.  They are not an LLM reporting task and must not be paraphrased
+    # into a less precise execution instruction.
+    if not bool(result_dict.get("success")):
+        return draft_answer
     if result_dict.get("requires_confirmation") or result_data.get("plan_id"):
         return draft_answer
     diagnostics = decomposition.get("diagnostics") if isinstance(decomposition, dict) else {}
@@ -3037,8 +3275,7 @@ def _llm_first_report(
     completion = runtime_info.get("phase10_observe") if isinstance(runtime_info.get("phase10_observe"), dict) else {}
     if not user_goal:
         return draft_answer
-    api_key, base_url, model = _load_llm_report_settings(llm_api_key, llm_base_url, llm_model)
-    if not api_key:
+    if llm_settings.mode == "api" and not llm_settings.api_key:
         return draft_answer
     try:
         return generate_report_with_llm(
@@ -3056,9 +3293,7 @@ def _llm_first_report(
             completion=dict(completion),
             draft_answer=draft_answer,
             reply_language=language,
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
+            llm_settings=llm_settings,
             context={"safe_context": context_payload},
         )
     except Exception:
@@ -3076,8 +3311,11 @@ def _llm_first_semantic_critic(
     llm_api_key: str | None,
     llm_base_url: str | None,
     llm_model: str | None,
+    llm_settings: LLMRuntimeSettings,
 ) -> tuple[str, dict[str, Any]]:
     result_data = result_dict.get("data") if isinstance(result_dict.get("data"), dict) else {}
+    if not bool(result_dict.get("success")):
+        return answer, {"action": "skipped", "reason": "deterministic_failure_answer"}
     if result_dict.get("requires_confirmation") or result_data.get("plan_id"):
         return answer, {"action": "skipped", "reason": "pending_approval_deterministic_answer"}
     diagnostics = decomposition.get("diagnostics") if isinstance(decomposition, dict) else {}
@@ -3087,8 +3325,7 @@ def _llm_first_semantic_critic(
     completion = runtime_info.get("phase10_observe") if isinstance(runtime_info.get("phase10_observe"), dict) else {}
     if not user_goal:
         return answer, {"action": "skipped", "reason": "missing_user_goal"}
-    api_key, base_url, model = _load_llm_report_settings(llm_api_key, llm_base_url, llm_model)
-    if not api_key:
+    if llm_settings.mode == "api" and not llm_settings.api_key:
         return answer, {"action": "skipped", "reason": "missing_api_key"}
     try:
         review = critique_report_with_llm(
@@ -3104,9 +3341,7 @@ def _llm_first_semantic_critic(
                 "tool_name": str(result_dict.get("tool_name") or ""),
             },
             reply_language=language,
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
+            llm_settings=llm_settings,
         )
     except Exception as exc:
         return answer, {"action": "skipped", "reason": f"critic_failed:{type(exc).__name__}"}
@@ -3129,15 +3364,28 @@ def run_agent_request(
     user_id: str = "default",
     output_dir: str | Path = "outputs",
     db_path: str | Path | None = None,
-    top_k: int = 50,
+    top_k: int = DEFAULT_TOOL_TOP_K,
     session_id: str = "",
     reply_language: str | None = None,
     llm_api_key: str | None = None,
     llm_base_url: str | None = None,
     llm_model: str | None = None,
+    llm_settings: LLMRuntimeSettings | None = None,
+    llm_mode: str | None = None,
     decomposition_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     raw_query = str(query or "").strip()
+    active_llm = llm_settings or resolve_active_llm_settings(
+        mode=llm_mode,
+        api_key=llm_api_key,
+        base_url=llm_base_url,
+        model=llm_model,
+    )
+    # Preserve legacy variables for dependent tools, but all LLM stages below
+    # receive ``active_llm`` so the profile cannot change mid-run.
+    llm_api_key = active_llm.api_key
+    llm_base_url = active_llm.base_url
+    llm_model = active_llm.model
     try:
         resolved_turn = resolve_conversation_turn(
             raw_query,
@@ -3176,6 +3424,35 @@ def run_agent_request(
         db_path=db_path,
         session_id=session_id,
         run_id=resume_run_id or None,
+    )
+    formal_entry_audit = {
+        "formal_entry_used": True,
+        "formal_entry_name": "agent.executor.run_agent_request",
+        "run_id": runtime.run_id,
+        "conversation_id": session_id,
+    }
+    # The formal-entry assertion is created and persisted here, not supplied
+    # by a benchmark runner.  It remains available even if later execution
+    # exits through an error path.
+    runtime.merge_metadata({"formal_entry_audit": formal_entry_audit})
+    runtime.merge_metadata(
+        {
+            "llm_runtime_snapshot": {
+                **active_llm.public_dict,
+                "config_hash": active_llm.config_hash,
+                "snapshot_created_at": now_text(),
+            }
+        }
+    )
+    benchmark_context = dict(decomposition_context or {})
+    activate_llm_audit_context(
+        run_id=runtime.run_id,
+        conversation_id=session_id,
+        output_dir=output_dir,
+        case_id=str(benchmark_context.get("benchmark_case_id") or ""),
+        iteration=benchmark_context.get("benchmark_iteration"),
+        formal_entry_used=True,
+        formal_entry_name="agent.executor.run_agent_request",
     )
     trace_event(
         "executor.request.received",
@@ -3394,6 +3671,7 @@ def run_agent_request(
         route_context.setdefault("user_id", user_id)
         route_context.setdefault("session_id", session_id)
         route_context.setdefault("default_top_k", top_k)
+        route_context.setdefault("candidate_redundancy_factor", DEFAULT_CANDIDATE_REDUNDANCY_FACTOR)
         route_context.setdefault("run_id", runtime.run_id)
         route_context.setdefault("query", raw_query)
         route_context.setdefault("resolved_query", planner_query)
@@ -3403,6 +3681,37 @@ def run_agent_request(
         route_context.setdefault("llm_model", llm_model)
         route_context.setdefault("runtime_policy", runtime_policy.to_dict())
         route_context.setdefault("mcp", build_mcp_context_from_local_config())
+        strategy_account_id = str(
+            route_context.get("account_id") or f"paper_{user_id}"
+        )
+        try:
+            strategy_conversation_context = StrategyContextService(
+                db_path=db_path,
+                output_dir=output_dir,
+            ).load(
+                user_id=user_id,
+                account_id=strategy_account_id,
+                conversation_id=session_id,
+            )
+            route_context.setdefault(
+                "strategy_conversation_context",
+                strategy_conversation_context.to_dict(),
+            )
+        except Exception as exc:
+            trace_exception(
+                "executor.strategy_context.failed",
+                exc,
+                run_id=runtime.run_id,
+            )
+            route_context.setdefault(
+                "strategy_conversation_context",
+                {
+                    "user_id": user_id,
+                    "account_id": strategy_account_id,
+                    "conversation_id": session_id,
+                    "context_error": type(exc).__name__,
+                },
+            )
         try:
             target_refs = TargetPortfolioStore(output_dir).list_refs(user_id=user_id, conversation_id=session_id)
         except Exception as exc:
@@ -3451,9 +3760,13 @@ def run_agent_request(
             llm_api_key=llm_api_key,
             llm_base_url=llm_base_url,
             llm_model=llm_model,
+            llm_settings=active_llm,
             reply_language=language,
             context=route_context,
         )
+        # Downstream tool adapters receive the already-resolved immutable
+        # snapshot, never re-read the UI/local configuration mid-run.
+        route_context["llm_runtime_settings"] = active_llm
         intent = routed.intent
         params = dict(routed.parameters)
         for inherited_key, inherited_value in (resolved_turn.inherited_parameters or {}).items():
@@ -3464,6 +3777,7 @@ def run_agent_request(
         decomposition.setdefault("conversation_state", resolved_turn.to_dict())
         route_context["user_goal"] = dict(decomposition.get("user_goal") or {})
         route_context["task_plan"] = dict(decomposition.get("task_plan") or {})
+        route_context["user_explicit_top_k"] = params.get("top_k")
         trace_event(
             "executor.route.accepted",
             {"intent": intent, "parameters": params, "execution_route": routed.execution_route, "decomposition": decomposition},
@@ -3569,19 +3883,47 @@ def run_agent_request(
                 if isinstance(task, dict)
             ],
             references={"intent": intent, "stock_code": stock_code},
-            write_intent=intent in {"confirm_execute", "reject_execute", "one_time_position_operation", "strategy_change", "preview_add_stock", "adjust_position", "capital_management", "backfill"},
+            write_intent=intent in {"confirm_execute", "reject_execute", "one_time_position_operation", "preview_add_stock", "adjust_position", "capital_management", "backfill"},
         )
 
-        requested_top_k = params.get("top_k") or top_k
-        try:
-            requested_top_k = max(
-                1,
-                min(int(requested_top_k), 100),
+        goal_outputs = set(
+            str(item) for item in ((decomposition.get("user_goal") or {}).get("expected_outputs") or [])
+        )
+        task_target_count = next(
+            (
+                (task.get("parameters") or {}).get("target_position_count")
+                for task in (decomposition.get("tasks") or [])
+                if isinstance(task, dict)
+                and isinstance(task.get("parameters"), dict)
+                and (task.get("parameters") or {}).get("target_position_count") not in (None, "")
+            ),
+            None,
+        )
+        is_target_design_request = "target_portfolio" in goal_outputs or any(
+            str(task.get("intent") or "") in {
+                "portfolio.design_target_portfolio",
+                "portfolio.construct_target_portfolio",
+            }
+            for task in (decomposition.get("tasks") or [])
+            if isinstance(task, dict)
+        )
+        target_position_count = params.get("target_position_count") or task_target_count
+        if is_target_design_request and target_position_count in (None, ""):
+            target_position_count = DEFAULT_TARGET_POSITION_COUNT
+        if is_target_design_request:
+            route_context["business_target_position_count"] = target_position_count
+            requested_top_k = resolve_business_top_k(
+                user_explicit_top_k=params.get("top_k"),
+                target_position_count=target_position_count,
+                candidate_redundancy_factor=route_context["candidate_redundancy_factor"],
+                request_default_top_k=top_k,
+                tool_default_top_k=DEFAULT_TOOL_TOP_K,
             )
-        except (TypeError, ValueError):
-            requested_top_k = max(
-                1,
-                min(int(top_k or 50), 100),
+        else:
+            requested_top_k = resolve_requested_top_k(
+                user_explicit_top_k=params.get("top_k"),
+                request_default_top_k=top_k,
+                tool_default_top_k=DEFAULT_TOOL_TOP_K,
             )
 
         def _registered_tool(
@@ -3606,7 +3948,15 @@ def run_agent_request(
                     "token_estimate": token_estimate,
                     "query": planner_query,
                     "raw_query": raw_query,
+                    "llm_runtime_settings": active_llm,
+                    "llm_api_key": active_llm.api_key,
+                    "llm_base_url": active_llm.base_url,
+                    "llm_model": active_llm.model,
                     "root": ".",
+                    "runtime_dir": str(
+                        route_context.get("runtime_dir")
+                        or (Path(output_dir).parent / "runtime")
+                    ),
                 },
                 context_bundle=phase12_context_bundle,
                 tool_context=context_manager.build_tool_context(phase12_context_bundle),
@@ -3662,7 +4012,6 @@ def run_agent_request(
                         "confirm_execute",
                         "reject_execute",
                         "one_time_position_operation",
-                        "strategy_change",
                         "preview_add_stock",
                         "adjust_position",
                         "capital_management",
@@ -3949,16 +4298,122 @@ def run_agent_request(
                 expanded_tool_calls = list(orchestration.get("tool_calls") or [])
 
             elif intent == "strategy_change":
-                result = _registered_tool(
-                    "strategy_builder_tool",
+                conversation_action = str(
+                    params.get("conversation_action") or ""
+                )
+                if not conversation_action:
+                    route_layer = str(
+                        decomposition.get("route_layer") or ""
+                    )
+                    conversation_action = (
+                        "llm_unavailable"
+                        if route_layer in {"rule_fallback", "fallback"}
+                        else "save_proposal"
+                    )
+                draft_result = _registered_tool(
+                    "strategy.save_proposal_draft",
                     {
                         "user_id": user_id,
-                        "requirement": str(params.get("requirement") or query),
-                        "parameters": _public_agent_parameters(params),
+                        "account_id": strategy_account_id,
+                        "conversation_id": session_id,
+                        "conversation_action": conversation_action,
+                        "proposal_id": str(params.get("proposal_id") or ""),
+                        "proposal_json": (
+                            dict(params.get("proposal_json") or {})
+                            if isinstance(params.get("proposal_json"), dict)
+                            else {}
+                        ),
+                        "original_request": str(
+                            params.get("original_request") or raw_query
+                        ),
+                        "user_feedback": str(
+                            params.get("user_feedback") or raw_query
+                        ),
+                        "change_summary": str(
+                            params.get("change_summary") or ""
+                        ),
+                        "base_strategy_id": str(
+                            params.get("base_strategy_id")
+                            or "hierarchical_top10"
+                        ),
+                        "base_strategy_version": str(
+                            params.get("base_strategy_version") or "1.0.0"
+                        ),
+                        "source_run_id": runtime.run_id,
                     },
                     agent_type=AGENT_MAIN,
                     token_estimate=800,
                 )
+                result = draft_result
+                if (
+                    conversation_action == "prepare_implementation"
+                    and draft_result.get("success")
+                ):
+                    draft_data = (
+                        dict(draft_result.get("data") or {})
+                        if isinstance(draft_result.get("data"), dict)
+                        else {}
+                    )
+                    proposal_data = dict(draft_data.get("proposal") or {})
+                    version_data = dict(
+                        draft_data.get("proposal_version") or {}
+                    )
+                    locked_version = int(
+                        version_data.get("version")
+                        or proposal_data.get("current_version")
+                        or params.get("proposal_version")
+                        or 0
+                    )
+                    result = _registered_tool(
+                        "strategy.prepare_implementation",
+                        {
+                            "proposal_id": str(
+                                proposal_data.get("proposal_id")
+                                or params.get("proposal_id")
+                                or ""
+                            ),
+                            "proposal_version": locked_version,
+                            "user_id": user_id,
+                            "account_id": strategy_account_id,
+                            "conversation_id": session_id,
+                            "run_id": runtime.run_id,
+                        },
+                        agent_type=AGENT_MAIN,
+                        token_estimate=1200,
+                    )
+                    if (
+                        result.get("success")
+                        and isinstance(result.get("data"), dict)
+                    ):
+                        result["data"]["proposal_draft"] = draft_data
+                        implementation_data = dict(result["data"])
+                        apply_plan = _registered_tool(
+                            "strategy.create_apply_plan",
+                            {
+                                "implementation_id": str(
+                                    implementation_data.get(
+                                        "implementation_id"
+                                    )
+                                    or ""
+                                ),
+                                "user_id": user_id,
+                                "account_id": strategy_account_id,
+                                "conversation_id": session_id,
+                                "run_id": runtime.run_id,
+                            },
+                            agent_type=AGENT_MAIN,
+                            token_estimate=600,
+                        )
+                        if apply_plan.get("success"):
+                            apply_data = dict(
+                                apply_plan.get("data") or {}
+                            )
+                            apply_data["implementation_preview"] = (
+                                implementation_data
+                            )
+                            apply_data["proposal_draft"] = draft_data
+                            apply_plan["data"] = apply_data
+                            result = apply_plan
 
             elif intent == "preview_add_stock":
                 result = _registered_tool(
@@ -4163,12 +4618,14 @@ def run_agent_request(
                     expanded_tool_calls=[{"tool_name": intent, "success": False}],
                     output_dir=output_dir,
                     user_id=user_id,
+                    llm_settings=active_llm,
                 )
             except Exception:
                 pass
             return {
                 "success": False,
                 "run_id": runtime.run_id,
+                "formal_entry_audit": formal_entry_audit,
                 "runtime": {"run_id": runtime.run_id, "status": runtime.status},
                 "intent": intent,
                 "parameters": _public_agent_parameters(params),
@@ -4196,6 +4653,24 @@ def run_agent_request(
             }
 
     result_dict = _tool_result_dict(result)
+    initial_integrity = _logic_integrity_for_execution(
+        intent=intent,
+        decomposition=decomposition,
+        orchestration=orchestration,
+        result_dict=result_dict,
+    )
+    orchestration = {
+        **dict(orchestration or {}),
+        "logic_integrity": initial_integrity.to_dict(),
+    }
+    if initial_integrity.is_logic_error:
+        result_dict = _feature_unavailable_result(
+            intent=intent,
+            integrity=initial_integrity,
+            language=language,
+            previous=result_dict,
+        )
+        orchestration["execution_status"] = "feature_unavailable"
     flow_event(
         "TASK_RESULT",
         {
@@ -4282,26 +4757,84 @@ def run_agent_request(
         else decomposition.get("user_goal") or {}
     )
     if semantic_goal_for_completion:
-        result_dict["llm_completion"] = observe_goal_completion(
-            semantic_goal_for_completion,
-            {
-                "task_plan": phase10_for_completion.get("task_plan") or decomposition.get("task_plan") or {},
-                "task_results": orchestration.get("task_results") if isinstance(orchestration, dict) else {},
-                "result": result_dict,
-                "orchestration_status": orchestration.get("execution_status") if isinstance(orchestration, dict) else "",
-            },
-            api_key=llm_api_key,
-            base_url=llm_base_url,
-            model=llm_model,
-            context={"safe_context": context_payload, "run_id": runtime.run_id},
-        ).to_dict()
+        if initial_integrity.is_logic_error:
+            result_dict["llm_completion"] = terminal_completion_payload(initial_integrity)
+        else:
+            result_dict["llm_completion"] = observe_goal_completion(
+                semantic_goal_for_completion,
+                {
+                    "task_plan": phase10_for_completion.get("task_plan") or decomposition.get("task_plan") or {},
+                    "task_results": orchestration.get("task_results") if isinstance(orchestration, dict) else {},
+                    "result": result_dict,
+                    "orchestration_status": orchestration.get("execution_status") if isinstance(orchestration, dict) else "",
+                },
+                api_key=llm_api_key,
+                base_url=llm_base_url,
+                model=llm_model,
+                llm_settings=active_llm,
+                context={"safe_context": context_payload, "run_id": runtime.run_id},
+            ).to_dict()
         trace_event("executor.completion.assessed", result_dict["llm_completion"], run_id=runtime.run_id)
+        if not isinstance(orchestration.get("task_results"), dict):
+            task_id = (
+                str((decomposition.get("tasks") or [{}])[0].get("task_id") or intent)
+                if isinstance(decomposition.get("tasks"), list)
+                else str(intent)
+            )
+            orchestration = {
+                **dict(orchestration or {}),
+                "task_results": {
+                    task_id: {
+                        "task_id": task_id,
+                        "intent": intent,
+                        "success": bool(result_dict.get("success")),
+                        "data": dict(result_dict.get("data") or {}),
+                        "arguments": dict(params or {}),
+                        "errors": list(result_dict.get("errors") or []),
+                    }
+                },
+                "replan_count": int(orchestration.get("replan_count") or 0),
+                "replan_audit": list(orchestration.get("replan_audit") or []),
+            }
+        orchestration, result_dict, completion_replan = _consume_post_execution_replan(
+            source="completion",
+            action=result_dict["llm_completion"].get("next_action"),
+            completion=result_dict["llm_completion"],
+            reflection=None,
+            orchestration=orchestration,
+            result_dict=result_dict,
+            user_goal=semantic_goal_for_completion,
+            user_id=user_id,
+            output_dir=output_dir,
+            db_path=db_path,
+            default_top_k=requested_top_k,
+            session_id=session_id,
+            language=language,
+            context=route_context,
+        )
+        if completion_replan.get("execution"):
+            result_dict["llm_completion"] = observe_goal_completion(
+                semantic_goal_for_completion,
+                {
+                    "task_plan": phase10_for_completion.get("task_plan") or decomposition.get("task_plan") or {},
+                    "task_results": orchestration.get("task_results") or {},
+                    "result": result_dict,
+                    "orchestration_status": orchestration.get("execution_status") or "",
+                },
+                api_key=llm_api_key,
+                base_url=llm_base_url,
+                model=llm_model,
+                llm_settings=active_llm,
+                context={"safe_context": context_payload, "run_id": runtime.run_id},
+            ).to_dict()
+            trace_event("executor.completion.reassessed_after_replan", result_dict["llm_completion"], run_id=runtime.run_id)
 
     try:
         record_executor_result_observation(
             result_dict,
             output_dir=output_dir,
             user_id=user_id,
+            llm_settings=active_llm,
             conversation_id=session_id,
             run_id=runtime.run_id,
             task_id=str((decomposition.get("tasks") or [{}])[0].get("task_id") or intent)
@@ -4456,31 +4989,41 @@ def run_agent_request(
         language,
     )
     trace_event("executor.report.draft", {"intent": intent, "draft": _answer(intent, result_dict, language)}, run_id=runtime.run_id)
-    answer_text = _llm_first_report(
-        query=query,
-        draft_answer=answer_text,
-        result_dict=result_dict,
-        decomposition=decomposition,
-        orchestration=orchestration,
-        runtime_info=runtime_info,
-        language=language,
-        llm_api_key=llm_api_key,
-        llm_base_url=llm_base_url,
-        llm_model=llm_model,
-        context_payload=context_payload,
-    )
-    answer_text = _sanitize_user_facing_answer(answer_text, language)
-    answer_text, llm_semantic_critic = _llm_first_semantic_critic(
-        query=query,
-        answer=answer_text,
-        result_dict=result_dict,
-        decomposition=decomposition,
-        runtime_info=runtime_info,
-        language=language,
-        llm_api_key=llm_api_key,
-        llm_base_url=llm_base_url,
-        llm_model=llm_model,
-    )
+    terminal_before_report = is_terminal_agent_state(initial_integrity) or is_terminal_agent_state(result_dict.get("data"))
+    if terminal_before_report:
+        answer_text = str(result_dict.get("message") or answer_text)
+        llm_semantic_critic = {
+            "status": "suppressed",
+            "reason": "terminal_priority_logic_error",
+            "safe_to_continue": False,
+        }
+    else:
+        answer_text = _llm_first_report(
+            query=query,
+            draft_answer=answer_text,
+            result_dict=result_dict,
+            decomposition=decomposition,
+            orchestration=orchestration,
+            runtime_info=runtime_info,
+            language=language,
+            llm_api_key=llm_api_key,
+            llm_base_url=llm_base_url,
+            llm_model=llm_model,
+            llm_settings=active_llm,
+            context_payload=context_payload,
+        )
+        answer_text, llm_semantic_critic = _llm_first_semantic_critic(
+            query=query,
+            answer=answer_text,
+            result_dict=result_dict,
+            decomposition=decomposition,
+            runtime_info=runtime_info,
+            language=language,
+            llm_api_key=llm_api_key,
+            llm_base_url=llm_base_url,
+            llm_model=llm_model,
+            llm_settings=active_llm,
+        )
     answer_text = _sanitize_user_facing_answer(answer_text, language)
     runtime_info["llm_semantic_critic"] = llm_semantic_critic
     trace_event("executor.semantic_critic.result", llm_semantic_critic, run_id=runtime.run_id)
@@ -4491,23 +5034,97 @@ def run_agent_request(
         if isinstance(decomposition.get("tasks"), list)
         else str(intent)
     )
-    answer_text, reflection_payload = _run_phase16_reflection(
-        answer_text=answer_text,
-        result_dict=result_dict,
+    if terminal_before_report:
+        reflection_payload = terminal_critic_payload(initial_integrity)
+    else:
+        answer_text, reflection_payload = _run_phase16_reflection(
+            answer_text=answer_text,
+            result_dict=result_dict,
+            intent=intent,
+            language=language,
+            output_dir=output_dir,
+            user_id=user_id,
+            session_id=session_id,
+            run_id=runtime.run_id,
+            task_id=final_task_id,
+            context_refs=phase13_context_refs,
+            artifact_refs=final_artifact_refs,
+            approval_refs=final_approval_refs,
+            context_payload=context_payload,
+            context_warnings=context_warnings,
+            runtime=runtime,
+        )
+    if str(reflection_payload.get("action") or "").upper() == CriticAction.REPLAN_READONLY.value:
+        critic_goal = semantic_goal_for_completion if isinstance(semantic_goal_for_completion, dict) else {}
+        orchestration, result_dict, critic_replan = _consume_post_execution_replan(
+            source="critic",
+            action=reflection_payload.get("action"),
+            completion=result_dict.get("llm_completion") if isinstance(result_dict.get("llm_completion"), dict) else {},
+            reflection=reflection_payload,
+            orchestration=orchestration,
+            result_dict=result_dict,
+            user_goal=critic_goal,
+            user_id=user_id,
+            output_dir=output_dir,
+            db_path=db_path,
+            default_top_k=requested_top_k,
+            session_id=session_id,
+            language=language,
+            context=route_context,
+        )
+        reflection_payload["replan"] = {
+            "status": critic_replan.get("status"),
+            "replan_count": critic_replan.get("replan_count"),
+        }
+        if critic_replan.get("execution"):
+            expanded_tool_calls = [
+                *list(expanded_tool_calls or []),
+                *list((critic_replan.get("execution") or {}).get("tool_calls") or []),
+            ]
+            if critic_goal:
+                result_dict["llm_completion"] = observe_goal_completion(
+                    critic_goal,
+                    {
+                        "task_plan": phase10_for_completion.get("task_plan") or decomposition.get("task_plan") or {},
+                        "task_results": orchestration.get("task_results") or {},
+                        "result": result_dict,
+                        "orchestration_status": orchestration.get("execution_status") or "",
+                    },
+                    api_key=llm_api_key,
+                    base_url=llm_base_url,
+                    model=llm_model,
+                    llm_settings=active_llm,
+                    context={"safe_context": context_payload, "run_id": runtime.run_id},
+                ).to_dict()
+            answer_text = _sanitize_user_facing_answer(_answer(intent, result_dict, language), language)
+        runtime_info["replan_count"] = int(orchestration.get("replan_count") or 0)
+        runtime_info["replan_audit"] = list(orchestration.get("replan_audit") or [])
+    final_integrity = _logic_integrity_for_execution(
         intent=intent,
-        language=language,
-        output_dir=output_dir,
-        user_id=user_id,
-        session_id=session_id,
-        run_id=runtime.run_id,
-        task_id=final_task_id,
-        context_refs=phase13_context_refs,
-        artifact_refs=final_artifact_refs,
-        approval_refs=final_approval_refs,
-        context_payload=context_payload,
-        context_warnings=context_warnings,
-        runtime=runtime,
+        decomposition=decomposition,
+        orchestration=orchestration,
+        result_dict=result_dict,
+        completion=result_dict.get("llm_completion") if isinstance(result_dict.get("llm_completion"), dict) else {},
     )
+    orchestration["logic_integrity"] = final_integrity.to_dict()
+    if final_integrity.is_logic_error:
+        result_dict = _feature_unavailable_result(
+            intent=intent,
+            integrity=final_integrity,
+            language=language,
+            previous=result_dict,
+        )
+        orchestration["execution_status"] = "feature_unavailable"
+        answer_text = str(result_dict["message"])
+        reflection_payload = {
+            **dict(reflection_payload or {}),
+            "logic_integrity": final_integrity.to_dict(),
+            "action": "FEATURE_UNAVAILABLE",
+        }
+        llm_semantic_critic = {
+            **dict(llm_semantic_critic or {}),
+            "deterministic_logic_gate": final_integrity.to_dict(),
+        }
     answer_text = _sanitize_user_facing_answer(answer_text, language)
     publish_agent_message(
         output_dir=output_dir,
@@ -4533,25 +5150,44 @@ def run_agent_request(
         warnings=list(dict.fromkeys(context_warnings)),
     )
 
+    # Planning and runtime traces may carry the broad canonical parameter
+    # schema.  Return only its public projection; this removes even empty
+    # secret placeholders such as ``confirmation_token`` from read-only
+    # responses and UI/message mirrors.  A real protected-operation preview
+    # keeps its token only in the direct result payload used by the explicit
+    # confirmation flow.
+    response_result = (
+        result_dict
+        if bool(result_dict.get("requires_confirmation"))
+        else _public_agent_parameters(result_dict)
+    )
+    response_data = (
+        result_dict.get("data")
+        if bool(result_dict.get("requires_confirmation"))
+        else _public_agent_parameters(
+            result_dict.get("data") if isinstance(result_dict.get("data"), dict) else {}
+        )
+    )
     final_response = {
         "success": bool(result_dict.get("success")),
         "run_id": runtime.run_id,
-        "runtime": runtime_info,
+        "formal_entry_audit": formal_entry_audit,
+        "runtime": _public_agent_parameters(runtime_info),
         "intent": intent,
         "parameters": _public_agent_parameters(params),
         "original_query": raw_query,
         "resolved_query": planner_query if planner_query != raw_query else "",
         "conversation_state": resolved_turn.to_dict(),
         "reply_language": language,
-        "decomposition": decomposition,
-        "orchestration": orchestration,
+        "decomposition": _public_agent_parameters(decomposition),
+        "orchestration": _public_agent_parameters(orchestration),
         "routing_layer": decomposition.get(
             "route_layer",
             "unknown",
         ),
         "answer": answer_text,
-        "result": result_dict,
-        "data": result_dict.get("data") if isinstance(result_dict.get("data"), dict) else {},
+        "result": response_result,
+        "data": response_data,
         "status": orchestration.get("execution_status") if isinstance(orchestration, dict) else "",
         "pending_approval": bool(
             result_dict.get("requires_confirmation")
@@ -4566,12 +5202,66 @@ def run_agent_request(
             if isinstance(result_dict.get("data"), dict)
             else ""
         ),
-        "tool_calls": expanded_tool_calls,
+        "tool_calls": _public_agent_parameters(expanded_tool_calls),
         "context": context_payload,
         "context_warnings": list(dict.fromkeys(context_warnings)),
         "reflection": reflection_payload,
         "llm_semantic_critic": llm_semantic_critic,
     }
+    final_status = str(final_response.get("status") or result_dict.get("status") or runtime_info.get("status") or "unknown")
+    if final_status == "feature_unavailable" or str((result_dict.get("data") or {}).get("status") or "") == "feature_unavailable":
+        message_source = "deterministic_feature_unavailable"
+    elif final_response["pending_approval"]:
+        message_source = "approval_pending"
+    elif bool(result_dict.get("success")):
+        message_source = "deterministic_or_tool_result"
+    else:
+        message_source = "deterministic_failure"
+    response_hash = sha256(
+        json.dumps(
+            {
+                "run_id": runtime.run_id,
+                "status": final_status,
+                "answer": answer_text,
+                "message_source": message_source,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    final_response_audit = {
+        "run_id": runtime.run_id,
+        "conversation_id": session_id,
+        "llm_runtime": {**active_llm.public_dict, "config_hash": active_llm.config_hash},
+        "final_status": final_status,
+        "message_source": message_source,
+        "template_type": "feature_unavailable" if message_source == "deterministic_feature_unavailable" else "standard",
+        "logic_integrity_status": str((orchestration.get("logic_integrity") or {}).get("status") or "unknown"),
+        "completion_status": str((result_dict.get("llm_completion") or {}).get("status") or ""),
+        "critic_action": str((reflection_payload or {}).get("action") or ""),
+        "replan_count": int(orchestration.get("replan_count") or 0),
+        "safe_to_write": bool((result_dict.get("data") or {}).get("safe_to_write", True)),
+        "pending_approval": bool(final_response["pending_approval"]),
+        "response_hash": response_hash,
+    }
+    publish_agent_message(
+        output_dir=output_dir,
+        user_id=user_id,
+        conversation_id=session_id,
+        run_id=runtime.run_id,
+        sender="executor",
+        receiver="ui,audit",
+        message_type=MessageType.FINAL_RESPONSE,
+        payload=final_response_audit,
+        payload_schema="phase_stable_portfolio.final_response.v1",
+        context_refs=phase13_context_refs,
+        artifact_refs=final_artifact_refs,
+        approval_refs=final_approval_refs,
+        warnings=list(dict.fromkeys(context_warnings)),
+    )
+    flow_event("FINAL_RESPONSE", final_response_audit, run_id=runtime.run_id)
+    final_response["final_response_audit"] = final_response_audit
     trace_event(
         "executor.request.complete",
         {

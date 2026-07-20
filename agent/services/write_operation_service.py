@@ -511,6 +511,50 @@ class WriteOperationService:
             from agent.services.portfolio_proposal_service import portfolio_proposal_service
 
             return portfolio_proposal_service.commit_paper_trade(user_id, plan_id, confirmation_token, output_dir=output_dir, db_path=db_path, session_id=session_id)
+        if intent == "apply_strategy_implementation":
+            from agent.tools.strategy_workflow_tools import (
+                commit_strategy_apply_plan,
+            )
+
+            return commit_strategy_apply_plan(
+                user_id=user_id,
+                plan_id=plan_id,
+                confirmation_token=confirmation_token,
+                conversation_id=session_id,
+                output_dir=output_dir,
+                db_path=db_path,
+                runtime_dir=Path(output_dir).parent / "runtime",
+                project_root=".",
+            )
+        if intent in {
+            "activate_strategy_binding",
+            "rollback_strategy_binding",
+        }:
+            from agent.tools.strategy_workflow_tools import (
+                commit_strategy_binding_plan,
+            )
+
+            return commit_strategy_binding_plan(
+                user_id=user_id,
+                plan_id=plan_id,
+                confirmation_token=confirmation_token,
+                conversation_id=session_id,
+                output_dir=output_dir,
+                db_path=db_path,
+            )
+        if intent == "execute_strategy_position_change":
+            from agent.tools.strategy_workflow_tools import (
+                commit_current_strategy_position_change,
+            )
+
+            return commit_current_strategy_position_change(
+                user_id=user_id,
+                plan_id=plan_id,
+                confirmation_token=confirmation_token,
+                conversation_id=session_id,
+                output_dir=output_dir,
+                db_path=db_path,
+            )
         if intent in {"register_strategy", "enable_strategy"}:
             from agent.tools.strategy_management_tool import execute_confirmed_strategy_plan
 

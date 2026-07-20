@@ -201,6 +201,11 @@ class PaperOrder:
     job_id: str = ""
     run_id: str = ""
     execution_source: str = ""
+    strategy_id: str = ""
+    strategy_version: str = ""
+    binding_id: str = ""
+    config_hash: str = ""
+    resolved_config: dict[str, Any] = field(default_factory=dict)
     is_paper_trading: bool = True
     created_at: str = field(default_factory=now_text)
 
@@ -275,6 +280,11 @@ class RebalancePlan:
     job_id: str = ""
     run_id: str = ""
     execution_source: str = ""
+    strategy_id: str = ""
+    strategy_version: str = ""
+    binding_id: str = ""
+    config_hash: str = ""
+    resolved_config: dict[str, Any] = field(default_factory=dict)
     is_paper_trading: bool = True
     disclaimer: str = PAPER_TRADING_DISCLAIMER
 

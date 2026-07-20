@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from agent.top_k import DEFAULT_TOOL_TOP_K, resolve_business_top_k, resolve_requested_top_k
+
 
 _SOURCE_PATTERN = re.compile(
     r"^\$(context|(?:task|replan)_[A-Za-z0-9_-]+)(?:\.(.+))?$"
@@ -432,7 +434,22 @@ def resolve_task_arguments(
         "position_recommendation",
     }
     if intent in top_k_intents:
-        resolved.setdefault("top_k", default_top_k)
+        if context.get("business_target_position_count") not in (None, ""):
+            resolved["top_k"] = resolve_business_top_k(
+                user_explicit_top_k=context.get("user_explicit_top_k"),
+                task_top_k=resolved.get("top_k"),
+                target_position_count=context.get("business_target_position_count"),
+                candidate_redundancy_factor=context.get("candidate_redundancy_factor"),
+                request_default_top_k=context.get("default_top_k", default_top_k),
+                tool_default_top_k=DEFAULT_TOOL_TOP_K,
+            )
+        else:
+            resolved["top_k"] = resolve_requested_top_k(
+                user_explicit_top_k=context.get("user_explicit_top_k"),
+                task_top_k=resolved.get("top_k"),
+                request_default_top_k=context.get("default_top_k", default_top_k),
+                tool_default_top_k=DEFAULT_TOOL_TOP_K,
+            )
 
     # Priority:
     # 1. Keep an explicit stock_code that resolved successfully.

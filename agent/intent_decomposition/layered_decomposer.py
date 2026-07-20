@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import Any
 
 from agent.console_trace import flow_event, trace_event, trace_exception
+from core.llm.runtime_settings import LLMRuntimeSettings, resolve_active_llm_settings
 
 from agent.intent_decomposition.llm_decomposer import IntentDecompositionError, decompose_with_llm
 from agent.intent_decomposition.rule_fallback import decompose_with_rules, extract_rule_hints
@@ -18,6 +19,7 @@ from agent.intent_decomposition.schemas import (
     SupervisorDecision,
     TaskPlan,
     UserGoal,
+    PROTECTED_OPERATION_TYPES,
     WRITE_INTENTS,
 )
 
@@ -41,6 +43,26 @@ def _resolve_llm_settings(api_key: str | None, base_url: str | None, model: str 
     resolved_base = str(base_url if base_url is not None else saved.get("base_url", "")).strip()
     resolved_model = str(model if model is not None else saved.get("model", "")).strip()
     return resolved_key or None, resolved_base or None, resolved_model or None
+
+
+def _decompose_with_rules_compat(
+    query: str,
+    *,
+    warning: str,
+    context: dict[str, Any] | None,
+) -> IntentDecomposition:
+    """Pass strategy context while preserving old injected fallback callables."""
+
+    try:
+        return decompose_with_rules(
+            query,
+            warning=warning,
+            context=context,
+        )
+    except TypeError as exc:
+        if "unexpected keyword argument 'context'" not in str(exc):
+            raise
+        return decompose_with_rules(query, warning=warning)
 
 
 def _hard_rule_task(
@@ -477,6 +499,7 @@ def decompose_intent(
     llm_api_key: str | None = None,
     llm_base_url: str | None = None,
     llm_model: str | None = None,
+    llm_settings: LLMRuntimeSettings | None = None,
     reply_language: str = "zh",
     context: dict[str, Any] | None = None,
     enable_llm: bool = True,
@@ -510,7 +533,7 @@ def decompose_intent(
     )
     if not enable_llm:
         return _with_supervisor_decision(
-            _repair_fallback_completeness(query, decompose_with_rules(query, warning="llm_disabled")),
+            _repair_fallback_completeness(query, _decompose_with_rules_compat(query, warning="llm_disabled", context=context)),
             source=DECISION_SOURCE_FALLBACK,
             reason="LLM disabled; deterministic fallback selected only registered read/proposal tasks.",
         )
@@ -521,10 +544,15 @@ def decompose_intent(
             reason="LLM-first 模式要求业务请求必须由 LLM 解析",
         )
 
-    api_key, base_url, model = _resolve_llm_settings(llm_api_key, llm_base_url, llm_model)
-    if not api_key:
+    active_llm = llm_settings or resolve_active_llm_settings(
+        api_key=llm_api_key,
+        base_url=llm_base_url,
+        model=llm_model,
+    )
+    api_key, base_url, model = active_llm.api_key, active_llm.base_url, active_llm.model
+    if active_llm.mode == "api" and not api_key:
         return _with_supervisor_decision(
-            _repair_fallback_completeness(query, decompose_with_rules(query, warning="missing_api_key")),
+            _repair_fallback_completeness(query, _decompose_with_rules_compat(query, warning="missing_api_key", context=context)),
             source=DECISION_SOURCE_FALLBACK,
             reason="LLM API key missing; deterministic fallback selected only registered read/proposal tasks.",
         )
@@ -544,6 +572,7 @@ def decompose_intent(
             api_key=api_key,
             base_url=base_url,
             model=model,
+            llm_settings=active_llm,
             reply_language=reply_language,
             context=context_packet,
             rule_hints=hints,
@@ -554,7 +583,7 @@ def decompose_intent(
         ):
             fallback = _repair_fallback_completeness(
                 query,
-                decompose_with_rules(query, warning="LLM意图拆解失败：写任务不能由 LLM 绕过硬保护路由"),
+                _decompose_with_rules_compat(query, warning="LLM意图拆解失败：写任务不能由 LLM 绕过硬保护路由", context=context),
             )
             return _with_supervisor_decision(
                 fallback,
@@ -583,7 +612,7 @@ def decompose_intent(
         code = "insufficient_balance" if _is_insufficient_balance_error(exc) else "llm_planning_failed"
         if code != "insufficient_balance":
             return _with_supervisor_decision(
-                _repair_fallback_completeness(query, decompose_with_rules(query, warning=f"llm_planning_failed:{type(exc).__name__}")),
+                _repair_fallback_completeness(query, _decompose_with_rules_compat(query, warning=f"llm_planning_failed:{type(exc).__name__}", context=context)),
                 source=DECISION_SOURCE_FALLBACK,
                 reason="LLM planning failed; deterministic fallback selected only registered read/proposal tasks.",
                 extra_diagnostics={"llm_planner_elapsed_ms": round((time.perf_counter() - started) * 1000.0, 3)},

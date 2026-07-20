@@ -37,7 +37,7 @@ class MessageRouter:
             return ["tool_executor"]
         if message_type in {MessageType.APPROVAL_REQUESTED, MessageType.APPROVAL_RESULT_RECEIVED}:
             return ["write_gateway", "ui", "audit"]
-        if message_type in {MessageType.FINAL_REPORT, MessageType.REPORT_DRAFTED}:
+        if message_type in {MessageType.FINAL_REPORT, MessageType.FINAL_RESPONSE, MessageType.REPORT_DRAFTED}:
             return ["ui", "audit"]
         if message_type in {
             MessageType.HANDOFF_REQUESTED,
@@ -56,7 +56,7 @@ class MessageRouter:
             return MessageVisibility.TOOL_ONLY
         if message.message_type in {MessageType.ERROR_RAISED, MessageType.WARNING_RAISED}:
             return MessageVisibility.AUDIT_ONLY
-        if message.message_type in {MessageType.FINAL_REPORT, MessageType.REPORT_DRAFTED}:
+        if message.message_type in {MessageType.FINAL_REPORT, MessageType.FINAL_RESPONSE, MessageType.REPORT_DRAFTED}:
             return MessageVisibility.UI_VISIBLE
         if message.message_type in {
             MessageType.HANDOFF_REQUESTED,

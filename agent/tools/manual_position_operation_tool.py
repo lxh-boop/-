@@ -492,6 +492,21 @@ def preview_manual_position_operation(
 ) -> ToolResult:
     code = normalize_stock_code(stock_code)
     state = query_portfolio_state(user_id, output_dir=output_dir, db_path=db_path)
+    if not bool(state.get("safe_to_continue", state.get("consistency_status") != "rejected")):
+        return ToolResult(
+            success=False,
+            message="Portfolio data is inconsistent, so no recommendation or paper-trade preview was created.",
+            data={
+                "status": "logic_error",
+                "error_code": str(state.get("error_code") or "portfolio_snapshot_inconsistent"),
+                "snapshot_id": str(state.get("snapshot_id") or ""),
+                "safe_to_continue": False,
+                "safe_to_write": False,
+            },
+            errors=list(state.get("consistency_errors") or ["portfolio_snapshot_inconsistent"]),
+            permission=ToolPermission.PREVIEW,
+            tool_name="manual_position_operation_tool",
+        )
     if not code:
         if _looks_like_portfolio_stability_adjustment(query):
             return _preview_stable_portfolio_rebalance(

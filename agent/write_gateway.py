@@ -20,6 +20,10 @@ PLAN_INTENT_TO_TOOL = {
     "execute_portfolio_rebalance": "portfolio.commit_paper_trade",
     "register_strategy": "approval.confirm_plan",
     "enable_strategy": "approval.confirm_plan",
+    "apply_strategy_implementation": "strategy.apply.commit",
+    "activate_strategy_binding": "strategy.binding.commit",
+    "rollback_strategy_binding": "strategy.binding.commit",
+    "execute_strategy_position_change": "strategy.position.commit",
 }
 
 

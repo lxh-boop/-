@@ -52,23 +52,38 @@ class HierarchicalTop10Strategy(PortfolioStrategy):
         return {
             "type": "object",
             "properties": {
-                "top_n": {
+                "entry_top_k": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 10,
                     "default": 10,
                 },
-                "target_ratio": {
+                "hold_buffer_rank": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 15,
+                },
+                "max_positions": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 10,
+                },
+                "target_invested_weight": {
                     "type": "number",
                     "minimum": 0,
                     "maximum": 1,
                     "default": TOP10_TARGET_RATIO,
                 },
-                "min_cash_ratio": {
+                "minimum_cash_ratio": {
                     "type": "number",
                     "minimum": 0,
                     "maximum": 1,
                     "default": 0.05,
+                },
+                "min_rebalance_weight_delta": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1,
+                    "default": 0.01,
                 },
             },
             "required": [],
@@ -78,15 +93,23 @@ class HierarchicalTop10Strategy(PortfolioStrategy):
     def validate_config(self, config: dict[str, Any]) -> list[str]:
         errors: list[str] = []
         try:
-            top_n = int(config.get("top_n", 10))
+            top_n = int(
+                config.get("entry_top_k", config.get("top_n", 10))
+            )
         except (TypeError, ValueError):
             top_n = 0
-        if not 1 <= top_n <= 10:
-            errors.append("top_n_must_be_between_1_and_10")
+        if top_n < 1:
+            errors.append("entry_top_k_must_be_positive")
 
-        for field in ["target_ratio", "min_cash_ratio"]:
+        aliases = {
+            "target_invested_weight": "target_ratio",
+            "minimum_cash_ratio": "min_cash_ratio",
+        }
+        for field, alias in aliases.items():
             try:
-                value = float(config.get(field, 0.0))
+                value = float(
+                    config.get(field, config.get(alias, 0.0))
+                )
             except (TypeError, ValueError):
                 errors.append(f"{field}_must_be_number")
                 continue
@@ -111,9 +134,23 @@ class HierarchicalTop10Strategy(PortfolioStrategy):
                 metadata={"validation_status": "failed"},
             )
 
-        top_n = int(config.get("top_n", 10))
-        target_ratio = float(config.get("target_ratio", TOP10_TARGET_RATIO))
-        min_cash_ratio = float(config.get("min_cash_ratio", 0.05))
+        top_n = min(
+            int(config.get("entry_top_k", config.get("top_n", 10))),
+            int(config.get("max_positions", 10)),
+        )
+        target_ratio = float(
+            config.get(
+                "target_invested_weight",
+                config.get("target_ratio", TOP10_TARGET_RATIO),
+            )
+        )
+        min_cash_ratio = float(
+            config.get(
+                "minimum_cash_ratio",
+                config.get("min_cash_ratio", 0.05),
+            )
+        )
+        target_ratio = min(target_ratio, 1.0 - min_cash_ratio)
         candidates = [
             row
             for index, row in enumerate(_records(context.predictions), start=1)

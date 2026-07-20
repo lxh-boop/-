@@ -42,7 +42,15 @@ class PortfolioRepository:
     def insert_paper_order(self, record: dict[str, Any]) -> dict[str, Any]:
         payload = dict(record)
         payload.setdefault("is_paper_trading", 1)
-        return self.store.upsert("paper_order", payload)
+        payload["resolved_config_json"] = json_dumps(
+            payload.pop("resolved_config", {})
+        )
+        saved = self.store.upsert("paper_order", payload)
+        saved["resolved_config"] = json_loads(
+            saved.pop("resolved_config_json", "{}"),
+            default={},
+        )
+        return saved
 
     def get_paper_order(self, order_id: str) -> dict[str, Any] | None:
         return self.store.get("paper_order", {"order_id": order_id})
@@ -57,10 +65,24 @@ class PortfolioRepository:
             filters["user_id"] = user_id
         if account_id:
             filters["account_id"] = account_id
-        return self.store.list("paper_order", filters=filters or None, order_by="created_at")
+        rows = self.store.list(
+            "paper_order",
+            filters=filters or None,
+            order_by="created_at",
+        )
+        for row in rows:
+            row["resolved_config"] = json_loads(
+                row.pop("resolved_config_json", "{}"),
+                default={},
+            )
+        return rows
 
     def insert_paper_decision(self, record: dict[str, Any]) -> dict[str, Any]:
-        return self.store.upsert("paper_decision_log", dict(record))
+        payload = dict(record)
+        payload["resolved_config_json"] = json_dumps(
+            payload.pop("resolved_config", {})
+        )
+        return self.store.upsert("paper_decision_log", payload)
 
     def list_paper_decisions(self, user_id: str | None = None, trade_date: str | None = None) -> list[dict[str, Any]]:
         filters = {}
@@ -68,7 +90,17 @@ class PortfolioRepository:
             filters["user_id"] = user_id
         if trade_date:
             filters["trade_date"] = trade_date
-        return self.store.list("paper_decision_log", filters=filters or None, order_by="decision_time")
+        rows = self.store.list(
+            "paper_decision_log",
+            filters=filters or None,
+            order_by="decision_time",
+        )
+        for row in rows:
+            row["resolved_config"] = json_loads(
+                row.pop("resolved_config_json", "{}"),
+                default={},
+            )
+        return rows
 
     def insert_trading_behavior(self, record: dict[str, Any]) -> dict[str, Any]:
         payload = dict(record)
@@ -111,7 +143,58 @@ class PortfolioRepository:
         return rows[-1] if rows else None
 
     def insert_account_snapshot(self, record: dict[str, Any]) -> dict[str, Any]:
-        return self.store.upsert("paper_account_snapshot", dict(record))
+        payload = dict(record)
+        payload["resolved_config_json"] = json_dumps(
+            payload.pop("resolved_config", {})
+        )
+        return self.store.upsert("paper_account_snapshot", payload)
+
+    def insert_strategy_execution_history(
+        self,
+        record: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = dict(record)
+        for field in [
+            "resolved_config",
+            "positions_before",
+            "target_portfolio",
+            "orders",
+            "positions_after",
+        ]:
+            payload[f"{field}_json"] = json_dumps(
+                payload.pop(field, {} if field == "resolved_config" else [])
+            )
+        return self.store.upsert(
+            "paper_strategy_execution_history",
+            payload,
+        )
+
+    def list_strategy_execution_history(
+        self,
+        user_id: str,
+        account_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        filters = {"user_id": user_id}
+        if account_id:
+            filters["account_id"] = account_id
+        rows = self.store.list(
+            "paper_strategy_execution_history",
+            filters=filters,
+            order_by="trade_date",
+        )
+        for row in rows:
+            for field in [
+                "resolved_config",
+                "positions_before",
+                "target_portfolio",
+                "orders",
+                "positions_after",
+            ]:
+                row[field] = json_loads(
+                    row.pop(f"{field}_json", ""),
+                    default={} if field == "resolved_config" else [],
+                )
+        return rows
 
     def insert_replay_run(self, record: dict[str, Any]) -> dict[str, Any]:
         return self.store.upsert("paper_replay_run", dict(record))

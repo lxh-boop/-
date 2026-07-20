@@ -13,6 +13,7 @@ def create_position(
     total_assets: float = 0.0,
     industry: str = "",
     position_id: str | None = None,
+    updated_at: str | None = None,
 ) -> PaperPosition:
     stock_code = str(stock_code).split(".")[0].zfill(6)
     market_value = float(quantity) * float(current_price)
@@ -31,7 +32,7 @@ def create_position(
         position_ratio=ratio,
         industry=industry,
         unrealized_pnl=unrealized_pnl,
-        updated_at=now_text(),
+        updated_at=str(updated_at or now_text()),
     )
 
 
@@ -46,4 +47,5 @@ def position_from_dict(data: dict, total_assets: float = 0.0) -> PaperPosition:
         total_assets=float(total_assets or 0.0),
         industry=str(data.get("industry") or ""),
         position_id=str(data.get("position_id") or ""),
+        updated_at=str(data.get("updated_at") or ""),
     )

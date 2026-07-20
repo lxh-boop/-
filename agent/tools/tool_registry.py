@@ -20,6 +20,20 @@ from agent.tools.report_tool import query_latest_reports
 from agent.tools.scheduler_tool import query_scheduler_status
 from agent.tools.strategy_builder_tool import prepare_strategy_change
 from agent.tools.strategy_management_tool import execute_confirmed_strategy_plan, manage_strategy
+from agent.tools.strategy_workflow_tools import (
+    commit_strategy_apply_plan,
+    commit_strategy_binding_plan,
+    commit_current_strategy_position_change,
+    create_strategy_activation_plan,
+    create_strategy_binding_rollback_plan,
+    create_strategy_apply_plan,
+    preview_current_strategy_position_change,
+    get_active_strategy_proposal,
+    get_strategy_audit_trace,
+    get_strategy_context,
+    prepare_strategy_implementation,
+    save_strategy_proposal_draft,
+)
 from agent.tools.stock_analysis_tool import analyze_stock
 from agent.tools.stock_lookup_tool import lookup_stock
 from agent.tools.stock_news_tool import query_stock_news
@@ -133,6 +147,28 @@ _COMMON_INPUTS: dict[str, dict[str, Any]] = {
     "action": {"type": "string"},
     "strategy_id": {"type": "string"},
     "strategy_version": {"type": "string"},
+    "account_id": {"type": "string"},
+    "conversation_id": {"type": "string"},
+    "conversation_action": {"type": "string"},
+    "proposal_id": {"type": "string"},
+    "commit_id": {"type": "string"},
+    "binding_id": {"type": "string"},
+    "proposal_json": {"type": "object"},
+    "original_request": {"type": "string"},
+    "user_feedback": {"type": "string"},
+    "change_summary": {"type": "string"},
+    "base_strategy_id": {"type": "string"},
+    "base_strategy_version": {"type": "string"},
+    "source_run_id": {"type": "string"},
+    "proposal_version": {"type": "integer"},
+    "run_id": {"type": "string"},
+    "implementation_id": {"type": "string"},
+    "effective_from": {"type": "string"},
+    "recommendations": {
+        "type": "array",
+        "items": {"type": "object"},
+    },
+    "trade_date": {"type": "string"},
 }
 
 
@@ -256,6 +292,18 @@ def get_tool_registry(
         _spec("position_recommendation", ToolPermission.READ, "Recommend a paper target weight.", recommend_position_weight, input_schema=_schema_for("user_id", "stock_code", "requested_weight", "top_k", "output_dir", "db_path"), category=ToolCategory.READ_ANALYSIS),
         _spec("replacement_recommendation", ToolPermission.READ, "Rank existing positions for possible replacement.", recommend_replacements, input_schema=_schema_for("user_id", "stock_code", "requested_weight", "output_dir", "db_path"), category=ToolCategory.READ_ANALYSIS),
         _spec("manual_position_operation_tool", ToolPermission.PREVIEW, "Preview a one-time paper-position operation without changing long-term strategy.", preview_manual_position_operation, True, input_schema=_schema_for("user_id", "stock_code", "requested_weight", "position_adjustment_ratio", "requested_quantity", "cash_weight", "target_position_count", "query", "top_k", "output_dir", "db_path", "session_id", required=["user_id"]), result_retention="full"),
+        _spec("strategy.get_context", ToolPermission.READ, "Read the exact user/account/conversation strategy discussion context.", get_strategy_context, input_schema=_schema_for("user_id", "account_id", "conversation_id", "output_dir", "db_path", required=["user_id"]), result_retention="full"),
+        _spec("strategy.get_active_proposal", ToolPermission.READ, "Read the active versioned strategy proposal in the exact user/account/conversation scope.", get_active_strategy_proposal, input_schema=_schema_for("user_id", "account_id", "conversation_id", "db_path", required=["user_id"]), result_retention="full"),
+        _spec("strategy.get_audit_trace", ToolPermission.READ, "Reconstruct a redacted strategy lifecycle audit trace from stable identifiers.", get_strategy_audit_trace, input_schema=_schema_for("user_id", "proposal_id", "implementation_id", "plan_id", "commit_id", "binding_id", "run_id", "conversation_id", "output_dir", "db_path", required=["user_id"]), result_retention="full"),
+        _spec("strategy.save_proposal_draft", ToolPermission.PREVIEW, "Save the exact LLM-authored strategy draft without creating a formal confirmation plan.", save_strategy_proposal_draft, False, input_schema=_schema_for("user_id", "account_id", "conversation_id", "conversation_action", "proposal_id", "proposal_json", "original_request", "user_feedback", "change_summary", "base_strategy_id", "base_strategy_version", "source_run_id", "db_path", required=["user_id", "conversation_action"]), result_retention="full"),
+        _spec("strategy.prepare_implementation", ToolPermission.PREVIEW, "Lock an exact Proposal version and generate isolated implementation artifacts only.", prepare_strategy_implementation, False, input_schema=_schema_for("proposal_id", "proposal_version", "user_id", "account_id", "conversation_id", "run_id", "db_path", required=["proposal_id", "proposal_version", "user_id", "account_id", "conversation_id", "run_id"]), result_retention="full"),
+        _spec("strategy.create_apply_plan", ToolPermission.PREVIEW, "Create a confirmation-required hash-bound plan for applying a validated implementation.", create_strategy_apply_plan, True, input_schema=_schema_for("implementation_id", "user_id", "account_id", "conversation_id", "run_id", "output_dir", "db_path", required=["implementation_id", "user_id", "account_id", "conversation_id", "run_id"]), result_retention="full"),
+        _spec("strategy.apply.commit", ToolPermission.WRITE, "Commit a confirmed strategy implementation after full hash revalidation.", commit_strategy_apply_plan, True, input_schema=_schema_for("user_id", "plan_id", "confirmation_token", "conversation_id", "output_dir", "db_path", required=["user_id", "plan_id", "confirmation_token"]), result_retention="full"),
+        _spec("strategy.create_activation_plan", ToolPermission.PREVIEW, "Create an account-scoped future strategy activation confirmation plan.", create_strategy_activation_plan, True, input_schema=_schema_for("user_id", "account_id", "strategy_id", "strategy_version", "effective_from", "conversation_id", "run_id", "output_dir", "db_path", required=["user_id", "account_id", "strategy_id", "strategy_version"]), result_retention="full"),
+        _spec("strategy.create_binding_rollback_plan", ToolPermission.PREVIEW, "Create a confirmation plan to restore the previous account strategy binding.", create_strategy_binding_rollback_plan, True, input_schema=_schema_for("user_id", "account_id", "conversation_id", "run_id", "output_dir", "db_path", required=["user_id", "account_id"]), result_retention="full"),
+        _spec("strategy.binding.commit", ToolPermission.WRITE, "Commit a confirmed account-scoped strategy activation or rollback.", commit_strategy_binding_plan, True, input_schema=_schema_for("user_id", "plan_id", "confirmation_token", "conversation_id", "output_dir", "db_path", required=["user_id", "plan_id", "confirmation_token"]), result_retention="full"),
+        _spec("strategy.preview_current_position_change", ToolPermission.PREVIEW, "Preview applying the effective strategy Binding to current paper positions.", preview_current_strategy_position_change, True, input_schema=_schema_for("user_id", "account_id", "recommendations", "trade_date", "conversation_id", "run_id", "output_dir", "db_path", required=["user_id", "account_id"]), result_retention="full"),
+        _spec("strategy.position.commit", ToolPermission.WRITE, "Commit a confirmed current-position strategy change after account and Binding revalidation.", commit_current_strategy_position_change, True, input_schema=_schema_for("user_id", "plan_id", "confirmation_token", "conversation_id", "output_dir", "db_path", required=["user_id", "plan_id", "confirmation_token"]), result_retention="full"),
         _spec("strategy_builder_tool", ToolPermission.PREVIEW, "Preview a long-term strategy change and prepare registration confirmation.", prepare_strategy_change, True, input_schema=_schema_for("user_id", "requirement", "parameters", "output_dir", "db_path", "session_id", required=["user_id", "requirement"]), result_retention="full"),
         _spec("strategy_management_tool", ToolPermission.PREVIEW, "List, enable, disable, switch, or prepare confirmation for paper strategies.", manage_strategy, True, input_schema=_schema_for("user_id", "action", "strategy_id", "strategy_version", "output_dir", "db_path", "session_id", required=["user_id", "action"]), result_retention="full"),
         _spec("rebalance_plan", ToolPermission.PREVIEW, "Create a confirmation-required rebalance preview.", preview_add_stock_to_paper, True, input_schema=_schema_for("user_id", "stock_code", "requested_weight", "top_k", "output_dir", "db_path", "session_id", required=["user_id", "stock_code"]), result_retention="full"),
