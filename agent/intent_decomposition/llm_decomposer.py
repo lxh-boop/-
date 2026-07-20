@@ -4,8 +4,10 @@ import json
 from typing import Any, Callable
 
 from llm_client import LLMClient
+from core.llm.runtime_settings import LLMRuntimeSettings, resolve_active_llm_settings
 
 from agent.console_trace import flow_event, trace_event, trace_exception
+from agent.llm_audit import record_schema_result
 
 from agent.intent_decomposition.prompts import (
     build_completion_messages,
@@ -83,10 +85,10 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     raise IntentDecompositionError("Incomplete JSON object returned by LLM.")
 
 
-def _client(*, api_key: str | None, base_url: str | None, model: str | None) -> LLMClient:
-    client = LLMClient(api_key=api_key, base_url=base_url, model=model)
-    if not client.api_key:
-        raise IntentDecompositionError("LLM API key is not configured.")
+def _client(*, api_key: str | None, base_url: str | None, model: str | None, llm_settings: LLMRuntimeSettings | None = None) -> LLMClient:
+    client = LLMClient(settings=llm_settings) if llm_settings is not None else LLMClient(api_key=api_key, base_url=base_url, model=model)
+    if client.mode == "api" and not client.api_key:
+        raise IntentDecompositionError("Remote API key is not configured; no local fallback was attempted.")
     return client
 
 
@@ -116,16 +118,29 @@ def _chat_json(
     messages: list[dict[str, str]],
     *,
     max_tokens: int,
+    stage: str,
+    operation: str = "",
     validator: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Call once and make one schema-repair attempt. Never use a rule fallback."""
-    output = client.chat(messages=messages, temperature=0.0, max_tokens=max_tokens)
+    if hasattr(client, "chat_audited"):
+        output = client.chat_audited(
+            messages=messages,
+            temperature=0.0,
+            max_tokens=max_tokens,
+            audit_stage=stage,
+            audit_operation=operation or "primary",
+        )
+    else:  # Compatibility for explicit unit-test doubles only.
+        output = client.chat(messages=messages, temperature=0.0, max_tokens=max_tokens)
     try:
         parsed = _extract_json_object(output)
         if validator:
             validator(parsed)
+        record_schema_result(getattr(client, "last_audit_event_id", ""), True)
         return parsed
     except Exception as first_exc:
+        record_schema_result(getattr(client, "last_audit_event_id", ""), False)
         trace_exception("llm.json.first_parse_failed", first_exc)
         repair_messages = [
             *messages,
@@ -139,14 +154,25 @@ def _chat_json(
                 ),
             },
         ]
-        repaired = client.chat(messages=repair_messages, temperature=0.0, max_tokens=max_tokens)
+        if hasattr(client, "chat_audited"):
+            repaired = client.chat_audited(
+                messages=repair_messages,
+                temperature=0.0,
+                max_tokens=max_tokens,
+                audit_stage=stage,
+                audit_operation="schema_repair",
+            )
+        else:  # Compatibility for explicit unit-test doubles only.
+            repaired = client.chat(messages=repair_messages, temperature=0.0, max_tokens=max_tokens)
         try:
             parsed = _extract_json_object(repaired)
             if validator:
                 validator(parsed)
+            record_schema_result(getattr(client, "last_audit_event_id", ""), True)
             trace_event("llm.json.repair_succeeded", {"keys": sorted(parsed.keys())})
             return parsed
         except Exception as second_exc:
+            record_schema_result(getattr(client, "last_audit_event_id", ""), False)
             trace_exception("llm.json.repair_failed", second_exc)
             raise IntentDecompositionError(
                 f"LLM JSON/schema repair failed: {type(first_exc).__name__}; {type(second_exc).__name__}: {second_exc}"
@@ -173,12 +199,13 @@ def decompose_with_llm(
     api_key: str | None = None,
     base_url: str | None = None,
     model: str | None = None,
+    llm_settings: LLMRuntimeSettings | None = None,
     reply_language: str = "zh",
     context: dict[str, Any] | None = None,
     rule_hints: dict[str, Any] | None = None,
 ) -> IntentDecomposition:
     """Generate UserGoal/TaskPlan and review them in two independent LLM calls."""
-    client = _client(api_key=api_key, base_url=base_url, model=model)
+    client = _client(api_key=api_key, base_url=base_url, model=model, llm_settings=llm_settings)
     safe_context = _safe_payload(context or {})
     safe_hints = _safe_payload(rule_hints or {})
 
@@ -192,6 +219,8 @@ def decompose_with_llm(
             rule_hints=safe_hints,
         ),
         max_tokens=3000,
+        stage="planner",
+        operation="intent_decomposition",
         validator=_validate_planner,
     )
 
@@ -225,6 +254,8 @@ def decompose_with_llm(
             rule_hints=safe_hints,
         ),
         max_tokens=2400,
+        stage="goal_reviewer",
+        operation="goal_and_plan_review",
         validator=_validate_review,
     )
 
@@ -272,7 +303,10 @@ def decompose_with_llm(
             "llm_used": True,
             "llm_goal_parser_called": True,
             "llm_goal_plan_reviewer_called": True,
-            "model": str(model or client.model or ""),
+            "model": str(client.model or ""),
+            "llm_mode": client.mode,
+            "llm_provider": client.provider,
+            "llm_config_hash": client.settings.config_hash,
             "business_rule_fallback_disabled": True,
         },
     )
@@ -287,9 +321,10 @@ def assess_completion_with_llm(
     api_key: str | None = None,
     base_url: str | None = None,
     model: str | None = None,
+    llm_settings: LLMRuntimeSettings | None = None,
     context: dict[str, Any] | None = None,
 ) -> CompletionAssessment:
-    client = _client(api_key=api_key, base_url=base_url, model=model)
+    client = _client(api_key=api_key, base_url=base_url, model=model, llm_settings=llm_settings)
     parsed = _chat_json(
         client,
         build_completion_messages(
@@ -298,6 +333,8 @@ def assess_completion_with_llm(
             context=_safe_payload(context or {}),
         ),
         max_tokens=1300,
+        stage="completion",
+        operation="completion_assessment",
     )
     return CompletionAssessment.from_dict(parsed, llm_used=True)
 
@@ -313,9 +350,10 @@ def generate_report_with_llm(
     api_key: str | None = None,
     base_url: str | None = None,
     model: str | None = None,
+    llm_settings: LLMRuntimeSettings | None = None,
     context: dict[str, Any] | None = None,
 ) -> str:
-    client = _client(api_key=api_key, base_url=base_url, model=model)
+    client = _client(api_key=api_key, base_url=base_url, model=model, llm_settings=llm_settings)
     trace_event("report.llm.start", {"query": query, "user_goal": user_goal, "completion": completion})
     parsed = _chat_json(
         client,
@@ -329,6 +367,8 @@ def generate_report_with_llm(
             context=_safe_payload(context or {}),
         ),
         max_tokens=2000,
+        stage="completion",
+        operation="report_generation",
     )
     answer = str(parsed.get("answer") or "").strip()
     if not answer:
@@ -358,8 +398,9 @@ def critique_report_with_llm(
     api_key: str | None = None,
     base_url: str | None = None,
     model: str | None = None,
+    llm_settings: LLMRuntimeSettings | None = None,
 ) -> dict[str, Any]:
-    client = _client(api_key=api_key, base_url=base_url, model=model)
+    client = _client(api_key=api_key, base_url=base_url, model=model, llm_settings=llm_settings)
     trace_event("semantic_critic.llm.start", {"query": query, "user_goal": user_goal, "completion": completion, "answer": answer})
     parsed = _chat_json(
         client,
@@ -372,6 +413,8 @@ def critique_report_with_llm(
             reply_language=reply_language,
         ),
         max_tokens=1800,
+        stage="critic",
+        operation="semantic_critic",
     )
     action = str(parsed.get("action") or "pass").strip().lower()
     if action not in {"pass", "revise", "ask_user", "block"}:
