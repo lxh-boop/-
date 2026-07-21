@@ -214,6 +214,9 @@ class LLMService:
 
     def validate_connection(self) -> tuple[bool, str]:
         try:
+            validation_output_budget = (
+                25600 if self.profile.deployment_mode == "local" else 2000
+            )
             self.generate_text(
                 stage="completion",
                 messages=[
@@ -221,7 +224,7 @@ class LLMService:
                     {"role": "user", "content": "请回复 OK，用于连接测试。"},
                 ],
                 temperature=0.0,
-                max_output_tokens=20,
+                max_output_tokens=validation_output_budget,
                 operation="connection_validation",
             )
             label = "本地 Ollama" if self.profile.deployment_mode == "local" else "远程 API"

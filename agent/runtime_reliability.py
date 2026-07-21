@@ -80,8 +80,8 @@ class RuntimeCircuitOpen(RuntimeError):
 
 @dataclass(frozen=True)
 class RuntimePolicy:
-    agent_timeout_seconds: float = 60.0
-    tool_timeout_seconds: float = 30.0
+    agent_timeout_seconds: float = 9960.0
+    tool_timeout_seconds: float = 9930.0
     max_retry_attempts: int = 2
     retry_backoff_seconds: float = 0.05
     max_run_steps: int = 30
