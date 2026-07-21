@@ -45,6 +45,7 @@ def _clamp(value: Any, default: float = 0.0) -> float:
 
 
 class MemoryType(str, Enum):
+    # Legacy database compatibility only. Runtime working state is ContextBundle.
     WORKING = "WORKING"
     EPISODIC = "EPISODIC"
     SEMANTIC = "SEMANTIC"
@@ -59,7 +60,7 @@ class MemoryType(str, Enum):
             return value
         text = str(value or "").strip()
         if not text:
-            return cls.WORKING
+            return cls.EPISODIC
         upper = text.upper()
         if upper in cls.__members__:
             return cls[upper]
@@ -150,11 +151,11 @@ class MemoryRecord:
     task_id: str = ""
     source_type: str = ""
     source_id: str = ""
-    memory_type: MemoryType = MemoryType.WORKING
+    memory_type: MemoryType = MemoryType.EPISODIC
     memory_subtype: str = ""
     scope: MemoryScope = MemoryScope.CONVERSATION
     visibility: MemoryVisibility = MemoryVisibility.LLM_VISIBLE
-    status: MemoryStatus = MemoryStatus.CANDIDATE
+    status: MemoryStatus = MemoryStatus.ACTIVE
     content: str = ""
     summary: str = ""
     topics: list[str] = field(default_factory=list)
@@ -221,7 +222,7 @@ class MemoryRecord:
             task_id=str(data.get("task_id") or metadata.get("task_id") or ""),
             source_type=str(data.get("source_type") or ""),
             source_id=str(data.get("source_id") or ""),
-            memory_type=phase14_type or data.get("memory_type") or MemoryType.WORKING,
+            memory_type=phase14_type or data.get("memory_type") or MemoryType.EPISODIC,
             memory_subtype=memory_subtype,
             scope=data.get("scope") or metadata.get("scope") or MemoryScope.CONVERSATION,
             visibility=data.get("visibility") or metadata.get("visibility") or MemoryVisibility.LLM_VISIBLE,
@@ -245,3 +246,24 @@ class MemoryRecord:
             source_refs=list(data.get("source_refs") or metadata.get("source_refs") or []),
         )
 
+
+
+
+def _parse_memory_time(value: Any) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).replace("Z", "").strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text[: len(fmt)], fmt)
+        except ValueError:
+            pass
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def is_record_expired(record: MemoryRecord, now: datetime | None = None) -> bool:
+    valid_until = _parse_memory_time(record.valid_until)
+    return bool(valid_until and valid_until <= (now or datetime.now()))

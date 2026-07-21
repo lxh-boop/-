@@ -85,10 +85,14 @@ def main() -> int:
 
     records: list[MemoryRecord] = []
     rejected: list[dict[str, str]] = []
+    skipped_working = 0
     for row in memory_rows:
         try:
             record = MemoryRecord.from_dict(row)
             record.metadata = {**dict(record.metadata or {}), "migrated_from": "memory_items"}
+            if record.memory_type == MemoryType.WORKING:
+                skipped_working += 1
+                continue
             records.append(record)
         except Exception as exc:
             rejected.append({"source": "memory_items", "id": str(row.get("memory_id") or ""), "error": type(exc).__name__})
@@ -103,7 +107,10 @@ def main() -> int:
     if args.apply:
         manager = MemoryManager(db_path=memory_store_path(args.output_dir))
         for record in records:
-            manager.remember(record, long_term=True)
+            if record.status == MemoryStatus.CANDIDATE:
+                manager.store.upsert(record)
+            else:
+                manager.remember(record, long_term=True)
             written += 1
 
     report = {
@@ -111,6 +118,7 @@ def main() -> int:
         "legacy_memory_count": len(memory_rows),
         "legacy_summary_count": len(summary_rows),
         "convertible_count": len(records),
+        "skipped_legacy_working_count": skipped_working,
         "written_count": written,
         "rejected_count": len(rejected),
         "rejected": rejected[:100],

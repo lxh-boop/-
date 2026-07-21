@@ -5,8 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .memory_store import SQLiteMemoryStore
-from .memory_types import MemoryRecord, MemoryType
-from .working_memory import WorkingMemory, is_record_expired
+from .memory_types import MemoryRecord, MemoryStatus, MemoryType, is_record_expired
 
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9_]{2,}|\d{6}")
@@ -30,20 +29,13 @@ class MemorySearchResult:
 
 
 class MemoryRetriever:
-    """Retrieve and rank a broad candidate pool.
+    """Retrieve only active long-term memory from SQLite.
 
-    This layer deliberately does not decide which memories enter the LLM
-    context.  Context admission is performed by MemoryContextSelector using a
-    relevance threshold plus entity/task/time/token-budget filtering.
+    Runtime working state is owned by the per-run ContextBundle and therefore
+    never participates in long-term memory retrieval.
     """
 
-    def __init__(
-        self,
-        *,
-        working_memory: WorkingMemory | None = None,
-        store: SQLiteMemoryStore | None = None,
-    ) -> None:
-        self.working_memory = working_memory
+    def __init__(self, *, store: SQLiteMemoryStore | None = None) -> None:
         self.store = store
 
     def retrieve(
@@ -57,49 +49,41 @@ class MemoryRetriever:
         created_after: str = "",
         created_before: str = "",
         min_importance: float = 0.0,
-        include_working: bool = True,
-        include_long_term: bool = True,
         candidate_top_n: int = 40,
         limit: int | None = None,
     ) -> list[MemorySearchResult]:
-        # ``limit`` is accepted only for source compatibility.  New production
-        # callers must use candidate_top_n and perform threshold admission later.
-        pool_size = max(1, min(200, int(limit if limit is not None else candidate_top_n or 40)))
-        records: list[MemoryRecord] = []
+        pool_size = max(
+            1,
+            min(200, int(limit if limit is not None else candidate_top_n or 40)),
+        )
+        if self.store is None:
+            return []
 
-        if include_working and self.working_memory:
-            records.extend(
-                self.working_memory.search(
-                    user_id=user_id,
-                    query="",
-                    topics=None,
-                    stock_codes=None,
-                    min_importance=min_importance,
-                    limit=max(20, pool_size * 2),
-                )
-            )
+        records = self.store.list_records(
+            user_id=user_id,
+            memory_types=memory_types,
+            status=MemoryStatus.ACTIVE,
+            topics=None,
+            stock_codes=None,
+            min_importance=min_importance,
+            created_after=created_after,
+            created_before=created_before,
+            limit=max(40, pool_size * 4),
+        )
 
-        if include_long_term and self.store:
-            records.extend(
-                self.store.list_records(
-                    user_id=user_id,
-                    memory_types=memory_types,
-                    topics=None,
-                    stock_codes=None,
-                    min_importance=min_importance,
-                    created_after=created_after,
-                    created_before=created_before,
-                    limit=max(40, pool_size * 4),
-                )
-            )
-
-        allowed_types = {MemoryType.from_value(item) for item in (memory_types or [])}
+        allowed_types = {
+            MemoryType.from_value(item) for item in (memory_types or [])
+        }
         scored: list[MemorySearchResult] = []
         seen: set[str] = set()
         for record in records:
             if record.memory_id in seen:
                 continue
             seen.add(record.memory_id)
+            # Old WORKING rows may remain after migration. They are never
+            # admitted because ContextBundle is now the only run working state.
+            if record.memory_type == MemoryType.WORKING:
+                continue
             if allowed_types and record.memory_type not in allowed_types:
                 continue
             if is_record_expired(record):
@@ -206,7 +190,10 @@ def _topic_score(record: MemoryRecord, *, topics: list[str] | None = None) -> fl
     topic_set = {str(item).lower() for item in (topics or [])}
     if not topic_set:
         return 0.0
-    return len(topic_set & {item.lower() for item in record.topics}) / max(1, len(topic_set))
+    return len(topic_set & {item.lower() for item in record.topics}) / max(
+        1,
+        len(topic_set),
+    )
 
 
 __all__ = ["MemoryRetriever", "MemorySearchResult", "score_record"]

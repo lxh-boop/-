@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -136,7 +137,10 @@ class ContextManager:
             runtime_context=RuntimeContext(
                 run_id=str(run_id or ""),
                 phase="initial",
-                metadata={"page_state": safe_page_state} if safe_page_state else {},
+                metadata={
+                    **({"page_state": safe_page_state} if safe_page_state else {}),
+                    "working_memory_model": "context_bundle_per_run",
+                },
             ),
             memory_context=MemoryContext(
                 retrieval_id=str(memory_view.get("retrieval_id") or ""),
@@ -180,6 +184,8 @@ class ContextManager:
             metadata={
                 **dict(metadata or {}),
                 "memory_retrieval_id": str(memory_view.get("retrieval_id") or ""),
+                "working_memory_model": "context_bundle_per_run",
+                "working_memory_scope": "single_agent_run",
             },
         )
 
@@ -187,6 +193,8 @@ class ContextManager:
         self,
         bundle: ContextBundle,
         tool_result: dict[str, Any] | Any,
+        *,
+        orchestration: dict[str, Any] | None = None,
     ) -> ContextBundle:
         result = (
             tool_result.to_dict()
@@ -246,7 +254,128 @@ class ContextManager:
                 bundle.artifact_context.readable_artifact_ids.append(
                     safe_ref["artifact_id"]
                 )
+        runtime = bundle.runtime_context
+        runtime.phase = "observing"
+        runtime.warnings = list(dict.fromkeys([
+            *list(runtime.warnings or []),
+            *[str(item) for item in (result.get("warnings") or [])],
+        ]))[-50:]
+        runtime.errors = list(dict.fromkeys([
+            *list(runtime.errors or []),
+            *[str(item) for item in (result.get("errors") or [])],
+        ]))[-50:]
+        result_ref = {
+            "tool_name": str(result.get("tool_name") or ""),
+            "success": bool(result.get("success")),
+            "artifact_id": str(result.get("artifact_id") or ""),
+            "message": str(result.get("message") or "")[:300],
+        }
+        if result_ref not in runtime.tool_result_refs:
+            runtime.tool_result_refs.append(result_ref)
+        runtime.tool_result_refs = runtime.tool_result_refs[-50:]
+        self._apply_orchestration_state(bundle, orchestration or {})
+        bundle.updated_at = datetime.now().isoformat(timespec="seconds")
         return bundle
+
+    def update_task_plan(
+        self,
+        bundle: ContextBundle,
+        *,
+        user_goal: dict[str, Any] | None = None,
+        task_plan: dict[str, Any] | None = None,
+    ) -> ContextBundle:
+        if user_goal is not None:
+            bundle.task_context.user_goal = dict(user_goal or {})
+        if task_plan is not None:
+            bundle.task_context.task_plan = dict(task_plan or {})
+        task_ids = _task_ids(bundle.task_context.task_plan)
+        bundle.runtime_context.pending_tasks = task_ids
+        bundle.runtime_context.phase = "planned"
+        bundle.updated_at = datetime.now().isoformat(timespec="seconds")
+        return bundle
+
+    def update_from_observation(
+        self,
+        bundle: ContextBundle,
+        *,
+        completion: dict[str, Any] | None = None,
+        orchestration: dict[str, Any] | None = None,
+    ) -> ContextBundle:
+        completion_data = dict(completion or {})
+        runtime = bundle.runtime_context
+        runtime.completion_status = str(
+            completion_data.get("status")
+            or completion_data.get("completion_status")
+            or runtime.completion_status
+            or ""
+        )
+        runtime.missing_outputs = [
+            str(item)
+            for item in (
+                completion_data.get("missing_outputs")
+                or completion_data.get("missing_information")
+                or []
+            )
+        ][:50]
+        self._apply_orchestration_state(bundle, orchestration or {})
+        runtime.phase = "replanning" if runtime.replan_count else "observed"
+        bundle.updated_at = datetime.now().isoformat(timespec="seconds")
+        return bundle
+
+    def finalize_run_state(
+        self,
+        bundle: ContextBundle,
+        *,
+        result: dict[str, Any] | None = None,
+        completion: dict[str, Any] | None = None,
+        orchestration: dict[str, Any] | None = None,
+    ) -> ContextBundle:
+        self._apply_orchestration_state(bundle, orchestration or {})
+        completion_data = dict(completion or {})
+        result_data = dict(result or {})
+        bundle.runtime_context.completion_status = str(
+            completion_data.get("status")
+            or result_data.get("status")
+            or ("completed" if result_data.get("success") else "failed")
+        )
+        bundle.runtime_context.phase = "completed"
+        bundle.updated_at = datetime.now().isoformat(timespec="seconds")
+        return bundle
+
+    @staticmethod
+    def _apply_orchestration_state(
+        bundle: ContextBundle,
+        orchestration: dict[str, Any],
+    ) -> None:
+        if not isinstance(orchestration, dict):
+            return
+        runtime = bundle.runtime_context
+        task_results = orchestration.get("task_results")
+        completed: list[str] = []
+        failed: list[str] = []
+        if isinstance(task_results, dict):
+            for task_id, value in task_results.items():
+                item = value if isinstance(value, dict) else {}
+                if bool(item.get("success")):
+                    completed.append(str(task_id))
+                else:
+                    failed.append(str(task_id))
+        all_tasks = _task_ids(bundle.task_context.task_plan)
+        runtime.completed_tasks = list(dict.fromkeys(completed))
+        runtime.failed_tasks = list(dict.fromkeys(failed))
+        finished = set(runtime.completed_tasks) | set(runtime.failed_tasks)
+        explicit_pending = orchestration.get("pending_tasks")
+        if isinstance(explicit_pending, list):
+            runtime.pending_tasks = [
+                str(item.get("task_id") if isinstance(item, dict) else item)
+                for item in explicit_pending
+                if str(item.get("task_id") if isinstance(item, dict) else item)
+            ]
+        else:
+            runtime.pending_tasks = [
+                item for item in all_tasks if item not in finished
+            ]
+        runtime.replan_count = int(orchestration.get("replan_count") or 0)
 
     def build_approval_context(self, *, user_id: str, plan_id: str):
         return self.resolver.approval_context_from_plan(
@@ -294,6 +423,20 @@ class ContextManager:
 
     def save_snapshot(self, bundle: ContextBundle) -> dict[str, Any]:
         return self.store.save_context_snapshot(bundle)
+
+
+def _task_ids(task_plan: dict[str, Any] | None) -> list[str]:
+    plan = dict(task_plan or {})
+    tasks = plan.get("tasks") or plan.get("task_plan") or []
+    if isinstance(tasks, dict):
+        tasks = tasks.get("tasks") or []
+    result: list[str] = []
+    for item in tasks if isinstance(tasks, list) else []:
+        task_id = item.get("task_id") if isinstance(item, dict) else item
+        text = str(task_id or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result
 
 
 __all__ = ["ContextManager"]

@@ -12,6 +12,9 @@ FORBIDDEN = {
     "gather_context_items",
     "from agent.context.schemas",
     "from .legacy import",
+    "from .working_memory import",
+    "from agent.memory.working_memory import",
+    "WorkingMemory(",
     "to_legacy_memory_item",
     "from_legacy_memory_item",
 }
@@ -49,6 +52,12 @@ def main() -> int:
     legacy_path = root / "agent" / "memory" / "legacy.py"
     if legacy_path.exists():
         violations.append("agent/memory/legacy.py: file must be removed")
+
+    working_path = root / "agent" / "memory" / "working_memory.py"
+    if working_path.exists():
+        violations.append(
+            "agent/memory/working_memory.py: ContextBundle is the only run working memory"
+        )
 
     if violations:
         print("Legacy Memory runtime violations:")

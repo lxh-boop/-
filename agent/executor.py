@@ -8,11 +8,7 @@ from typing import Any
 
 from agent.console_trace import flow_event, trace_event, trace_exception
 from agent.llm_audit import activate_llm_audit_context
-from core.llm import LLMRuntimeSettings, LLMService, resolve_active_llm_settings
-from core.llm.dependencies import (
-    LLMExecutionDependencies,
-    register_llm_execution_dependencies,
-)
+from core.llm.runtime_settings import LLMRuntimeSettings, resolve_active_llm_settings
 
 from agent.communication.integration import (
     approval_refs_from_payload,
@@ -1650,7 +1646,7 @@ def _record_runtime_for_result(
     expanded_tool_calls: list[dict[str, Any]],
     output_dir: str | Path,
     user_id: str,
-    llm_service: LLMService | None = None,
+    llm_settings: LLMRuntimeSettings | None = None,
 ) -> dict[str, Any]:
     runtime_info: dict[str, Any] = {
         "run_id": runtime.run_id,
@@ -1769,7 +1765,7 @@ def _record_runtime_for_result(
                     "task_results": orchestration.get("task_results") if isinstance(orchestration, dict) else {},
                     "result": result_dict,
                 },
-                llm_service=llm_service,
+                llm_settings=llm_settings,
             ).to_dict()
         )
         runtime_info["phase10_observe"] = phase10_observe
@@ -3142,6 +3138,23 @@ def _missing_stock_code_result(
 
 
 
+def _load_llm_report_settings(
+    api_key: str | None,
+    base_url: str | None,
+    model: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    try:
+        from local_config import load_local_config
+        config = dict(load_local_config() or {})
+    except Exception:
+        config = {}
+    return (
+        str(api_key if api_key is not None else config.get("llm_api_key") or "").strip() or None,
+        str(base_url if base_url is not None else config.get("llm_base_url") or "").strip() or None,
+        str(model if model is not None else config.get("llm_model") or "").strip() or None,
+    )
+
+
 def _llm_first_report(
     *,
     query: str,
@@ -3151,7 +3164,10 @@ def _llm_first_report(
     orchestration: dict[str, Any],
     runtime_info: dict[str, Any],
     language: str,
-    llm_service: LLMService,
+    llm_api_key: str | None,
+    llm_base_url: str | None,
+    llm_model: str | None,
+    llm_settings: LLMRuntimeSettings,
     context_bundle,
 ) -> str:
     result_data = result_dict.get("data") if isinstance(result_dict.get("data"), dict) else {}
@@ -3169,7 +3185,7 @@ def _llm_first_report(
     completion = runtime_info.get("phase10_observe") if isinstance(runtime_info.get("phase10_observe"), dict) else {}
     if not user_goal:
         return draft_answer
-    if not llm_service.is_available:
+    if llm_settings.mode == "api" and not llm_settings.api_key:
         return draft_answer
     try:
         return generate_report_with_llm(
@@ -3187,7 +3203,7 @@ def _llm_first_report(
             completion=dict(completion),
             draft_answer=draft_answer,
             reply_language=language,
-            llm_service=llm_service,
+            llm_settings=llm_settings,
             context={
                 "safe_context": build_reporter_context(
                     context_bundle,
@@ -3215,7 +3231,10 @@ def _llm_first_semantic_critic(
     decomposition: dict[str, Any],
     runtime_info: dict[str, Any],
     language: str,
-    llm_service: LLMService,
+    llm_api_key: str | None,
+    llm_base_url: str | None,
+    llm_model: str | None,
+    llm_settings: LLMRuntimeSettings,
 ) -> tuple[str, dict[str, Any]]:
     result_data = result_dict.get("data") if isinstance(result_dict.get("data"), dict) else {}
     if not bool(result_dict.get("success")):
@@ -3229,8 +3248,8 @@ def _llm_first_semantic_critic(
     completion = runtime_info.get("phase10_observe") if isinstance(runtime_info.get("phase10_observe"), dict) else {}
     if not user_goal:
         return answer, {"action": "skipped", "reason": "missing_user_goal"}
-    if not llm_service.is_available:
-        return answer, {"action": "skipped", "reason": "llm_service_unavailable"}
+    if llm_settings.mode == "api" and not llm_settings.api_key:
+        return answer, {"action": "skipped", "reason": "missing_api_key"}
     try:
         review = critique_report_with_llm(
             query=query,
@@ -3245,7 +3264,7 @@ def _llm_first_semantic_critic(
                 "tool_name": str(result_dict.get("tool_name") or ""),
             },
             reply_language=language,
-            llm_service=llm_service,
+            llm_settings=llm_settings,
         )
     except Exception as exc:
         return answer, {"action": "skipped", "reason": f"critic_failed:{type(exc).__name__}"}
@@ -3271,17 +3290,25 @@ def run_agent_request(
     top_k: int = DEFAULT_TOOL_TOP_K,
     session_id: str = "",
     reply_language: str | None = None,
+    llm_api_key: str | None = None,
+    llm_base_url: str | None = None,
+    llm_model: str | None = None,
     llm_settings: LLMRuntimeSettings | None = None,
-    profile_id: str | None = None,
+    llm_mode: str | None = None,
     decomposition_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     raw_query = str(query or "").strip()
-    active_llm = llm_settings or resolve_active_llm_settings(profile_id=profile_id)
-    if profile_id and active_llm.profile_id != str(profile_id):
-        raise ValueError("llm_settings/profile_id mismatch")
-    # One immutable service is created here and reused by every LLM stage.
-    llm_service = LLMService(active_llm)
-    llm_execution_dependencies = LLMExecutionDependencies(llm_service=llm_service)
+    active_llm = llm_settings or resolve_active_llm_settings(
+        mode=llm_mode,
+        api_key=llm_api_key,
+        base_url=llm_base_url,
+        model=llm_model,
+    )
+    # Preserve downstream execution variables; LLM stages receive isolated context views.
+    # receive ``active_llm`` so the profile cannot change mid-run.
+    llm_api_key = active_llm.api_key
+    llm_base_url = active_llm.base_url
+    llm_model = active_llm.model
     try:
         resolved_turn = resolve_conversation_turn(
             raw_query,
@@ -3321,7 +3348,6 @@ def run_agent_request(
         session_id=session_id,
         run_id=resume_run_id or None,
     )
-    register_llm_execution_dependencies(runtime.run_id, llm_execution_dependencies)
     formal_entry_audit = {
         "formal_entry_used": True,
         "formal_entry_name": "agent.executor.run_agent_request",
@@ -3567,6 +3593,9 @@ def run_agent_request(
         route_context.setdefault("query", raw_query)
         route_context.setdefault("resolved_query", planner_query)
         route_context.setdefault("relation_type", resolved_turn.relation_type)
+        route_context.setdefault("llm_api_key", llm_api_key)
+        route_context.setdefault("llm_base_url", llm_base_url)
+        route_context.setdefault("llm_model", llm_model)
         route_context.setdefault("runtime_policy", runtime_policy.to_dict())
         route_context.setdefault("mcp", build_mcp_context_from_local_config())
         strategy_account_id = str(
@@ -3645,10 +3674,16 @@ def run_agent_request(
 
         routed = route_agent_query(
             planner_query,
-            llm_service=llm_service,
+            llm_api_key=llm_api_key,
+            llm_base_url=llm_base_url,
+            llm_model=llm_model,
+            llm_settings=active_llm,
             reply_language=language,
             context=planner_context,
         )
+        # Downstream tool adapters receive the already-resolved immutable
+        # snapshot, never re-read the UI/local configuration mid-run.
+        route_context["llm_runtime_settings"] = active_llm
         intent = routed.intent
         params = dict(routed.parameters)
         for inherited_key, inherited_value in (resolved_turn.inherited_parameters or {}).items():
@@ -3808,6 +3843,25 @@ def run_agent_request(
                 tool_default_top_k=DEFAULT_TOOL_TOP_K,
             )
 
+        phase10_working = (
+            ((decomposition.get("diagnostics") or {}).get("phase10_goal_planning") or {})
+            if isinstance(decomposition.get("diagnostics"), dict)
+            else {}
+        )
+        context_manager.update_task_plan(
+            phase12_context_bundle,
+            user_goal=(
+                phase10_working.get("semantic_goal")
+                or decomposition.get("user_goal")
+                or {"raw_message": planner_query}
+            ),
+            task_plan=(
+                phase10_working.get("task_plan")
+                or decomposition.get("task_plan")
+                or {"tasks": list(decomposition.get("tasks") or [])}
+            ),
+        )
+
         def _registered_tool(
             tool_name: str,
             arguments: dict[str, Any] | None = None,
@@ -3830,6 +3884,10 @@ def run_agent_request(
                     "token_estimate": token_estimate,
                     "query": planner_query,
                     "raw_query": raw_query,
+                    "llm_runtime_settings": active_llm,
+                    "llm_api_key": active_llm.api_key,
+                    "llm_base_url": active_llm.base_url,
+                    "llm_model": active_llm.model,
                     "root": ".",
                     "runtime_dir": str(
                         route_context.get("runtime_dir")
@@ -4481,7 +4539,7 @@ def run_agent_request(
                     expanded_tool_calls=[{"tool_name": intent, "success": False}],
                     output_dir=output_dir,
                     user_id=user_id,
-                    llm_service=llm_service,
+                    llm_settings=active_llm,
                 )
             except Exception:
                 pass
@@ -4584,7 +4642,11 @@ def run_agent_request(
         }
         runtime.merge_metadata({"phase17_handoff": context_payload["phase17_handoff"]})
     try:
-        context_manager.update_from_tool_result(phase12_context_bundle, result_dict)
+        context_manager.update_from_tool_result(
+            phase12_context_bundle,
+            result_dict,
+            orchestration=orchestration,
+        )
         context_payload["phase12_context"] = {
             "context_id": phase12_context_bundle.context_id,
             "llm_context": context_manager.build_llm_context(phase12_context_bundle, max_tokens=900),
@@ -4631,7 +4693,10 @@ def run_agent_request(
                     "result": result_dict,
                     "orchestration_status": orchestration.get("execution_status") if isinstance(orchestration, dict) else "",
                 },
-                llm_service=llm_service,
+                api_key=llm_api_key,
+                base_url=llm_base_url,
+                model=llm_model,
+                llm_settings=active_llm,
                 context={
                     "safe_context": build_observer_context(
                         phase12_context_bundle,
@@ -4690,7 +4755,10 @@ def run_agent_request(
                     "result": result_dict,
                     "orchestration_status": orchestration.get("execution_status") or "",
                 },
-                llm_service=llm_service,
+                api_key=llm_api_key,
+                base_url=llm_base_url,
+                model=llm_model,
+                llm_settings=active_llm,
                 context={
                     "safe_context": build_observer_context(
                         phase12_context_bundle,
@@ -4705,10 +4773,26 @@ def run_agent_request(
             trace_event("executor.completion.reassessed_after_replan", result_dict["llm_completion"], run_id=runtime.run_id)
 
     try:
+        context_manager.update_from_observation(
+            phase12_context_bundle,
+            completion=(
+                result_dict.get("llm_completion")
+                if isinstance(result_dict.get("llm_completion"), dict)
+                else {}
+            ),
+            orchestration=orchestration,
+        )
+    except Exception as exc:
+        context_warnings.append(
+            f"context_working_state_observation_failed:{type(exc).__name__}"
+        )
+
+    try:
         record_executor_result_observation(
             result_dict,
             output_dir=output_dir,
             user_id=user_id,
+            llm_settings=active_llm,
             conversation_id=session_id,
             run_id=runtime.run_id,
             task_id=str((decomposition.get("tasks") or [{}])[0].get("task_id") or intent)
@@ -4777,7 +4861,6 @@ def run_agent_request(
             expanded_tool_calls=expanded_tool_calls,
             output_dir=output_dir,
             user_id=user_id,
-            llm_service=llm_service,
         )
         if intent == "confirm_execute" and resume_run_id:
             _record_confirmation_report_step(
@@ -4866,7 +4949,10 @@ def run_agent_request(
             orchestration=orchestration,
             runtime_info=runtime_info,
             language=language,
-            llm_service=llm_service,
+            llm_api_key=llm_api_key,
+            llm_base_url=llm_base_url,
+            llm_model=llm_model,
+            llm_settings=active_llm,
             context_bundle=phase12_context_bundle,
         )
         answer_text, llm_semantic_critic = _llm_first_semantic_critic(
@@ -4876,7 +4962,10 @@ def run_agent_request(
             decomposition=decomposition,
             runtime_info=runtime_info,
             language=language,
-            llm_service=llm_service,
+            llm_api_key=llm_api_key,
+            llm_base_url=llm_base_url,
+            llm_model=llm_model,
+            llm_settings=active_llm,
         )
     answer_text = _sanitize_user_facing_answer(answer_text, language)
     runtime_info["llm_semantic_critic"] = llm_semantic_critic
@@ -4944,7 +5033,10 @@ def run_agent_request(
                         "result": result_dict,
                         "orchestration_status": orchestration.get("execution_status") or "",
                     },
-                    llm_service=llm_service,
+                    api_key=llm_api_key,
+                    base_url=llm_base_url,
+                    model=llm_model,
+                    llm_settings=active_llm,
                     context={
                     "safe_context": build_observer_context(
                         phase12_context_bundle,
@@ -5028,6 +5120,31 @@ def run_agent_request(
             result_dict.get("data") if isinstance(result_dict.get("data"), dict) else {}
         )
     )
+    try:
+        context_manager.finalize_run_state(
+            phase12_context_bundle,
+            result=result_dict,
+            completion=(
+                result_dict.get("llm_completion")
+                if isinstance(result_dict.get("llm_completion"), dict)
+                else {}
+            ),
+            orchestration=orchestration,
+        )
+        context_manager.save_snapshot(phase12_context_bundle)
+        context_payload["phase12_context"] = {
+            "context_id": phase12_context_bundle.context_id,
+            "llm_context": context_manager.build_llm_context(
+                phase12_context_bundle,
+                max_tokens=900,
+            ),
+            "minimal_context": phase12_context_bundle.to_minimal_context(),
+        }
+    except Exception as exc:
+        context_warnings.append(
+            f"context_working_state_finalize_failed:{type(exc).__name__}"
+        )
+
     final_response = {
         "success": bool(result_dict.get("success")),
         "run_id": runtime.run_id,

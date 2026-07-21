@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .memory_types import MemoryRecord, MemoryType, MemoryVisibility
+from .memory_types import MemoryRecord, MemoryStatus, MemoryType, MemoryVisibility
 
 
 SECRET_KEYS = {
@@ -198,7 +198,13 @@ class MemoryPolicy:
     def validate_record(self, record: MemoryRecord | dict[str, Any]) -> list[str]:
         record = record if isinstance(record, MemoryRecord) else MemoryRecord.from_dict(record)
         issues: list[str] = []
-        if self.requires_user_confirmation(record) and not _is_user_confirmed(record):
+        # Unconfirmed user facts may be persisted only as non-retrievable
+        # CANDIDATE records. Promotion to ACTIVE still requires confirmation.
+        if (
+            record.status == MemoryStatus.ACTIVE
+            and self.requires_user_confirmation(record)
+            and not _is_user_confirmed(record)
+        ):
             issues.append("long_term_user_fact_requires_confirmation")
         if _has_one_time_marker(record):
             issues.append("one_time_operation_cannot_be_long_term_memory")

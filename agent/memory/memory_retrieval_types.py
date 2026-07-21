@@ -25,8 +25,6 @@ class MemoryRetrievalRequest:
     relevance_threshold: float = 0.42
     token_budget: int = 360
     min_importance: float = 0.0
-    include_working: bool = False
-    include_long_term: bool = True
     retrieval_id: str = field(default_factory=lambda: f"memret_{uuid4().hex[:12]}")
 
     def normalized(self) -> "MemoryRetrievalRequest":
@@ -47,8 +45,6 @@ class MemoryRetrievalRequest:
             relevance_threshold=max(0.0, min(1.0, float(self.relevance_threshold or 0.0))),
             token_budget=max(0, int(self.token_budget or 0)),
             min_importance=max(0.0, min(1.0, float(self.min_importance or 0.0))),
-            include_working=bool(self.include_working),
-            include_long_term=bool(self.include_long_term),
             retrieval_id=str(self.retrieval_id or f"memret_{uuid4().hex[:12]}"),
         )
 

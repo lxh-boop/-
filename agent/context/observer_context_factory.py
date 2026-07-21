@@ -31,6 +31,15 @@ def build_observer_context(
             "execution_status": str((orchestration or {}).get("execution_status") or ""),
             "replan_count": int((orchestration or {}).get("replan_count") or 0),
         },
+"working_state": {
+    "phase": bundle.runtime_context.phase,
+    "completed_tasks": list(bundle.runtime_context.completed_tasks),
+    "failed_tasks": list(bundle.runtime_context.failed_tasks),
+    "pending_tasks": list(bundle.runtime_context.pending_tasks),
+    "replan_count": bundle.runtime_context.replan_count,
+    "missing_outputs": list(bundle.runtime_context.missing_outputs),
+    "completion_status": bundle.runtime_context.completion_status,
+},
         "memory_refs": list(bundle.memory_context.memory_refs),
         "artifact_refs": list(bundle.artifact_context.artifact_refs),
     }

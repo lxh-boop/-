@@ -27,7 +27,5 @@ def test_candidate_top_n_is_not_fixed_context_top_k():
         user_id="u1",
         query="memory",
         candidate_top_n=40,
-        include_working=False,
-        include_long_term=True,
     )
     assert len(candidates) == 40

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -9,8 +10,7 @@ from typing import Any
 from .memory_importance import MemoryImportanceScorer
 from .memory_policy import MemoryPolicy
 from .memory_sanitizer import MemorySanitizer
-from .memory_types import MemoryRecord, MemoryStatus, MemoryType
-from .working_memory import is_record_expired
+from .memory_types import MemoryRecord, MemoryStatus, MemoryType, is_record_expired
 
 
 DEFAULT_MEMORY_STORE_PATH = Path("outputs") / "memory" / "memory_store.sqlite"
@@ -82,8 +82,6 @@ class SQLiteMemoryStore:
 
     def upsert(self, record: MemoryRecord | dict[str, Any]) -> MemoryRecord:
         safe = self.sanitizer.sanitize_record(record)
-        if safe.status == MemoryStatus.CANDIDATE:
-            safe.status = MemoryStatus.ACTIVE
         self.policy.assert_can_store(safe)
         if safe.importance <= 0.0:
             safe.importance = self.importance_scorer.score(safe)
@@ -135,7 +133,7 @@ class SQLiteMemoryStore:
         *,
         user_id: str = "",
         memory_types: list[MemoryType | str] | None = None,
-        status: MemoryStatus | str = MemoryStatus.ACTIVE,
+        status: MemoryStatus | str | None = MemoryStatus.ACTIVE,
         topics: list[str] | None = None,
         stock_codes: list[str] | None = None,
         min_importance: float = 0.0,
@@ -186,11 +184,50 @@ class SQLiteMemoryStore:
                 break
         return records
 
-    def count(self, *, user_id: str = "") -> int:
+    def count(
+        self,
+        *,
+        user_id: str = "",
+        status: MemoryStatus | str | None = None,
+    ) -> int:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if user_id:
+            clauses.append("user_id = ?")
+            params.append(str(user_id))
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(MemoryStatus.from_value(status).value)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         with closing(self._connect()) as conn:
-            if user_id:
-                return int(conn.execute("SELECT COUNT(*) FROM memory_records WHERE user_id = ?", (str(user_id),)).fetchone()[0])
-            return int(conn.execute("SELECT COUNT(*) FROM memory_records").fetchone()[0])
+            return int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM memory_records{where}",
+                    params,
+                ).fetchone()[0]
+            )
+
+    def set_status(
+        self,
+        memory_id: str,
+        *,
+        user_id: str,
+        status: MemoryStatus | str,
+        metadata_updates: dict[str, Any] | None = None,
+        clear_expiry: bool = False,
+    ) -> MemoryRecord | None:
+        record = self.get(memory_id, user_id=user_id, include_deleted=True)
+        if record is None:
+            return None
+        record.status = MemoryStatus.from_value(status)
+        record.metadata = {
+            **dict(record.metadata or {}),
+            **dict(metadata_updates or {}),
+        }
+        if clear_expiry:
+            record.valid_until = ""
+        record.updated_at = datetime.now().isoformat(timespec="seconds")
+        return self.upsert(record)
 
 
 class GraphMemoryStore:
@@ -272,7 +309,7 @@ def _row_to_record(row: sqlite3.Row) -> MemoryRecord:
         task_id=data.get("task_id") or "",
         source_type=data.get("source_type") or "",
         source_id=data.get("source_id") or "",
-        memory_type=data.get("memory_type") or MemoryType.WORKING,
+        memory_type=data.get("memory_type") or MemoryType.EPISODIC,
         memory_subtype=data.get("memory_subtype") or "",
         scope=data.get("scope") or "",
         visibility=data.get("visibility") or "",

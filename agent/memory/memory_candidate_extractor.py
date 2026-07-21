@@ -72,6 +72,7 @@ class MemoryCandidateExtractor:
                     source_type="artifact",
                     source_id=artifact_id,
                     memory_type=MemoryType.EVIDENCE,
+                    status=MemoryStatus.CANDIDATE,
                     memory_subtype="artifact_evidence_summary",
                     content=str(summary.get("message") or summary.get("summary") or "Evidence artifact summary."),
                     summary=str(summary.get("message") or "Evidence artifact summary.")[:500],
@@ -89,6 +90,7 @@ class MemoryCandidateExtractor:
                     source_type="artifact",
                     source_id=artifact_id,
                     memory_type=MemoryType.PORTFOLIO,
+                    status=MemoryStatus.CANDIDATE,
                     memory_subtype="portfolio_summary",
                     content="Portfolio artifact summary available.",
                     summary=str(summary.get("message") or "Portfolio artifact summary available.")[:500],
@@ -101,39 +103,23 @@ class MemoryCandidateExtractor:
         return [self.sanitizer.sanitize_record(record) for record in records]
 
     def extract_from_context(self, context: dict[str, Any]) -> list[MemoryRecord]:
-        data = dict(context or {})
-        user_id = str(data.get("user_id") or "default_user")
-        records: list[MemoryRecord] = []
-        approval = data.get("approval_context") or data.get("approval") or {}
-        if isinstance(approval, dict) and approval.get("pending_plan_id"):
-            records.append(
-                MemoryRecord(
-                    user_id=user_id,
-                    run_id=str(data.get("run_id") or ""),
-                    source_type="pending_plan",
-                    source_id=str(approval.get("pending_plan_id") or ""),
-                    memory_type=MemoryType.WORKING,
-                    memory_subtype="pending_plan",
-                    content="Pending approval plan exists.",
-                    summary=str((approval.get("pending_plan_summary") or {}).get("summary") or "Pending approval plan exists."),
-                    approval_refs=[
-                        {
-                            "plan_id": str(approval.get("pending_plan_id") or ""),
-                            "status": str(approval.get("status") or ""),
-                            "token_present": bool(approval.get("token_present")),
-                        }
-                    ],
-                    metadata={
-                        "category": "approval",
-                        "plan_id": str(approval.get("pending_plan_id") or ""),
-                        "status": str(approval.get("status") or ""),
-                        "token_present": bool(approval.get("token_present")),
-                    },
-                )
-            )
-        return [self.sanitizer.sanitize_record(record) for record in records]
+        """ContextBundle is the run working memory; do not duplicate it.
 
-    def extract(self, value: Any, *, source_type: str = "", user_id: str = "default_user") -> list[MemoryRecord]:
+        Pending plans and approvals remain in their dedicated persistence
+        stores. They are referenced by ContextBundle instead of being copied
+        into MemoryManager.
+        """
+
+        del context
+        return []
+
+    def extract(
+        self,
+        value: Any,
+        *,
+        source_type: str = "",
+        user_id: str = "default_user",
+    ) -> list[MemoryRecord]:
         if isinstance(value, AgentMessage):
             return self.extract_from_message(value)
         if isinstance(value, dict):
@@ -141,10 +127,17 @@ class MemoryCandidateExtractor:
                 return self.extract_from_artifact(value)
             if source_type == "context" or value.get("approval_context"):
                 return self.extract_from_context({"user_id": user_id, **value})
-            if source_type == "message" or value.get("payload") or value.get("message_type") or value.get("content"):
+            if (
+                source_type == "message"
+                or value.get("payload")
+                or value.get("message_type")
+                or value.get("content")
+            ):
                 return self.extract_from_message({"user_id": user_id, **value})
         if isinstance(value, str):
-            return self.extract_from_message({"user_id": user_id, "role": "user", "content": value})
+            return self.extract_from_message(
+                {"user_id": user_id, "role": "user", "content": value}
+            )
         return []
 
 

@@ -54,6 +54,15 @@ def build_planner_context(
             dict(turn.get("inherited_parameters") or {}) if is_follow_up else {}
         ),
         "active_entities": dict(turn.get("active_entities") or {}),
+"working_state": {
+    "phase": bundle.runtime_context.phase,
+    "completed_tasks": list(bundle.runtime_context.completed_tasks),
+    "failed_tasks": list(bundle.runtime_context.failed_tasks),
+    "pending_tasks": list(bundle.runtime_context.pending_tasks),
+    "replan_count": bundle.runtime_context.replan_count,
+    "missing_outputs": list(bundle.runtime_context.missing_outputs),
+    "completion_status": bundle.runtime_context.completion_status,
+},
         "memory_context": {
             "retrieval_id": memory.retrieval_id,
             "memory_refs": list(memory.memory_refs),

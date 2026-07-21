@@ -19,6 +19,15 @@ def build_tool_execution_context(
         "run_id": bundle.run_id,
         "user_goal": dict(user_goal or {}),
         "task_plan": dict(task_plan or {}),
+"working_state": {
+    "phase": bundle.runtime_context.phase,
+    "completed_tasks": list(bundle.runtime_context.completed_tasks),
+    "failed_tasks": list(bundle.runtime_context.failed_tasks),
+    "pending_tasks": list(bundle.runtime_context.pending_tasks),
+    "replan_count": bundle.runtime_context.replan_count,
+    "missing_outputs": list(bundle.runtime_context.missing_outputs),
+    "completion_status": bundle.runtime_context.completion_status,
+},
         "memory_refs": list(bundle.memory_context.memory_refs),
         "artifact_refs": list(bundle.artifact_context.artifact_refs),
         "approval": {

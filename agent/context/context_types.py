@@ -140,6 +140,13 @@ class RuntimeContext:
     observation_refs: list[dict[str, Any]] = field(default_factory=list)
     blocking_observation_ids: list[str] = field(default_factory=list)
     replan_refs: list[dict[str, Any]] = field(default_factory=list)
+    replan_count: int = 0
+    completed_tasks: list[str] = field(default_factory=list)
+    failed_tasks: list[str] = field(default_factory=list)
+    pending_tasks: list[str] = field(default_factory=list)
+    tool_result_refs: list[dict[str, Any]] = field(default_factory=list)
+    missing_outputs: list[str] = field(default_factory=list)
+    completion_status: str = ""
     latest_replan_decision_id: str = ""
     handoff_refs: list[dict[str, Any]] = field(default_factory=list)
     latest_handoff_trace_id: str = ""
@@ -172,6 +179,7 @@ class MemoryContext:
 
 @dataclass
 class ContextBundle:
+    """The single working-memory object for one user request / Agent run."""
     context_id: str = field(default_factory=lambda: f"context_{uuid4().hex[:12]}")
     user_id: str = "default"
     conversation_id: str = ""
@@ -203,6 +211,8 @@ class ContextBundle:
             self.task_context.task_id = self.task_id
         if not self.runtime_context.run_id:
             self.runtime_context.run_id = self.run_id
+        self.metadata.setdefault("working_memory_model", "context_bundle_per_run")
+        self.metadata.setdefault("working_memory_scope", "single_agent_run")
 
     def to_dict(self) -> dict[str, Any]:
         return _plain(self)
@@ -231,6 +241,15 @@ class ContextBundle:
             "observation_refs": list(self.runtime_context.observation_refs),
             "blocking_observation_ids": list(self.runtime_context.blocking_observation_ids),
             "latest_replan_decision_id": self.runtime_context.latest_replan_decision_id,
+            "working_state": {
+                "phase": self.runtime_context.phase,
+                "completed_tasks": list(self.runtime_context.completed_tasks),
+                "failed_tasks": list(self.runtime_context.failed_tasks),
+                "pending_tasks": list(self.runtime_context.pending_tasks),
+                "replan_count": self.runtime_context.replan_count,
+                "missing_outputs": list(self.runtime_context.missing_outputs),
+                "completion_status": self.runtime_context.completion_status,
+            },
             "handoff_refs": list(self.runtime_context.handoff_refs),
             "latest_handoff_trace_id": self.runtime_context.latest_handoff_trace_id,
             "handoff_role_summaries": list(self.runtime_context.handoff_role_summaries),

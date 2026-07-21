@@ -3,8 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .memory_store import SQLiteMemoryStore
-from .memory_types import MemoryRecord
-from .working_memory import is_record_expired
+from .memory_types import MemoryRecord, is_record_expired
 
 
 class MemoryPruner:

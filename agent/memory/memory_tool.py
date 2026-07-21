@@ -29,8 +29,6 @@ def memory_search_adapter(args: dict[str, Any], context: dict[str, Any]) -> dict
         candidate_top_n=int(args.get("candidate_top_n") or args.get("top_n") or 40),
         relevance_threshold=float(args.get("relevance_threshold") or 0.42),
         token_budget=int(args.get("token_budget") or 600),
-        include_working=False,
-        include_long_term=True,
     )
     return {
         "success": True,

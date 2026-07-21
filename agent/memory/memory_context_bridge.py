@@ -62,8 +62,6 @@ def build_memory_context_view(
         candidate_top_n=int(limit or candidate_top_n),
         relevance_threshold=relevance_threshold,
         token_budget=token_budget,
-        include_working=False,
-        include_long_term=True,
     )
     view = manager.retrieve_for_context(request=req)
     items = list(view.get("items") or [])
@@ -93,6 +91,7 @@ def build_memory_store_health_summary(
         store = SQLiteMemoryStore(path)
         total_count = store.count()
         user_count = store.count(user_id=user_id)
+        candidate_count = store.count(user_id=user_id, status="CANDIDATE")
         latest = store.list_records(user_id=user_id, limit=5)
         return {
             "status": "ok",
@@ -100,6 +99,7 @@ def build_memory_store_health_summary(
             "exists": path.exists(),
             "total_count": total_count,
             "user_count": user_count,
+            "candidate_count": candidate_count,
             "latest_memory_count": len(latest),
             "latest_memory_types": sorted(
                 {record.memory_type.value for record in latest}
@@ -114,6 +114,7 @@ def build_memory_store_health_summary(
             "exists": False,
             "total_count": 0,
             "user_count": 0,
+            "candidate_count": 0,
             "latest_memory_count": 0,
             "latest_memory_types": [],
             "secret_safe": True,
@@ -233,10 +234,10 @@ def extract_memory_candidates_from_artifact(
     output_dir: str | Path = "outputs",
 ) -> list[dict[str, Any]]:
     manager = get_memory_manager_for_output(output_dir)
-    candidates = manager.extractor.extract(
+    candidates = manager.remember_candidate(
         {"user_id": user_id, **dict(artifact or {})},
-        source_type="artifact",
         user_id=user_id,
+        source_type="artifact",
     )
     return [candidate.to_dict() for candidate in candidates]
 

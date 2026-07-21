@@ -42,8 +42,8 @@ from .memory_types import (
     MemoryStatus,
     MemoryType,
     MemoryVisibility,
+    is_record_expired,
 )
-from .working_memory import WorkingMemory, WorkingMemoryEntry, is_record_expired
 
 __all__ = [
     "DEFAULT_MEMORY_CANDIDATE_TOP_N",
@@ -71,8 +71,6 @@ __all__ = [
     "MemorySanitizer",
     "SQLiteMemoryStore",
     "VectorMemoryStore",
-    "WorkingMemory",
-    "WorkingMemoryEntry",
     "build_memory_context_view",
     "build_memory_safe_summary",
     "build_memory_store_health_summary",

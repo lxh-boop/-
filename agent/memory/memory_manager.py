@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -12,16 +13,26 @@ from .memory_retrieval_types import MemoryRetrievalRequest
 from .memory_retriever import MemoryRetriever
 from .memory_sanitizer import MemorySanitizer
 from .memory_store import SQLiteMemoryStore
-from .memory_types import MemoryRecord, MemoryScope, MemoryStatus, MemoryType
-from .working_memory import WorkingMemory
+from .memory_types import (
+    MemoryRecord,
+    MemoryScope,
+    MemoryStatus,
+    MemoryType,
+    is_record_expired,
+)
 
 
 class MemoryManager:
+    """Manage persistent candidate and long-term memory.
+
+    Per-run working state is not stored here. ContextBundle is the single
+    working-memory object for one user request / Agent run.
+    """
+
     def __init__(
         self,
         *,
         db_path: str | Path | None = None,
-        working_memory: WorkingMemory | None = None,
         store: SQLiteMemoryStore | None = None,
         retriever: MemoryRetriever | None = None,
         selector: MemoryContextSelector | None = None,
@@ -33,19 +44,12 @@ class MemoryManager:
     ) -> None:
         self.policy = policy or MemoryPolicy.default()
         self.sanitizer = sanitizer or MemorySanitizer(self.policy)
-        self.working_memory = working_memory or WorkingMemory(
-            policy=self.policy,
-            sanitizer=self.sanitizer,
-        )
         self.store = store or SQLiteMemoryStore(
             db_path,
             policy=self.policy,
             sanitizer=self.sanitizer,
         )
-        self.retriever = retriever or MemoryRetriever(
-            working_memory=self.working_memory,
-            store=self.store,
-        )
+        self.retriever = retriever or MemoryRetriever(store=self.store)
         self.selector = selector or MemoryContextSelector()
         self.extractor = extractor or MemoryCandidateExtractor(
             sanitizer=self.sanitizer
@@ -59,7 +63,7 @@ class MemoryManager:
         *,
         user_id: str = "default_user",
         content: str = "",
-        memory_type: MemoryType | str = MemoryType.WORKING,
+        memory_type: MemoryType | str = MemoryType.EPISODIC,
         memory_subtype: str = "",
         source_type: str = "",
         source_id: str = "",
@@ -90,16 +94,18 @@ class MemoryManager:
             stock_codes=stock_codes,
             metadata=metadata,
         )
+        if memory.memory_type == MemoryType.WORKING or long_term is False:
+            raise ValueError(
+                "working_memory_removed_use_context_bundle_for_run_state"
+            )
         if user_confirmed:
             memory.metadata["user_confirmed"] = True
             if not memory.source_type:
                 memory.source_type = "confirmed_user_preference"
+        if ttl_seconds:
+            memory.valid_until = _expiry_text(ttl_seconds)
+        memory.status = MemoryStatus.ACTIVE
         safe = self.sanitizer.sanitize_record(memory)
-        if long_term is None:
-            long_term = safe.memory_type != MemoryType.WORKING
-        if not long_term or safe.memory_type == MemoryType.WORKING:
-            return self.working_memory.put(safe, ttl_seconds=ttl_seconds)
-        safe.status = MemoryStatus.ACTIVE
         self.policy.assert_can_store(safe)
         return self.store.upsert(safe)
 
@@ -109,8 +115,15 @@ class MemoryManager:
         *,
         user_id: str = "default_user",
         source_type: str = "",
-        ttl_seconds: int = 1800,
+        ttl_seconds: int = 86400,
     ) -> list[MemoryRecord]:
+        """Persist non-retrievable candidates in SQLite until confirmed.
+
+        Candidates keep their real memory type and use status=CANDIDATE. They
+        are excluded from normal retrieval, survive process restarts, and expire
+        automatically through valid_until.
+        """
+
         candidates = self.extractor.extract(
             value,
             source_type=source_type,
@@ -118,17 +131,107 @@ class MemoryManager:
         )
         stored: list[MemoryRecord] = []
         for candidate in candidates:
-            original_type = candidate.memory_type.value
+            if candidate.memory_type == MemoryType.WORKING:
+                # Run state and pending approvals belong to ContextBundle and
+                # the existing approval store, not to MemoryManager.
+                continue
             candidate.status = MemoryStatus.CANDIDATE
-            candidate.memory_type = MemoryType.WORKING
+            if not candidate.valid_until:
+                candidate.valid_until = _expiry_text(ttl_seconds)
             candidate.metadata = {
                 **dict(candidate.metadata or {}),
-                "candidate_original_type": candidate.memory_subtype or original_type,
+                "candidate_original_type": candidate.memory_type.value,
+                "candidate_store": "sqlite",
+                "working_state_owner": "context_bundle",
             }
-            stored.append(
-                self.working_memory.put(candidate, ttl_seconds=ttl_seconds)
-            )
+            stored.append(self.store.upsert(candidate))
         return stored
+
+    def list_candidates(
+        self,
+        *,
+        user_id: str,
+        include_expired: bool = False,
+        limit: int = 100,
+    ) -> list[MemoryRecord]:
+        return self.store.list_records(
+            user_id=user_id,
+            status=MemoryStatus.CANDIDATE,
+            include_expired=include_expired,
+            limit=limit,
+        )
+
+    def confirm_candidate(
+        self,
+        memory_id: str,
+        *,
+        user_id: str,
+    ) -> MemoryRecord:
+        candidate = self.store.get(
+            memory_id,
+            user_id=user_id,
+            include_deleted=True,
+        )
+        if candidate is None or candidate.status != MemoryStatus.CANDIDATE:
+            raise ValueError("memory_candidate_not_found")
+        if is_record_expired(candidate):
+            self.store.set_status(
+                candidate.memory_id,
+                user_id=user_id,
+                status=MemoryStatus.EXPIRED,
+            )
+            raise ValueError("memory_candidate_expired")
+        candidate.status = MemoryStatus.ACTIVE
+        candidate.valid_until = ""
+        candidate.metadata = {
+            **dict(candidate.metadata or {}),
+            "user_confirmed": True,
+            "confirmed_at": _now_text(),
+        }
+        if candidate.source_type == "user_message":
+            candidate.source_type = "confirmed_user_preference"
+        self.policy.assert_can_store(candidate)
+        return self.store.upsert(candidate)
+
+    def reject_candidate(
+        self,
+        memory_id: str,
+        *,
+        user_id: str,
+        reason: str = "",
+    ) -> MemoryRecord:
+        candidate = self.store.get(
+            memory_id,
+            user_id=user_id,
+            include_deleted=True,
+        )
+        if candidate is None or candidate.status != MemoryStatus.CANDIDATE:
+            raise ValueError("memory_candidate_not_found")
+        candidate.status = MemoryStatus.REJECTED
+        candidate.metadata = {
+            **dict(candidate.metadata or {}),
+            "rejected_at": _now_text(),
+            "rejection_reason": str(reason or "")[:240],
+        }
+        return self.store.upsert(candidate)
+
+    def expire_candidates(self, *, user_id: str, limit: int = 1000) -> int:
+        expired_count = 0
+        for candidate in self.list_candidates(
+            user_id=user_id,
+            include_expired=True,
+            limit=limit,
+        ):
+            if not is_record_expired(candidate):
+                continue
+            updated = self.store.set_status(
+                candidate.memory_id,
+                user_id=user_id,
+                status=MemoryStatus.EXPIRED,
+                metadata_updates={"expired_at": _now_text()},
+            )
+            expired_count += int(updated is not None)
+        return expired_count
 
     def retrieve(self, **kwargs: Any):
         return self.retriever.retrieve(**kwargs)
@@ -151,14 +254,10 @@ class MemoryManager:
         created_after: str = "",
         created_before: str = "",
         min_importance: float = 0.0,
-        include_working: bool = False,
-        include_long_term: bool = True,
         conversation_id: str = "",
         run_id: str = "",
         limit: int | None = None,
     ) -> dict[str, Any]:
-        # One request -> one storage retrieval.  The larger TopN candidate pool
-        # is filtered in memory by MemoryContextSelector; no second DB query.
         req = request or MemoryRetrievalRequest(
             user_id=user_id,
             query=query,
@@ -176,8 +275,6 @@ class MemoryManager:
             relevance_threshold=relevance_threshold,
             token_budget=token_budget,
             min_importance=min_importance,
-            include_working=include_working,
-            include_long_term=include_long_term,
         )
         req = req.normalized()
         candidates = self.retriever.retrieve(
@@ -189,8 +286,6 @@ class MemoryManager:
             created_after=req.created_after,
             created_before=req.created_before,
             min_importance=req.min_importance,
-            include_working=req.include_working,
-            include_long_term=req.include_long_term,
             candidate_top_n=req.candidate_top_n,
         )
         selection = self.selector.select(candidates, req)
@@ -218,6 +313,8 @@ class MemoryManager:
                 "secrets_removed": True,
                 "long_term_user_facts_require_confirmation": True,
                 "memory_manager_has_no_commit_permission": True,
+                "working_memory_owner": "context_bundle_per_run",
+                "candidate_store": "sqlite_status_candidate",
                 "context_admission": "relevance_threshold_then_entity_task_time_token_budget",
                 "fixed_top_k_context_admission": False,
                 "candidate_pool_top_n": req.candidate_top_n,
@@ -227,9 +324,7 @@ class MemoryManager:
         }
 
     def forget(self, memory_id: str, *, user_id: str, hard: bool = False) -> bool:
-        working_deleted = self.working_memory.delete(memory_id, user_id=user_id)
-        store_deleted = self.store.delete(memory_id, user_id=user_id, hard=hard)
-        return working_deleted or store_deleted
+        return self.store.delete(memory_id, user_id=user_id, hard=hard)
 
     def consolidate(self, *, user_id: str, limit: int = 500) -> dict[str, Any]:
         return self.consolidator.consolidate_store(
@@ -245,12 +340,17 @@ class MemoryManager:
         hard: bool = False,
         limit: int = 2000,
     ) -> dict[str, Any]:
-        return self.pruner.prune_store(
+        expired_candidates = self.expire_candidates(
+            user_id=user_id,
+            limit=limit,
+        )
+        result = self.pruner.prune_store(
             self.store,
             user_id=user_id,
             hard=hard,
             limit=limit,
         )
+        return {**result, "expired_candidates": expired_candidates}
 
 
 def _coerce_record(
@@ -264,6 +364,15 @@ def _coerce_record(
     if isinstance(record, str):
         defaults["content"] = record
     return MemoryRecord(**defaults)
+
+
+def _now_text() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _expiry_text(ttl_seconds: int) -> str:
+    ttl = max(1, int(ttl_seconds or 1))
+    return (datetime.now() + timedelta(seconds=ttl)).isoformat(timespec="seconds")
 
 
 __all__ = ["MemoryManager"]
