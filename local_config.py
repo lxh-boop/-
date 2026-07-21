@@ -27,7 +27,7 @@ DEFAULT_LOCAL_CONFIG = {
     "llm_local_context_window": 32768,
     "llm_local_supports_json_schema": False,
     "llm_local_supports_tools": False,
-    "llm_request_timeout_seconds": 120,
+    "llm_request_timeout_seconds": 99120,
     "llm_max_retries": 0,
     "current_user_id": "default",
     "model_backend": "zoo:chronos_bolt_small",

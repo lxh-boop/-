@@ -68,13 +68,12 @@ from agent.react.react_context_bridge import (
     list_safe_observation_summaries,
 )
 from agent.runtime import load_run_snapshot
-from agent.session.confirmation_manager import reject_confirmation_plan
 from agent.session.pending_action_store import load_pending_actions
 from agent.tools.portfolio_state_tool import query_portfolio_state
 from agent.tools.scheduler_tool import query_scheduler_status
 from agent.tools.tool_registry import list_tools
 from agent.tools.tool_schemas import PAPER_AGENT_DISCLAIMER
-from agent.write_gateway import execute_confirmed_plan_v2
+from agent.collaboration_v2 import execute_control_action
 from agent.services.strategy_proposal_service import StrategyProposalService
 from app.reflection_ui import build_reflection_safe_summary, format_reflection_caption
 from app.handoff_ui import build_handoff_safe_summary, format_handoff_caption
@@ -1915,21 +1914,23 @@ def _render_pending_plan(
             if not token:
                 st.error("确认凭证已失效，请重新生成计划。")
                 return
-            result = execute_confirmed_plan_v2(
+            result = execute_control_action(
+                action="confirm",
                 plan_id=plan_id,
                 confirmation_token=token,
                 user_id=user_id,
-                conversation_id=session_id,
+                session_id=session_id,
                 run_id=str(plan.get("run_id") or ""),
+                language=_get_reply_language(user_id),
                 output_dir=output_dir,
                 db_path=db_path,
             )
-            if result.success:
-                st.success(result.message)
+            if result.get("success"):
+                st.success(str(result.get("answer") or "确认执行完成。"))
             else:
-                st.error(result.message)
-            st.json(_redact_ui_payload_for_display(result.to_dict()))
-            if result.success:
+                st.error(str(result.get("answer") or "确认执行失败。"))
+            st.json(_redact_ui_payload_for_display(result))
+            if result.get("success"):
                 _phase8_rerun(user_id, "pending_confirm")
             return
 
@@ -1937,17 +1938,21 @@ def _render_pending_plan(
             "拒绝",
             key=f"agent_reject_button::{user_id}::{session_id}::{widget_scope}",
         ):
-            rejected, status, _ = reject_confirmation_plan(
-                user_id,
-                plan_id,
+            result = execute_control_action(
+                action="reject",
+                plan_id=plan_id,
+                user_id=user_id,
+                session_id=session_id,
+                run_id=str(plan.get("run_id") or ""),
+                language=_get_reply_language(user_id),
                 output_dir=output_dir,
                 db_path=db_path,
             )
-            if rejected:
-                st.success("计划已拒绝，模拟盘未发生提交。")
+            if result.get("success"):
+                st.success(str(result.get("answer") or "计划已拒绝，模拟盘未发生提交。"))
                 _phase8_rerun(user_id, "pending_reject")
             else:
-                st.error(f"计划拒绝失败：{status}")
+                st.error(str(result.get("answer") or "计划拒绝失败。"))
             return
 
 
