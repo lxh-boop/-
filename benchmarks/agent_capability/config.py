@@ -23,6 +23,8 @@ class BenchmarkRuntimeConfig:
 
     provider: str
     model: str
+    profile_id: str = ""
+    llm_config_hash: str = ""
     deployment_mode: str = "api"
     endpoint_scope: str = "remote"
     request_timeout_seconds: int = 120
@@ -49,21 +51,17 @@ class BenchmarkRuntimeConfig:
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def load_llm_settings() -> tuple[dict[str, Any], BenchmarkRuntimeConfig]:
+def load_llm_settings() -> tuple[LLMRuntimeSettings, BenchmarkRuntimeConfig]:
     """Read the user's local configuration without printing or persisting secrets."""
     from local_config import load_local_config
 
     local = dict(load_local_config() or {})
     active = resolve_active_llm_settings(local_config=local)
-    settings = {
-        "llm_api_key": active.api_key,
-        "llm_base_url": active.base_url,
-        "llm_model": active.model,
-        "llm_settings": active,
-    }
     config = BenchmarkRuntimeConfig(
         provider=active.provider,
         model=active.model or "unconfigured",
+        profile_id=active.profile_id,
+        llm_config_hash=active.config_hash,
         deployment_mode=active.mode,
         endpoint_scope=active.endpoint_scope,
         request_timeout_seconds=active.request_timeout_seconds,
@@ -71,7 +69,7 @@ def load_llm_settings() -> tuple[dict[str, Any], BenchmarkRuntimeConfig]:
         case_timeout_seconds=600 if active.mode == "local" else 150,
         request_retries=0 if active.mode == "local" else 1,
     )
-    return settings, config
+    return active, config
 
 
 def ensure_roots(root: Path = BENCHMARK_ROOT) -> None:

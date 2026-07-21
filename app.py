@@ -92,7 +92,7 @@ from config import (
 import config as app_config
 from backtest import run_latest_t1_backtest
 from data_tushare import A_SHARE_DAILY_DATA_READY_TIME, validate_tushare_token
-from llm_client import LLMClient
+from core.llm import LLMService
 from llm_explainer import (
     build_stock_explanation_prompt,
     explain_prompt_with_llm,
@@ -212,6 +212,7 @@ from datetime import datetime, time as datetime_time
 from local_config import load_local_config, save_local_config
 from core.llm.ollama_manager import (
     PROJECT_MODEL as OLLAMA_PROJECT_MODEL,
+    PROJECT_MODELFILE_NAME as OLLAMA_PROJECT_MODELFILE_NAME,
     RECOMMENDED_BASE_MODEL,
     create_project_model,
     get_ollama_version,
@@ -1329,8 +1330,8 @@ if selected_llm_mode == "api":
         help="仅用于远程 OpenAI-compatible API；不会写入本地 Ollama 配置。",
     )
     st.sidebar.caption("AI Key 状态：已配置" if default_llm_api_key else "AI Key 状态：未配置")
-    api_base_url = st.sidebar.text_input("Base URL", value=str(local_cfg.get("llm_api_base_url") or local_cfg.get("llm_base_url") or DEFAULT_LLM_BASE_URL))
-    api_model = st.sidebar.text_input("Model", value=str(local_cfg.get("llm_api_model") or local_cfg.get("llm_model") or DEFAULT_LLM_MODEL))
+    api_base_url = st.sidebar.text_input("Base URL", value=str(local_cfg.get("llm_api_base_url") or DEFAULT_LLM_BASE_URL))
+    api_model = st.sidebar.text_input("Model", value=str(local_cfg.get("llm_api_model") or DEFAULT_LLM_MODEL))
     candidate_llm_settings = resolve_active_llm_settings(
         local_config={**local_cfg, "llm_mode": "api", "llm_api_base_url": api_base_url, "llm_api_model": api_model},
         mode="api",
@@ -1342,10 +1343,10 @@ if selected_llm_mode == "api":
     validate_ai_button = verify_button.button("验证 AI", key="validate_remote_ai")
     save_ai_button = save_button.button("保存并应用", key="save_remote_ai")
     if validate_ai_button:
-        ok, message = LLMClient(settings=candidate_llm_settings).validate_connection()
+        ok, message = LLMService(candidate_llm_settings).validate_connection()
         (st.sidebar.success if ok else st.sidebar.error)(message)
     if save_ai_button:
-        ok, message = LLMClient(settings=candidate_llm_settings).validate_connection()
+        ok, message = LLMService(candidate_llm_settings).validate_connection()
         if not ok:
             st.sidebar.error(f"保存失败，仍使用原来的模型配置：{message}")
         else:
@@ -1355,8 +1356,7 @@ if selected_llm_mode == "api":
                 "llm_mode": "api",
                 "llm_api_base_url": api_base_url.strip(),
                 "llm_api_model": api_model.strip(),
-                "llm_base_url": api_base_url.strip(),
-                "llm_model": api_model.strip(),
+                "llm_api_profile_id": candidate_llm_settings.profile_id,
             })
             save_local_config(local_cfg)
             st.sidebar.success("远程 API 配置已验证并应用；本地配置已保留。")
@@ -1387,17 +1387,17 @@ else:
     if install_col.button("下载推荐模型", key="install_ollama_model"):
         with st.sidebar.spinner("正在下载并创建本地模型，请勿关闭页面…"):
             pulled = pull_model()
-            created = create_project_model(Path("models") / "ollama" / "Modelfile.stock-agent-qwen3-4b") if pulled.success else pulled
+            created = create_project_model(Path("models") / "ollama" / OLLAMA_PROJECT_MODELFILE_NAME) if pulled.success else pulled
         (st.sidebar.success if created.success else st.sidebar.error)(created.message)
     candidate_llm_settings = resolve_active_llm_settings(
         local_config={**local_cfg, "llm_mode": "local", "llm_local_base_url": local_base_url, "llm_local_model": local_model},
         mode="local",
     )
     if validate_col.button("验证本地模型", key="validate_local_ai"):
-        ok, message = LLMClient(settings=candidate_llm_settings).validate_connection()
+        ok, message = LLMService(candidate_llm_settings).validate_connection()
         (st.sidebar.success if ok else st.sidebar.error)(message)
     if apply_col.button("保存并应用", key="save_local_ai"):
-        ok, message = LLMClient(settings=candidate_llm_settings).validate_connection()
+        ok, message = LLMService(candidate_llm_settings).validate_connection()
         if not ok:
             st.sidebar.error(f"保存失败，仍使用原来的模型配置：{message}")
         else:
@@ -1406,15 +1406,14 @@ else:
                 "llm_local_base_url": local_base_url.strip(),
                 "llm_local_model": local_model.strip(),
                 "llm_local_disable_thinking": True,
+                "llm_local_profile_id": candidate_llm_settings.profile_id,
             })
             save_local_config(local_cfg)
             st.sidebar.success("本地模型配置已验证并应用；远程 API 配置已保留。")
             st.rerun()
 
 active_llm_settings = resolve_active_llm_settings(local_config=local_cfg)
-llm_api_key = active_llm_settings.api_key
-llm_base_url = active_llm_settings.base_url
-llm_model = active_llm_settings.model
+llm_available = active_llm_settings.is_configured
 
 
 # ============================================================
@@ -2399,17 +2398,15 @@ if selected_home_section == "\u4e2a\u80a1\u8be6\u60c5":
                 )
 
                 if st.button("AI 解释", key=f"explain_ai_{selected_code}"):
-                    if not llm_api_key:
-                        st.error("请先在左侧 AI 接口设置中填写 API Key。")
+                    if not llm_available:
+                        st.error("请先在左侧 AI 接口设置中配置并验证模型。")
                     elif not str(st.session_state.get(prompt_state_key, "")).strip():
                         st.error("请先点击“生成 Prompt”，或在 Prompt 文本框中填写内容。")
                     else:
                         explanation = explain_prompt_with_llm(
                             stock_row=latest_info.to_dict(),
                             prompt_text=st.session_state.get(prompt_state_key, ""),
-                            api_key=llm_api_key,
-                            base_url=llm_base_url,
-                            model=llm_model,
+                            llm_settings=active_llm_settings,
                         )
 
                         if explanation.startswith("AI 解释生成失败"):
@@ -2982,17 +2979,15 @@ if selected_home_section == "AI \u89e3\u91ca":
         )
 
         if st.button("AI \u89e3\u91ca", key="ai_page_explain"):
-            if not llm_api_key:
-                st.error("\u8bf7\u5148\u5728\u5de6\u4fa7 AI \u63a5\u53e3\u8bbe\u7f6e\u4e2d\u586b\u5199 API Key\u3002")
+            if not llm_available:
+                st.error("\u8bf7\u5148\u5728\u5de6\u4fa7 AI \u63a5\u53e3\u8bbe\u7f6e\u4e2d\u914d\u7f6e\u5e76\u9a8c\u8bc1\u6a21\u578b\u3002")
             elif not str(st.session_state.get("ai_page_prompt_text", "")).strip():
                 st.error("\u8bf7\u5148\u70b9\u51fb\u201c\u751f\u6210 Prompt\u201d\uff0c\u6216\u5728 Prompt \u6587\u672c\u6846\u4e2d\u586b\u5199\u5185\u5bb9\u3002")
             else:
                 ai_text = explain_prompt_with_llm(
                     stock_row=ai_row.to_dict(),
                     prompt_text=st.session_state.get("ai_page_prompt_text", ""),
-                    api_key=llm_api_key,
-                    base_url=llm_base_url,
-                    model=llm_model,
+                    llm_settings=active_llm_settings,
                 )
 
                 if ai_text.startswith("AI \u89e3\u91ca\u751f\u6210\u5931\u8d25"):
@@ -3024,9 +3019,9 @@ if selected_home_section == "\u7cfb\u7edf\u8bbe\u7f6e":
         st.write("\u81ea\u52a8\u66f4\u65b0\u65f6\u95f4\uff1a", auto_time.strftime("%H:%M"))
 
     with settings_col2:
-        st.write("AI API Key\uff1a", "\u5df2\u586b\u5199" if llm_api_key else "\u672a\u586b\u5199")
-        st.write("AI Base URL\uff1a", llm_base_url if llm_base_url else "\u9ed8\u8ba4")
-        st.write("AI Model\uff1a", llm_model)
+        st.write("AI Profile\uff1a", active_llm_settings.profile_id)
+        st.write("AI Base URL\uff1a", active_llm_settings.base_url if active_llm_settings.base_url else "\u9ed8\u8ba4")
+        st.write("AI Model\uff1a", active_llm_settings.model)
         st.caption("AI \u63a5\u53e3\u5728\u5de6\u4fa7\u8fb9\u680f\u914d\u7f6e\u548c\u9a8c\u8bc1\u3002")
 
     st.markdown("#### \u672c\u5730\u6570\u636e\u72b6\u6001")

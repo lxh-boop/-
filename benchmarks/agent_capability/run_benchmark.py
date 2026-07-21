@@ -20,6 +20,7 @@ from agent.console_trace import sanitize_for_trace
 from agent.executor import run_agent_request
 from agent.llm_audit import load_llm_events
 from agent.runtime import load_run_snapshot
+from core.llm import LLMRuntimeSettings
 from evaluation.agent_harness.runner import _write_basic_fixture
 from portfolio.storage import PortfolioStorage
 
@@ -87,7 +88,7 @@ def _case_gold(case: dict[str, Any]) -> dict[str, Any]:
     return dict(case.get("gold") or {})
 
 
-def _run_one(case: dict[str, Any], iteration: int, config: BenchmarkRuntimeConfig, settings: dict[str, Any]) -> dict[str, Any]:
+def _run_one(case: dict[str, Any], iteration: int, config: BenchmarkRuntimeConfig, settings: LLMRuntimeSettings) -> dict[str, Any]:
     """One isolated fixture, user and conversation per case iteration."""
     case_id = str(case["case_id"])
     workspace = BENCHMARK_ROOT / "isolated_workspaces" / case_id / f"iter_{iteration}_{config.config_hash}_{uuid4().hex[:8]}"
@@ -110,10 +111,7 @@ def _run_one(case: dict[str, Any], iteration: int, config: BenchmarkRuntimeConfi
                 db_path=db_path,
                 session_id=session_id,
                 reply_language="zh",
-                llm_api_key=settings["llm_api_key"],
-                llm_base_url=settings["llm_base_url"],
-                llm_model=settings["llm_model"],
-                llm_settings=settings["llm_settings"],
+                llm_settings=settings,
                 decomposition_context={
                     "benchmark_mode": "L1 isolated real-LLM capability evaluation",
                     "benchmark_case_id": case_id,
@@ -547,9 +545,8 @@ def run_benchmark(*, split: str, iterations: int, workers: int, case_id: str = "
     ensure_case_files()
     ensure_roots(BENCHMARK_ROOT)
     settings, config = load_llm_settings()
-    if config.deployment_mode == "local":
-        workers = 1
-    if (config.deployment_mode == "api" and not settings["llm_api_key"]) or not settings["llm_base_url"] or not settings["llm_model"]:
+    workers = 1 if config.deployment_mode == "local" else 2
+    if not settings.is_configured:
         raise RuntimeError("Real LLM configuration is incomplete. Configure the local app LLM fields before running L1.")
     cases = [case for case in build_cases() if (split == "all" or case["split"] == split) and (not case_id or case["case_id"] == case_id)]
     if not cases:

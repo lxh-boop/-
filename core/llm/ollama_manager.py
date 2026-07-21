@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 RECOMMENDED_BASE_MODEL = "qwen3:4b"
 PROJECT_MODEL = "stock-agent-qwen3-4b"
+PROJECT_MODELFILE_NAME = "Modelfile.stock-agent-qwen3-4b"
 _MODEL_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,127}$", re.IGNORECASE)
 
 
@@ -33,6 +34,11 @@ def _result(success: bool, message: str, **data: Any) -> OllamaResult:
 
 def _valid_model_name(model: str) -> bool:
     return bool(_MODEL_PATTERN.fullmatch(str(model or "")))
+
+
+def is_valid_model_name(model: str) -> bool:
+    """Public validation boundary for selectable installed model names."""
+    return _valid_model_name(model)
 
 
 def _same_ollama_model(left: str, right: str) -> bool:
@@ -121,7 +127,7 @@ def pull_model(model: str = RECOMMENDED_BASE_MODEL, *, timeout_seconds: int = 18
 
 def create_project_model(modelfile: str | Path, *, timeout_seconds: int = 300) -> OllamaResult:
     path = Path(modelfile).resolve()
-    if not path.exists() or path.name != "Modelfile.stock-agent-qwen3-4b":
+    if not path.exists() or path.name != PROJECT_MODELFILE_NAME:
         return _result(False, "项目 Modelfile 不存在或名称不正确。")
     return _run_ollama(["create", PROJECT_MODEL, "-f", str(path)], timeout_seconds=timeout_seconds)
 
@@ -138,7 +144,7 @@ def validate_local_model(model: str = PROJECT_MODEL, *, timeout_seconds: int = 1
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": "/no_think"},
+            {"role": "system", "content": "只回复 OK。"},
             {"role": "user", "content": "只回复 OK"},
         ],
         "temperature": 0,

@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from agent.console_trace import flow_event, trace_event, trace_exception
-from llm_client import LLMClient
-from agent.llm_audit import record_schema_result
+from core.llm import LLMService
+from core.llm.dependencies import get_llm_execution_dependencies
 
 
 _SAFE_ID = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -659,69 +659,11 @@ def _system_data_missing_result(
     }
 
 
-def _extract_json_object(text: str) -> dict[str, Any]:
-    raw = str(text or "").strip()
-    if raw.startswith("```"):
-        lines = raw.splitlines()
-        if lines and lines[0].strip().startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        raw = "\n".join(lines).strip()
-    try:
-        value = json.loads(raw)
-        if isinstance(value, dict):
-            return value
-    except json.JSONDecodeError:
-        pass
-    start = raw.find("{")
-    if start < 0:
-        raise ValueError("llm_target_design_json_missing")
-    depth = 0
-    in_string = False
-    escaped = False
-    for index in range(start, len(raw)):
-        char = raw[index]
-        if escaped:
-            escaped = False
-            continue
-        if char == "\\":
-            escaped = True
-            continue
-        if char == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                value = json.loads(raw[start:index + 1])
-                if not isinstance(value, dict):
-                    raise ValueError("llm_target_design_not_object")
-                return value
-    raise ValueError("llm_target_design_json_incomplete")
+def _runtime_llm_service(context: dict[str, Any]) -> LLMService | None:
+    """Resolve the Executor-owned service from the private process registry."""
 
-
-def _load_llm_settings(context: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
-    runtime_settings = context.get("llm_runtime_settings")
-    if runtime_settings is not None:
-        return (
-            str(getattr(runtime_settings, "api_key", "") or "").strip() or None,
-            str(getattr(runtime_settings, "base_url", "") or "").strip() or None,
-            str(getattr(runtime_settings, "model", "") or "").strip() or None,
-        )
-    try:
-        from local_config import load_local_config
-        config = dict(load_local_config() or {})
-    except Exception:
-        config = {}
-    api_key = str(context.get("llm_api_key") or config.get("llm_api_key") or "").strip() or None
-    base_url = str(context.get("llm_base_url") or config.get("llm_base_url") or "").strip() or None
-    model = str(context.get("llm_model") or config.get("llm_model") or "").strip() or None
-    return api_key, base_url, model
+    dependencies = get_llm_execution_dependencies(str(context.get("run_id") or ""))
+    return dependencies.llm_service if dependencies is not None else None
 
 
 def _profile_summary(value: Any) -> dict[str, Any]:
@@ -801,13 +743,13 @@ def _record_runtime_llm_call(
     context: dict[str, Any],
     *,
     estimated_tokens: int,
-    client: LLMClient | None = None,
+    llm_service: LLMService | None = None,
 ) -> None:
     budget = context.get("runtime_budget")
     recorder = getattr(budget, "record_llm_call", None)
     if not callable(recorder):
         return
-    usage = dict(getattr(client, "last_usage", {}) or {}) if client is not None else {}
+    usage = dict(llm_service.last_usage or {}) if llm_service is not None else {}
     actual = int(usage.get("total_tokens") or 0)
     recorder(token_estimate=actual or max(0, int(estimated_tokens or 0)))
 
@@ -859,6 +801,11 @@ def _target_design_prompt(payload: dict[str, Any]) -> list[dict[str, str]]:
         {"role": "system", "content": system},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
     ]
+
+
+def _validate_target_design_payload(payload: dict[str, Any]) -> None:
+    if not isinstance(payload.get("target_design"), dict):
+        raise ValueError("llm_target_design_missing")
 
 
 def _allocation_validation_feedback(
@@ -1214,12 +1161,12 @@ def design_target_portfolio_adapter(args: dict[str, Any], context: dict[str, Any
         task_id=task_id,
     )
 
-    api_key, base_url, model = _load_llm_settings(context)
-    if not api_key:
+    llm_service = _runtime_llm_service(context)
+    if llm_service is None or not llm_service.is_available:
         return {
             "success": False,
             "status": "llm_unavailable",
-            "message": "缺少可用的 LLM API Key，无法完成本轮新策略设计。",
+            "message": "缺少当前 Agent Run 的 LLM 运行时依赖，无法完成本轮新策略设计。",
             "errors": ["llm_unavailable"],
             "data": {"need_clarification": False, "retryable": True, "repairable": False, "not_executed": True},
         }
@@ -1273,33 +1220,22 @@ def design_target_portfolio_adapter(args: dict[str, Any], context: dict[str, Any
                 "data": {"need_clarification": False, "retryable": False, "repairable": False, "not_executed": True},
             }
 
-    runtime_settings = context.get("llm_runtime_settings")
-    client = LLMClient(settings=runtime_settings) if runtime_settings is not None else LLMClient(api_key=api_key, base_url=base_url, model=model)
-    llm_recorded = False
     try:
-        if hasattr(client, "chat_audited"):
-            raw = client.chat_audited(
-                messages=messages,
-                temperature=0.0,
-                max_tokens=2400,
-                audit_stage="completion",
-                audit_operation="target_portfolio_design",
-            )
-        else:  # Compatibility for explicit unit-test doubles only.
-            raw = client.chat(messages=messages, temperature=0.0, max_tokens=2400)
+        parsed = llm_service.generate_json(
+            stage="completion",
+            messages=messages,
+            max_output_tokens=2400,
+            operation="target_portfolio_design",
+            validator=_validate_target_design_payload,
+        )
         _record_runtime_llm_call(
             context,
-            estimated_tokens=estimated_input_tokens + _estimate_llm_tokens(raw),
-            client=client,
+            estimated_tokens=estimated_input_tokens + _estimate_llm_tokens(parsed),
+            llm_service=llm_service,
         )
-        llm_recorded = True
-        parsed = _extract_json_object(raw)
-        record_schema_result(getattr(client, "last_audit_event_id", ""), True)
         design = dict(parsed.get("target_design") or {})
     except Exception as exc:
-        record_schema_result(getattr(client, "last_audit_event_id", ""), False)
-        if not llm_recorded:
-            _record_runtime_llm_call(context, estimated_tokens=0, client=client)
+        _record_runtime_llm_call(context, estimated_tokens=0, llm_service=llm_service)
         trace_exception("portfolio.target.design.llm_failed", exc, run_id=run_id, task_id=task_id)
         return {
             "success": False,

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from agent.console_trace import trace_event
-from core.llm.runtime_settings import LLMRuntimeSettings
+from core.llm import LLMService
 
 from agent.intent_decomposition import decompose_intent
 from agent.goal_planning import attach_goal_planning_to_decomposition
@@ -72,20 +72,14 @@ def _decomposition_payload(decomposition, execution_route: str) -> dict[str, Any
 def route_agent_query(
     query: str,
     *,
-    llm_api_key: str | None = None,
-    llm_base_url: str | None = None,
-    llm_model: str | None = None,
-    llm_settings: LLMRuntimeSettings | None = None,
+    llm_service: LLMService | None = None,
     reply_language: str = "zh",
     context: dict[str, Any] | None = None,
     enable_llm: bool = True,
 ) -> RoutedIntent:
     decomposition = decompose_intent(
         query,
-        llm_api_key=llm_api_key,
-        llm_base_url=llm_base_url,
-        llm_model=llm_model,
-        llm_settings=llm_settings,
+        llm_service=llm_service,
         reply_language=reply_language,
         context=context,
         enable_llm=enable_llm,

@@ -1543,10 +1543,8 @@ def _run_agent(
     db_path: str | None,
     default_topk: int,
     session_id: str,
-    llm_api_key: str | None = None,
-    llm_base_url: str | None = None,
-    llm_model: str | None = None,
     llm_settings: LLMRuntimeSettings | None = None,
+    profile_id: str | None = None,
 ) -> dict[str, Any]:
     trace_event("ui.agent.submit", {"query": query, "user_id": user_id, "session_id": session_id})
     try:
@@ -1557,10 +1555,8 @@ def _run_agent(
             db_path=db_path,
             top_k=int(default_topk),
             session_id=session_id,
-            llm_api_key=llm_api_key,
-            llm_base_url=llm_base_url,
-            llm_model=llm_model,
             llm_settings=llm_settings,
+            profile_id=profile_id,
         )
         if isinstance(result, dict):
             return result
@@ -1960,10 +1956,8 @@ def _safe_pending(
 def render_ai_agent_page(
     ranking: pd.DataFrame | None = None,
     metrics: dict | None = None,
-    llm_api_key: str | None = None,
-    llm_base_url: str | None = None,
-    llm_model: str | None = None,
     llm_settings: LLMRuntimeSettings | None = None,
+    profile_id: str | None = None,
     default_topk: int = 10,
     model_name: str | None = None,
     user_id: str = "default",
@@ -2087,12 +2081,11 @@ def render_ai_agent_page(
                     "db_path": db_path,
                     "default_topk": default_topk,
                     "session_id": session_id,
-                    "llm_api_key": llm_api_key,
-                    "llm_base_url": llm_base_url,
-                    "llm_model": llm_model,
                 }
                 if llm_settings is not None:
                     agent_kwargs["llm_settings"] = llm_settings
+                if profile_id:
+                    agent_kwargs["profile_id"] = profile_id
                 result = _run_agent(question, **agent_kwargs)
 
             answer = _normalise_answer(result)

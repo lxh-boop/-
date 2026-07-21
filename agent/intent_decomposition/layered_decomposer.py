@@ -6,9 +6,9 @@ from dataclasses import replace
 from typing import Any
 
 from agent.console_trace import flow_event, trace_event, trace_exception
-from core.llm.runtime_settings import LLMRuntimeSettings, resolve_active_llm_settings
+from core.llm import LLMService
 
-from agent.intent_decomposition.llm_decomposer import IntentDecompositionError, decompose_with_llm
+from agent.intent_decomposition.llm_decomposer import decompose_with_llm
 from agent.intent_decomposition.rule_fallback import decompose_with_rules, extract_rule_hints
 from agent.intent_decomposition.schemas import (
     DECISION_SOURCE_FALLBACK,
@@ -22,27 +22,6 @@ from agent.intent_decomposition.schemas import (
     PROTECTED_OPERATION_TYPES,
     WRITE_INTENTS,
 )
-
-
-def _load_saved_llm_settings() -> dict[str, str]:
-    try:
-        from local_config import load_local_config
-        config = dict(load_local_config() or {})
-    except Exception:
-        return {"api_key": "", "base_url": "", "model": ""}
-    return {
-        "api_key": str(config.get("llm_api_key") or "").strip(),
-        "base_url": str(config.get("llm_base_url") or "").strip(),
-        "model": str(config.get("llm_model") or "").strip(),
-    }
-
-
-def _resolve_llm_settings(api_key: str | None, base_url: str | None, model: str | None) -> tuple[str | None, str | None, str | None]:
-    saved = _load_saved_llm_settings()
-    resolved_key = str(api_key if api_key is not None else saved.get("api_key", "")).strip()
-    resolved_base = str(base_url if base_url is not None else saved.get("base_url", "")).strip()
-    resolved_model = str(model if model is not None else saved.get("model", "")).strip()
-    return resolved_key or None, resolved_base or None, resolved_model or None
 
 
 def _decompose_with_rules_compat(
@@ -470,7 +449,15 @@ def _is_insufficient_balance_error(exc: Exception) -> bool:
     return any(marker in text for marker in ["insufficient balance", "insufficient_balance", "余额不足", "账户余额不足", "http 402", "status code: 402", "error code: 402"])
 
 
-def _llm_error_decomposition(query: str, *, error_code: str, message: str, model: str | None, hints: dict[str, Any], llm_called: bool) -> IntentDecomposition:
+def _llm_error_decomposition(
+    query: str,
+    *,
+    error_code: str,
+    message: str,
+    llm_identity: dict[str, Any] | None,
+    hints: dict[str, Any],
+    llm_called: bool,
+) -> IntentDecomposition:
     return IntentDecomposition(
         query=str(query or ""),
         route_layer="llm_error",
@@ -485,7 +472,7 @@ def _llm_error_decomposition(query: str, *, error_code: str, message: str, model
             "llm_planner_called": llm_called,
             "fatal_error": True,
             "error_code": error_code,
-            "model": str(model or ""),
+            "llm_identity": dict(llm_identity or {}),
             "fallback_used": False,
             "business_rule_fallback_disabled": True,
             "rule_hints": hints,
@@ -496,10 +483,7 @@ def _llm_error_decomposition(query: str, *, error_code: str, message: str, model
 def decompose_intent(
     query: str,
     *,
-    llm_api_key: str | None = None,
-    llm_base_url: str | None = None,
-    llm_model: str | None = None,
-    llm_settings: LLMRuntimeSettings | None = None,
+    llm_service: LLMService | None = None,
     reply_language: str = "zh",
     context: dict[str, Any] | None = None,
     enable_llm: bool = True,
@@ -539,26 +523,20 @@ def decompose_intent(
         )
     if False and not enable_llm:
         return _with_supervisor_decision(
-            _llm_error_decomposition(query, error_code="llm_disabled", message="LLM意图识别已禁用，业务请求未执行规则兜底。", model=llm_model, hints=hints, llm_called=False),
+            _llm_error_decomposition(query, error_code="llm_disabled", message="LLM意图识别已禁用，业务请求未执行规则兜底。", llm_identity={}, hints=hints, llm_called=False),
             source=DECISION_SOURCE_LLM,
             reason="LLM-first 模式要求业务请求必须由 LLM 解析",
         )
 
-    active_llm = llm_settings or resolve_active_llm_settings(
-        api_key=llm_api_key,
-        base_url=llm_base_url,
-        model=llm_model,
-    )
-    api_key, base_url, model = active_llm.api_key, active_llm.base_url, active_llm.model
-    if active_llm.mode == "api" and not api_key:
+    if llm_service is None or not llm_service.is_available:
         return _with_supervisor_decision(
-            _repair_fallback_completeness(query, _decompose_with_rules_compat(query, warning="missing_api_key", context=context)),
+            _repair_fallback_completeness(query, _decompose_with_rules_compat(query, warning="llm_service_unavailable", context=context)),
             source=DECISION_SOURCE_FALLBACK,
-            reason="LLM API key missing; deterministic fallback selected only registered read/proposal tasks.",
+            reason="LLM service unavailable; deterministic fallback selected only registered read/proposal tasks.",
         )
-    if False and not api_key:
+    if False and llm_service is None:
         return _with_supervisor_decision(
-            _llm_error_decomposition(query, error_code="missing_api_key", message="未配置可用的 LLM API Key，无法可靠理解本次业务请求。", model=model, hints=hints, llm_called=False),
+            _llm_error_decomposition(query, error_code="llm_service_unavailable", message="未配置可用的 LLM Service，无法可靠理解本次业务请求。", llm_identity={}, hints=hints, llm_called=False),
             source=DECISION_SOURCE_LLM,
             reason="LLM-first 模式禁止业务关键词回退",
         )
@@ -569,10 +547,7 @@ def decompose_intent(
     try:
         decomposition = decompose_with_llm(
             query,
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            llm_settings=active_llm,
+            llm_service=llm_service,
             reply_language=reply_language,
             context=context_packet,
             rule_hints=hints,
@@ -619,7 +594,21 @@ def decompose_intent(
             )
         message = "大模型账户余额不足，无法完成本次意图识别。" if code == "insufficient_balance" else f"LLM意图识别失败：{type(exc).__name__}: {exc}"
         return _with_supervisor_decision(
-            _llm_error_decomposition(query, error_code=code, message=message, model=model, hints=hints, llm_called=True),
+            _llm_error_decomposition(
+                query,
+                error_code=code,
+                message=message,
+                llm_identity=(
+                    {
+                        "profile_id": llm_service.profile_id,
+                        "config_hash": llm_service.config_hash,
+                    }
+                    if llm_service is not None
+                    else {}
+                ),
+                hints=hints,
+                llm_called=True,
+            ),
             source=DECISION_SOURCE_LLM,
             reason="LLM 失败后停止业务执行，不使用关键词规则兜底",
             extra_diagnostics={"llm_planner_elapsed_ms": round((time.perf_counter() - started) * 1000.0, 3)},

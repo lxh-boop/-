@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 from agent.console_trace import flow_event, trace_event, trace_exception
-from core.llm.runtime_settings import LLMRuntimeSettings, resolve_active_llm_settings
+from core.llm import LLMService
 
 from agent.intent_decomposition.llm_decomposer import assess_completion_with_llm
 from agent.intent_decomposition.schemas import (
@@ -461,19 +461,6 @@ def select_fast_path(goal: UserGoal, plan: TaskPlan, validation: PlanValidationR
     return FastPathDecision(False, "business_fast_path_disabled_in_llm_first_mode")
 
 
-def _load_llm_settings() -> tuple[str | None, str | None, str | None]:
-    try:
-        from local_config import load_local_config
-        config = dict(load_local_config() or {})
-    except Exception:
-        config = {}
-    return (
-        str(config.get("llm_api_key") or "").strip() or None,
-        str(config.get("llm_base_url") or "").strip() or None,
-        str(config.get("llm_model") or "").strip() or None,
-    )
-
-
 def _declared_output_names(payload: dict[str, Any] | None) -> set[str]:
     if not isinstance(payload, dict):
         return set()
@@ -538,20 +525,12 @@ def observe_goal_completion(
     goal_payload: dict[str, Any] | UserGoal,
     produced: dict[str, Any] | None = None,
     *,
-    api_key: str | None = None,
-    base_url: str | None = None,
-    model: str | None = None,
-    llm_settings: LLMRuntimeSettings | None = None,
+    llm_service: LLMService | None = None,
     context: dict[str, Any] | None = None,
 ) -> GoalObserveResult:
     goal = goal_payload.to_dict() if isinstance(goal_payload, UserGoal) else dict(goal_payload or {})
     produced_payload = dict(produced or {})
-    active_llm = llm_settings or resolve_active_llm_settings(
-        api_key=api_key,
-        base_url=base_url,
-        model=model,
-    )
-    if active_llm.mode == "api" and not active_llm.api_key:
+    if llm_service is None or not llm_service.is_available:
         fallback = _technical_fallback_observe(goal, produced_payload)
         flow_event(
             "COMPLETION_OBSERVE",
@@ -572,7 +551,7 @@ def observe_goal_completion(
         assessment = assess_completion_with_llm(
             goal,
             produced_payload,
-            llm_settings=active_llm,
+            llm_service=llm_service,
             context=dict(context or {}),
         )
         result = GoalObserveResult(**assessment.to_dict())

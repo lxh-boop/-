@@ -4,6 +4,7 @@ import argparse
 from dataclasses import asdict
 from typing import Any, Callable
 
+from core.llm import LLMRuntimeSettings, LLMService, resolve_active_llm_settings
 from agent.intent_router import route_intent
 from agent.logging_utils import log_agent_call
 from agent.schemas import AgentResponse, RISK_WARNING, ToolCallRecord
@@ -266,8 +267,8 @@ def _format_answer(intent: str, result: dict) -> str:
     return formatter(result)
 
 
-def _agent_should_use_llm(intent: str, prompt_text: str, api_key: str | None) -> bool:
-    if not str(prompt_text or "").strip() or not str(api_key or "").strip():
+def _agent_should_use_llm(intent: str, prompt_text: str, llm_service: LLMService) -> bool:
+    if not str(prompt_text or "").strip() or not llm_service.is_available:
         return False
     return intent in {
         "explain_stock",
@@ -279,9 +280,7 @@ def _agent_should_use_llm(intent: str, prompt_text: str, api_key: str | None) ->
 
 def _answer_with_llm(
     prompt_text: str,
-    api_key: str,
-    base_url: str,
-    llm_model: str,
+    llm_service: LLMService,
     cache_row: dict | None = None,
 ) -> str:
     from llm_explainer import explain_prompt_with_llm
@@ -290,9 +289,7 @@ def _answer_with_llm(
     return explain_prompt_with_llm(
         stock_row=row,
         prompt_text=prompt_text,
-        api_key=api_key,
-        base_url=base_url,
-        model=llm_model,
+        llm_service=llm_service,
     )
 
 
@@ -305,7 +302,16 @@ def run_agent(
     llm_base_url: str = "",
     llm_model: str = "",
     llm_cache_row: dict | None = None,
+    llm_settings: LLMRuntimeSettings | None = None,
 ) -> AgentResponse:
+    # This legacy entry performs one compatibility conversion, then uses the
+    # same unified service as the formal Agent path.
+    active_llm = llm_settings or resolve_active_llm_settings(
+        api_key=llm_api_key,
+        base_url=llm_base_url or None,
+        model=llm_model or None,
+    )
+    llm_service = LLMService(active_llm)
     intent = route_intent(query)
     if intent == "unknown":
         return AgentResponse(answer=_answer_unknown(), intent=intent)
@@ -342,12 +348,10 @@ def run_agent(
     )
 
     tool_calls = [tool_record]
-    if result.get("success") and _agent_should_use_llm(intent, str(prompt_text or ""), llm_api_key):
+    if result.get("success") and _agent_should_use_llm(intent, str(prompt_text or ""), llm_service):
         answer = _answer_with_llm(
             prompt_text=str(prompt_text or ""),
-            api_key=str(llm_api_key or ""),
-            base_url=str(llm_base_url or ""),
-            llm_model=str(llm_model or ""),
+            llm_service=llm_service,
             cache_row=llm_cache_row,
         )
         llm_success = not answer.startswith("AI 解释生成失败")
@@ -355,8 +359,8 @@ def run_agent(
             intent=intent,
             tool_name="llm_explain_prompt",
             tool_args={
-                "model": llm_model,
-                "base_url": llm_base_url,
+                "profile_id": llm_service.profile_id,
+                "config_hash": llm_service.config_hash,
                 "prompt_chars": len(str(prompt_text or "")),
             },
             success=llm_success,

@@ -21,7 +21,7 @@ _CONTEXT: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
     "agent_llm_audit_context", default={}
 )
 _LOCK = threading.RLock()
-_ALLOWED_STAGES = {"planner", "goal_reviewer", "plan_reviewer", "completion", "critic"}
+_ALLOWED_STAGES = {"planner", "goal_reviewer", "plan_reviewer", "completion", "report", "critic", "replan"}
 
 
 def _utc_now() -> str:
@@ -79,6 +79,7 @@ def record_llm_call(
     error_message: str = "",
     operation: str = "",
     deployment_mode: str = "api",
+    profile_id: str = "",
     config_hash: str = "",
     endpoint_scope: str = "remote",
 ) -> str:
@@ -107,6 +108,7 @@ def record_llm_call(
         "provider": str(provider or ""),
         "model": str(model or ""),
         "deployment_mode": str(deployment_mode or "api"),
+        "profile_id": str(profile_id or "")[:200] or None,
         "config_hash": str(config_hash or "")[:64] or None,
         "endpoint_scope": str(endpoint_scope or "remote"),
         "temperature": float(temperature),

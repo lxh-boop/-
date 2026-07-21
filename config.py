@@ -107,6 +107,8 @@ DEFAULT_LOCAL_LLM_PROVIDER = "ollama_local"
 DEFAULT_LOCAL_LLM_BASE_URL = "http://127.0.0.1:11434/v1"
 DEFAULT_LOCAL_LLM_MODEL = "stock-agent-qwen3-4b"
 DEFAULT_LOCAL_LLM_DISABLE_THINKING = True
+DEFAULT_API_LLM_CONTEXT_WINDOW = 128000
+DEFAULT_LOCAL_LLM_CONTEXT_WINDOW = 32768
 
 
 # ============================================================

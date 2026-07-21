@@ -7,7 +7,7 @@ from typing import Any
 import pandas as pd
 
 from config import AI_EXPLANATION_DIR
-from llm_client import LLMClient
+from core.llm import LLMRuntimeSettings, LLMService
 from llm_prompts import (
     DISCLAIMER_TEXT,
     FORBIDDEN_TERMS,
@@ -131,9 +131,9 @@ def _finalize_explanation(stock_row: dict | pd.Series, explanation: str) -> str:
 def explain_prompt_with_llm(
     stock_row: dict | pd.Series,
     prompt_text: str,
-    api_key: str,
-    base_url: str,
-    model: str,
+    *,
+    llm_settings: LLMRuntimeSettings | None = None,
+    llm_service: LLMService | None = None,
 ) -> str:
     prompt_text = str(prompt_text or "").strip()
 
@@ -149,16 +149,20 @@ def explain_prompt_with_llm(
 4. 只能使用“模型预测”“数据分析角度”“风险提示”“不确定性”“仅供研究展示”等表达。
 """.strip()
 
-    client = LLMClient(api_key=api_key, base_url=base_url, model=model)
+    service = llm_service or (LLMService(llm_settings) if llm_settings is not None else None)
+    if service is None or not service.is_available:
+        return "AI 解释生成失败：当前 Model Profile 不可用。"
 
     try:
-        explanation = client.chat(
+        explanation = service.generate_text(
+            stage="report",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt_text},
             ],
             temperature=0.2,
-            max_tokens=1200,
+            max_output_tokens=1200,
+            operation="stock_prompt_explanation",
         )
     except Exception as exc:
         return f"AI 解释生成失败：{exc}"
@@ -171,9 +175,9 @@ def explain_stock_with_llm(
     model_metrics: dict | None,
     risk_detail: dict | None,
     news_context: list[dict] | None,
-    api_key: str,
-    base_url: str,
-    model: str,
+    *,
+    llm_settings: LLMRuntimeSettings | None = None,
+    llm_service: LLMService | None = None,
 ) -> str:
     messages = build_stock_prompt_messages(
         stock_row=stock_row,
@@ -190,13 +194,17 @@ def explain_stock_with_llm(
             f"```json\n{json.dumps(safety, ensure_ascii=False, indent=2)}\n```"
         )
 
-    client = LLMClient(api_key=api_key, base_url=base_url, model=model)
+    service = llm_service or (LLMService(llm_settings) if llm_settings is not None else None)
+    if service is None or not service.is_available:
+        return "AI 解释生成失败：当前 Model Profile 不可用。"
 
     try:
-        explanation = client.chat(
+        explanation = service.generate_text(
+            stage="report",
             messages=messages,
             temperature=0.2,
-            max_tokens=1200,
+            max_output_tokens=1200,
+            operation="stock_structured_explanation",
         )
     except Exception as exc:
         return f"AI 解释生成失败：{exc}"
