@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "4a7afff",
+  "trade_date": "2026-07-16",
+  "defaults": {
+    "strategy_mode": "hierarchical_top10",
+    "entry_top_k": 10,
+    "hold_buffer_rank": 15,
+    "max_positions": 10,
+    "target_invested_weight": 0.8,
+    "minimum_cash_ratio": 0.05,
+    "min_rebalance_weight_delta": 0.01
+  },
+  "account": {
+    "cash": 90000.0,
+    "total_assets": 100000.0,
+    "position_market_value": 10000.0
+  },
+  "positions": [
+    {
+      "stock_code": "000001",
+      "stock_name": "S1",
+      "quantity": 1000.0,
+      "cost_price": 9.0,
+      "current_price": 10.0,
+      "position_ratio": 0.1,
+      "industry": "I1"
+    }
+  ],
+  "ranking": [
+    {"stock_code": "000001", "rank": 1, "score": 0.99, "price": 10.0, "industry": "I1"},
+    {"stock_code": "000002", "rank": 2, "score": 0.98, "price": 10.0, "industry": "I2"},
+    {"stock_code": "000003", "rank": 3, "score": 0.97, "price": 10.0, "industry": "I3"},
+    {"stock_code": "000004", "rank": 4, "score": 0.96, "price": 10.0, "industry": "I4"},
+    {"stock_code": "000005", "rank": 5, "score": 0.95, "price": 10.0, "industry": "I5"},
+    {"stock_code": "000006", "rank": 6, "score": 0.94, "price": 10.0, "industry": "I1"},
+    {"stock_code": "000007", "rank": 7, "score": 0.93, "price": 10.0, "industry": "I2"},
+    {"stock_code": "000008", "rank": 8, "score": 0.92, "price": 10.0, "industry": "I3"},
+    {"stock_code": "000009", "rank": 9, "score": 0.91, "price": 10.0, "industry": "I4"},
+    {"stock_code": "000010", "rank": 10, "score": 0.90, "price": 10.0, "industry": "I5"},
+    {"stock_code": "000011", "rank": 11, "score": 0.89, "price": 10.0, "industry": "I1"},
+    {"stock_code": "000012", "rank": 12, "score": 0.88, "price": 10.0, "industry": "I2"},
+    {"stock_code": "000013", "rank": 13, "score": 0.87, "price": 10.0, "industry": "I3"},
+    {"stock_code": "000014", "rank": 14, "score": 0.86, "price": 10.0, "industry": "I4"},
+    {"stock_code": "000015", "rank": 15, "score": 0.85, "price": 10.0, "industry": "I5"}
+  ],
+  "expected": {
+    "target_portfolio": [
+      {"stock_code": "000001", "action": "buy", "target_weight": 0.112941176471, "executable_quantity": 1100.0},
+      {"stock_code": "000002", "action": "buy", "target_weight": 0.112941176471, "executable_quantity": 1100.0},
+      {"stock_code": "000003", "action": "buy", "target_weight": 0.112941176471, "executable_quantity": 1100.0},
+      {"stock_code": "000004", "action": "buy", "target_weight": 0.112941176471, "executable_quantity": 1100.0},
+      {"stock_code": "000005", "action": "buy", "target_weight": 0.112941176471, "executable_quantity": 1100.0},
+      {"stock_code": "000006", "action": "buy", "target_weight": 0.047058823529, "executable_quantity": 500.0},
+      {"stock_code": "000007", "action": "buy", "target_weight": 0.047058823529, "executable_quantity": 500.0},
+      {"stock_code": "000008", "action": "buy", "target_weight": 0.047058823529, "executable_quantity": 500.0},
+      {"stock_code": "000009", "action": "buy", "target_weight": 0.047058823529, "executable_quantity": 500.0},
+      {"stock_code": "000010", "action": "buy", "target_weight": 0.047058823529, "executable_quantity": 500.0},
+      {"stock_code": "000011", "action": "hold", "target_weight": 0.0, "executable_quantity": 0.0},
+      {"stock_code": "000012", "action": "hold", "target_weight": 0.0, "executable_quantity": 0.0},
+      {"stock_code": "000013", "action": "hold", "target_weight": 0.0, "executable_quantity": 0.0},
+      {"stock_code": "000014", "action": "hold", "target_weight": 0.0, "executable_quantity": 0.0},
+      {"stock_code": "000015", "action": "hold", "target_weight": 0.0, "executable_quantity": 0.0}
+    ],
+    "orders": [
+      {"stock_code": "000001", "action": "buy", "quantity": 100.0, "executed_price": 10.0, "total_fee": 0.3, "net_cash_change": -1000.3},
+      {"stock_code": "000002", "action": "buy", "quantity": 1100.0, "executed_price": 10.0, "total_fee": 3.3, "net_cash_change": -11003.3},
+      {"stock_code": "000003", "action": "buy", "quantity": 1100.0, "executed_price": 10.0, "total_fee": 3.3, "net_cash_change": -11003.3},
+      {"stock_code": "000004", "action": "buy", "quantity": 1100.0, "executed_price": 10.0, "total_fee": 3.3, "net_cash_change": -11003.3},
+      {"stock_code": "000005", "action": "buy", "quantity": 1100.0, "executed_price": 10.0, "total_fee": 3.3, "net_cash_change": -11003.3},
+      {"stock_code": "000006", "action": "buy", "quantity": 500.0, "executed_price": 10.0, "total_fee": 1.5, "net_cash_change": -5001.5},
+      {"stock_code": "000007", "action": "buy", "quantity": 500.0, "executed_price": 10.0, "total_fee": 1.5, "net_cash_change": -5001.5},
+      {"stock_code": "000008", "action": "buy", "quantity": 500.0, "executed_price": 10.0, "total_fee": 1.5, "net_cash_change": -5001.5},
+      {"stock_code": "000009", "action": "buy", "quantity": 500.0, "executed_price": 10.0, "total_fee": 1.5, "net_cash_change": -5001.5},
+      {"stock_code": "000010", "action": "buy", "quantity": 500.0, "executed_price": 10.0, "total_fee": 1.5, "net_cash_change": -5001.5}
+    ],
+    "account": {
+      "cash": 19979.0,
+      "total_assets": 99979.0,
+      "daily_fee": 21.0,
+      "cumulative_fee": 21.0
+    },
+    "position_quantities": {
+      "000001": 1100.0,
+      "000002": 1100.0,
+      "000003": 1100.0,
+      "000004": 1100.0,
+      "000005": 1100.0,
+      "000006": 500.0,
+      "000007": 500.0,
+      "000008": 500.0,
+      "000009": 500.0,
+      "000010": 500.0
+    }
+  }
+}
