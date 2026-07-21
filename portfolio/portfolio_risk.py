@@ -26,8 +26,6 @@ def _as_position(position: PaperPosition | dict[str, Any], total_assets: float) 
 
 
 def _position_ratio(position: PaperPosition, total_assets: float) -> float:
-    if position.position_ratio:
-        return float(position.position_ratio)
     if total_assets <= 0:
         return 0.0
     return float(position.market_value) / total_assets
@@ -52,12 +50,10 @@ def calculate_portfolio_risk(
     """Calculate first-version paper portfolio risk against user constraints."""
 
     account_obj = _as_account(account)
-    total_assets = float(account_obj.total_assets or account_obj.cash or account_obj.initial_cash or 0.0)
     raw_positions = positions or []
-    position_objs = [_as_position(item, total_assets=total_assets) for item in raw_positions]
+    position_objs = [_as_position(item, total_assets=0.0) for item in raw_positions]
     invested_value = sum(max(0.0, float(item.market_value)) for item in position_objs)
-    if total_assets <= 0:
-        total_assets = float(account_obj.cash) + invested_value
+    total_assets = float(account_obj.cash) + invested_value
 
     cash_ratio = float(account_obj.cash) / total_assets if total_assets > 0 else 0.0
     ratios = [_position_ratio(item, total_assets) for item in position_objs if item.quantity > 0]

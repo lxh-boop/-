@@ -289,3 +289,9 @@ def _value_has_forbidden_text(value: Any) -> bool:
             "tushare_token",
         )
     ) or ":\\" in str(value or "")
+
+# Memory V2 context-admission defaults.  TopN is only a retrieval candidate
+# pool; the final context size is determined by threshold and token budget.
+DEFAULT_MEMORY_CANDIDATE_TOP_N = 40
+DEFAULT_MEMORY_RELEVANCE_THRESHOLD = 0.42
+DEFAULT_MEMORY_CONTEXT_TOKEN_BUDGET = 360

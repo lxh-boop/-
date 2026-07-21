@@ -207,44 +207,6 @@ class MemoryRecord:
     def to_dict(self) -> dict[str, Any]:
         return _plain(self)
 
-    def to_legacy_memory_item(self) -> dict[str, Any]:
-        subtype = self.memory_subtype or self.memory_type.value.lower()
-        return {
-            "memory_id": self.memory_id,
-            "user_id": self.user_id,
-            "conversation_id": self.conversation_id or None,
-            "memory_type": subtype.lower(),
-            "content": self.content,
-            "topics": list(self.topics),
-            "stock_codes": list(self.stock_codes),
-            "company_names": [],
-            "industries": [],
-            "importance": self.importance,
-            "status": self.status.value.lower(),
-            "source_type": self.source_type,
-            "source_id": self.source_id,
-            "valid_from": self.valid_from or None,
-            "valid_until": self.valid_until or None,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-            "supersedes_memory_id": self.supersedes_memory_id or None,
-            "metadata": {
-                **dict(self.metadata or {}),
-                "phase14_memory_type": self.memory_type.value,
-                "scope": self.scope.value,
-                "visibility": self.visibility.value,
-                "confidence": self.confidence,
-                "run_id": self.run_id,
-                "task_id": self.task_id,
-                "summary": self.summary,
-                "context_refs": list(self.context_refs),
-                "message_refs": list(self.message_refs),
-                "artifact_refs": list(self.artifact_refs),
-                "approval_refs": list(self.approval_refs),
-                "source_refs": list(self.source_refs),
-            },
-        }
-
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "MemoryRecord":
         data = dict(value or {})
@@ -283,6 +245,3 @@ class MemoryRecord:
             source_refs=list(data.get("source_refs") or metadata.get("source_refs") or []),
         )
 
-    @classmethod
-    def from_legacy_memory_item(cls, value: dict[str, Any]) -> "MemoryRecord":
-        return cls.from_dict(value)

@@ -111,7 +111,10 @@ def test_stability_confirmation_commits_once_and_returns_trace_ids(tmp_path) -> 
     assert len(committed["order_ids"]) == 2
     assert duplicate["success"] is False
     positions = {row.stock_code: row.quantity for row in storage.load_positions("u1")}
-    assert positions == {"000001": 600.0, "600519": 800.0}
+    # The normalized snapshot derives total assets from cash plus both active
+    # positions (122,000), rather than trusting the stale 100,000 account
+    # aggregate in this fixture.
+    assert positions == {"000001": 800.0, "600519": 900.0}
     repo = AgentRepository(db_path)
     assert len(repo.store.list("action_commits", {"plan_id": data["plan_id"]})) == 1
 

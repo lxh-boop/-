@@ -12,6 +12,7 @@ from typing import Any
 
 from agent.console_trace import flow_event, trace_event, trace_exception
 from llm_client import LLMClient
+from agent.llm_audit import record_schema_result
 
 
 _SAFE_ID = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -705,6 +706,13 @@ def _extract_json_object(text: str) -> dict[str, Any]:
 
 
 def _load_llm_settings(context: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
+    runtime_settings = context.get("llm_runtime_settings")
+    if runtime_settings is not None:
+        return (
+            str(getattr(runtime_settings, "api_key", "") or "").strip() or None,
+            str(getattr(runtime_settings, "base_url", "") or "").strip() or None,
+            str(getattr(runtime_settings, "model", "") or "").strip() or None,
+        )
     try:
         from local_config import load_local_config
         config = dict(load_local_config() or {})
@@ -858,9 +866,19 @@ def _allocation_validation_feedback(
     raw_candidates: Any,
     requested_cash_weight: float | None,
     universe_map: dict[str, dict[str, Any]],
+    max_single_weight: float | None = None,
+    max_industry_weight: float | None = None,
+    constraint_sources: dict[str, str] | None = None,
+    expected_target_position_count: int | None = None,
+    design_rationale: Any = None,
     tolerance: float = 1e-6,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Validate an LLM-authored allocation without changing any business output."""
+    """Validate an LLM-authored allocation without changing business output.
+
+    User-profile and explicit risk limits are hard validation constraints.  The
+    validator reports violations with enough facts for a bounded redesign, but
+    never silently clips weights or invents industry classifications.
+    """
 
     errors: list[dict[str, Any]] = []
     canonical: list[dict[str, Any]] = []
@@ -925,7 +943,21 @@ def _allocation_validation_feedback(
             )
             continue
 
-        weight = _ratio(item.get("target_weight"), None)
+        raw_weight = _float(item.get("target_weight"), None)
+        if raw_weight is not None and raw_weight > 1.0 and raw_weight <= 100.0:
+            raw_weight /= 100.0
+        if raw_weight is not None and raw_weight < 0:
+            errors.append(
+                {
+                    "code": "negative_target_weight",
+                    "field": f"{field_prefix}.target_weight",
+                    "value": raw_weight,
+                    "message": "target_weight must not be negative",
+                    "repairable_by_llm": True,
+                }
+            )
+            continue
+        weight = raw_weight
         if weight is None:
             errors.append(
                 {
@@ -951,6 +983,19 @@ def _allocation_validation_feedback(
 
         seen.add(code)
         source = universe_map[code]
+        if max_single_weight is not None and float(weight) > float(max_single_weight) + tolerance:
+            errors.append(
+                {
+                    "code": "single_position_limit_exceeded",
+                    "field": f"{field_prefix}.target_weight",
+                    "stock_code": code,
+                    "observed_weight": round(float(weight), 10),
+                    "max_allowed_weight": round(float(max_single_weight), 10),
+                    "constraint_source": str((constraint_sources or {}).get("max_single_weight") or "risk_constraint"),
+                    "message": "target weight exceeds the enforced single-position limit",
+                    "repairable_by_llm": True,
+                }
+            )
         total_stock_weight += float(weight)
         canonical.append(
             {
@@ -997,6 +1042,60 @@ def _allocation_validation_feedback(
             }
         )
 
+    if expected_target_position_count is not None and len(canonical) != int(expected_target_position_count):
+        errors.append(
+            {
+                "code": "target_position_count_mismatch",
+                "field": "selected_candidates",
+                "observed": len(canonical),
+                "expected": int(expected_target_position_count),
+                "repairable_by_llm": True,
+            }
+        )
+
+    industry_metadata = _industry_metadata_status(canonical)
+    if max_industry_weight is not None and canonical:
+        if not industry_metadata["verifiable"]:
+            errors.append(
+                {
+                    "code": "industry_constraint_unverifiable",
+                    "field": "selected_candidates[*].industry",
+                    "constraint_source": str((constraint_sources or {}).get("max_industry_weight") or "risk_constraint"),
+                    "coverage": industry_metadata["coverage"],
+                    "message": "industry limit cannot be verified because industry metadata is incomplete",
+                    "repairable_by_llm": False,
+                }
+            )
+        else:
+            for industry, exposure in _industry_exposure(canonical, "target_weight").items():
+                if exposure > float(max_industry_weight) + tolerance:
+                    errors.append(
+                        {
+                            "code": "industry_weight_limit_exceeded",
+                            "field": "selected_candidates[*].industry",
+                            "industry": industry,
+                            "observed_weight": exposure,
+                            "max_allowed_weight": round(float(max_industry_weight), 10),
+                            "constraint_source": str((constraint_sources or {}).get("max_industry_weight") or "risk_constraint"),
+                            "repairable_by_llm": True,
+                        }
+                    )
+
+    rationale_text = " ".join(str(item) for item in (design_rationale or []) if str(item).strip()).lower()
+    if max_single_weight is not None and any(marker in rationale_text for marker in ("符合", "满足", "不超过", "complies", "satisfies")):
+        allowed_percent = f"{float(max_single_weight) * 100:g}%"
+        observed_max = max((float(item.get("target_weight") or 0.0) for item in canonical), default=0.0)
+        if allowed_percent in rationale_text and observed_max > float(max_single_weight) + tolerance:
+            errors.append(
+                {
+                    "code": "design_explanation_conflict",
+                    "field": "design_rationale",
+                    "observed_max_single_weight": round(observed_max, 10),
+                    "max_allowed_weight": round(float(max_single_weight), 10),
+                    "repairable_by_llm": True,
+                }
+            )
+
     return canonical, {
         "valid": not errors,
         "errors": errors,
@@ -1005,6 +1104,12 @@ def _allocation_validation_feedback(
         "cash_weight": requested_cash_weight,
         "total_weight": round(total_weight, 10),
         "tolerance": tolerance,
+        "industry_metadata": industry_metadata,
+        "enforced_constraints": {
+            "max_single_weight": max_single_weight,
+            "max_industry_weight": max_industry_weight,
+            "sources": dict(constraint_sources or {}),
+        },
         "mutation_performed": False,
     }
 
@@ -1100,7 +1205,7 @@ def design_target_portfolio_adapter(args: dict[str, Any], context: dict[str, Any
             "current_total_assets": current_total_assets,
             "reference_constraints": reference_constraints,
             "reference_constraint_sources": reference_constraint_sources,
-            "reference_constraints_enforced": False,
+            "reference_constraints_enforced": True,
             "decision_authority": "llm",
             "repair_round": repair_context.get("replan_round"),
             "validator_mutation_allowed": False,
@@ -1130,10 +1235,10 @@ def design_target_portfolio_adapter(args: dict[str, Any], context: dict[str, Any
         },
         "risk_report": risk,
         "user_profile_or_previous_strategy": profile,
-        "reference_constraints": {
+        "enforced_constraints": {
             **reference_constraints,
             "sources": reference_constraint_sources,
-            "enforcement": "reference_only_unless_explicitly_required_by_current_user_request",
+            "enforcement": "strict_validation_no_silent_clipping",
         },
         "available_security_universe": universe,
         "repair_context": repair_context,
@@ -1144,6 +1249,9 @@ def design_target_portfolio_adapter(args: dict[str, Any], context: dict[str, Any
             "cash_weight_range": [0, 1],
             "portfolio_total": 1.0,
             "portfolio_total_tolerance": 1e-6,
+            "max_single_weight": reference_constraints.get("max_single_weight"),
+            "max_industry_weight": reference_constraints.get("max_industry_weight"),
+            "industry_metadata_must_be_complete_when_industry_limit_exists": True,
             "validator_must_not_modify_business_output": True,
             "read_only_no_mutation": True,
         },
@@ -1165,10 +1273,20 @@ def design_target_portfolio_adapter(args: dict[str, Any], context: dict[str, Any
                 "data": {"need_clarification": False, "retryable": False, "repairable": False, "not_executed": True},
             }
 
-    client = LLMClient(api_key=api_key, base_url=base_url, model=model)
+    runtime_settings = context.get("llm_runtime_settings")
+    client = LLMClient(settings=runtime_settings) if runtime_settings is not None else LLMClient(api_key=api_key, base_url=base_url, model=model)
     llm_recorded = False
     try:
-        raw = client.chat(messages=messages, temperature=0.0, max_tokens=2400)
+        if hasattr(client, "chat_audited"):
+            raw = client.chat_audited(
+                messages=messages,
+                temperature=0.0,
+                max_tokens=2400,
+                audit_stage="completion",
+                audit_operation="target_portfolio_design",
+            )
+        else:  # Compatibility for explicit unit-test doubles only.
+            raw = client.chat(messages=messages, temperature=0.0, max_tokens=2400)
         _record_runtime_llm_call(
             context,
             estimated_tokens=estimated_input_tokens + _estimate_llm_tokens(raw),
@@ -1176,8 +1294,10 @@ def design_target_portfolio_adapter(args: dict[str, Any], context: dict[str, Any
         )
         llm_recorded = True
         parsed = _extract_json_object(raw)
+        record_schema_result(getattr(client, "last_audit_event_id", ""), True)
         design = dict(parsed.get("target_design") or {})
     except Exception as exc:
+        record_schema_result(getattr(client, "last_audit_event_id", ""), False)
         if not llm_recorded:
             _record_runtime_llm_call(context, estimated_tokens=0, client=client)
         trace_exception("portfolio.target.design.llm_failed", exc, run_id=run_id, task_id=task_id)
@@ -1192,15 +1312,27 @@ def design_target_portfolio_adapter(args: dict[str, Any], context: dict[str, Any
                 "replan_required": True,
                 "replan_scope": "target_design",
                 "next_action": "replan_target_design",
+                "missing_sources": ["target_design"],
                 "not_executed": True,
             },
         }
 
-    requested_cash_weight = _ratio(design.get("target_cash_weight"), None)
+    requested_cash_weight = _float(design.get("target_cash_weight"), None)
+    if requested_cash_weight is not None and requested_cash_weight > 1.0 and requested_cash_weight <= 100.0:
+        requested_cash_weight /= 100.0
+    expected_target_count = _float(
+        profile.get("target_position_count") or profile.get("preferred_position_count"),
+        None,
+    )
     selected_candidates, validation_feedback = _allocation_validation_feedback(
         raw_candidates=design.get("selected_candidates"),
         requested_cash_weight=requested_cash_weight,
         universe_map=universe_map,
+        max_single_weight=reference_constraints.get("max_single_weight"),
+        max_industry_weight=reference_constraints.get("max_industry_weight"),
+        constraint_sources=reference_constraint_sources,
+        expected_target_position_count=int(expected_target_count) if expected_target_count and expected_target_count > 0 else None,
+        design_rationale=design.get("design_rationale"),
     )
 
     limitations: list[str] = []
@@ -1230,7 +1362,7 @@ def design_target_portfolio_adapter(args: dict[str, Any], context: dict[str, Any
     design["clarification_question"] = ""
     design["reference_strategy_constraints"] = reference_constraints
     design["reference_constraint_sources"] = reference_constraint_sources
-    design["reference_constraints_enforced"] = False
+    design["reference_constraints_enforced"] = True
     design["current_total_assets"] = current_total_assets
     design["industry_metadata"] = {
         "current_portfolio": current_industry_metadata,
@@ -1245,7 +1377,7 @@ def design_target_portfolio_adapter(args: dict[str, Any], context: dict[str, Any
             "llm_target_design": design,
             "candidate_decision_source": "llm",
             "strategy_authority": "llm",
-            "reference_constraints_enforced": False,
+            "reference_constraints_enforced": True,
             "available_security_count": len(universe),
             "validation_feedback": validation_feedback,
             "validator_mutation_performed": False,
@@ -1309,6 +1441,7 @@ def construct_target_portfolio_adapter(args: dict[str, Any], context: dict[str, 
                 "repairable": True,
                 "replan_scope": "target_design",
                 "next_action": "replan_target_design",
+                "missing_sources": ["target_design"],
                 "not_executed": True,
                 "mutation_performed": False,
             },
@@ -1326,10 +1459,24 @@ def construct_target_portfolio_adapter(args: dict[str, Any], context: dict[str, 
             next_action="report_limitation",
         )
 
+    enforced_constraints, enforced_constraint_sources = _resolve_risk_constraints(
+        user_profile=args.get("user_profile"),
+        risk_report=args.get("risk_report"),
+        explicit_single=args.get("max_single_weight"),
+        explicit_industry=args.get("max_industry_weight"),
+    )
+    requested_design_cash = _float(design.get("target_cash_weight"), None)
+    if requested_design_cash is not None and requested_design_cash > 1.0 and requested_design_cash <= 100.0:
+        requested_design_cash /= 100.0
     selected, validation_feedback = _allocation_validation_feedback(
         raw_candidates=design.get("selected_candidates"),
-        requested_cash_weight=_ratio(design.get("target_cash_weight"), None),
+        requested_cash_weight=requested_design_cash,
         universe_map=universe_map,
+        max_single_weight=enforced_constraints.get("max_single_weight"),
+        max_industry_weight=enforced_constraints.get("max_industry_weight"),
+        constraint_sources=enforced_constraint_sources,
+        expected_target_position_count=_float(design.get("target_position_count"), None),
+        design_rationale=design.get("design_rationale"),
     )
     if not validation_feedback.get("valid"):
         return _invalid_design_result(
@@ -1403,10 +1550,7 @@ def construct_target_portfolio_adapter(args: dict[str, Any], context: dict[str, 
         if float(target_snapshot.get(metric) or 0.0) > float(current_snapshot.get(metric) or 0.0) + 1e-10
     ]
 
-    reference_constraints, reference_constraint_sources = _resolve_risk_constraints(
-        user_profile=args.get("user_profile"),
-        risk_report=args.get("risk_report"),
-    )
+    reference_constraints, reference_constraint_sources = enforced_constraints, enforced_constraint_sources
     reference_comparison: dict[str, Any] = {}
     ref_single = reference_constraints.get("max_single_weight")
     ref_industry = reference_constraints.get("max_industry_weight")
@@ -1415,14 +1559,14 @@ def construct_target_portfolio_adapter(args: dict[str, Any], context: dict[str, 
             "reference_value": round(float(ref_single), 8),
             "target_value": round(float(target_snapshot.get("max_single_weight") or 0.0), 8),
             "satisfied": float(target_snapshot.get("max_single_weight") or 0.0) <= float(ref_single) + 1e-10,
-            "status": "reference_only_not_enforced",
+            "status": "enforced",
         }
     if ref_industry is not None:
         reference_comparison["max_industry_weight"] = {
             "reference_value": round(float(ref_industry), 8),
             "target_value": target_snapshot.get("max_industry_weight"),
             "satisfied": None if not target_snapshot.get("industry_constraint_verifiable") else float(target_snapshot.get("max_industry_weight") or 0.0) <= float(ref_industry) + 1e-10,
-            "status": "reference_only_not_enforced",
+            "status": "enforced" if target_snapshot.get("industry_constraint_verifiable") else "unverifiable",
         }
 
     limitations = ["目标组合仅为只读分析结果，没有生成订单或修改模拟盘。", *quantity_limitations]
@@ -1456,7 +1600,7 @@ def construct_target_portfolio_adapter(args: dict[str, Any], context: dict[str, 
         "previous_strategy_constraints": {
             "values": reference_constraints,
             "sources": reference_constraint_sources,
-            "status": "reference_only_not_enforced",
+            "status": "enforced",
         },
         "reference_constraint_comparison": reference_comparison,
         "current_total_assets": total_assets,

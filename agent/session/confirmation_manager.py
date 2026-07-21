@@ -76,11 +76,22 @@ def _persist_action_proposal(
     if db_path is None:
         return
     try:
-        AgentRepository(db_path).upsert_action_proposal(
+        repository = AgentRepository(db_path)
+        source_run_id = str(plan.get("run_id") or "")
+        persisted_run_id = (
+            source_run_id
+            if source_run_id
+            and repository.store.get(
+                "agent_runs",
+                {"run_id": source_run_id},
+            )
+            else None
+        )
+        repository.upsert_action_proposal(
             {
                 "plan_id": str(plan.get("plan_id") or ""),
                 "user_id": str(plan.get("user_id") or ""),
-                "run_id": str(plan.get("run_id")) if plan.get("run_id") else None,
+                "run_id": persisted_run_id,
                 "operation_type": str(plan.get("operation_type") or plan.get("intent") or ""),
                 "snapshot_id": str(plan.get("snapshot_id") or ""),
                 "business_state_version": str(plan.get("business_state_version") or ""),
@@ -94,7 +105,11 @@ def _persist_action_proposal(
                 "warnings": plan.get("warnings") or [],
                 "validation_results": plan.get("validation_results") or {},
                 "requires_confirmation": 1 if plan.get("requires_confirmation", True) else 0,
-                "metadata": {"intent": plan.get("intent"), "execution_status": plan.get("execution_status")},
+                "metadata": {
+                    "intent": plan.get("intent"),
+                    "execution_status": plan.get("execution_status"),
+                    "source_run_id": source_run_id,
+                },
             }
         )
     except Exception:

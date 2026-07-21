@@ -20,6 +20,8 @@ from portfolio.storage import PortfolioStorage
 from portfolio.trading_cost_config import TradingCostConfig
 from portfolio.user_profile import build_user_constraints, default_user_profile, load_user_context
 from scoring.schemas import FinalRecommendationRecord, FusionOutput
+from strategies.base import StrategyContext
+from strategies.runtime_resolver import StrategyRuntimeResolver
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -260,6 +262,11 @@ def _build_paper_decisions(context: PipelineContext, plan, orders, decision_time
                 "job_id": context.job_id,
                 "run_id": context.run_id,
                 "execution_source": context.execution_source,
+                "strategy_id": plan.strategy_id,
+                "strategy_version": plan.strategy_version,
+                "binding_id": plan.binding_id,
+                "config_hash": plan.config_hash,
+                "resolved_config": dict(plan.resolved_config or {}),
                 "created_at": now_text(),
             }
         )
@@ -280,12 +287,47 @@ def run_paper_trading_pipeline(
         )
 
     output_dir = Path(output_dir) if output_dir else context.resolved_output_dir() / "portfolio" / context.user_id
-    storage = PortfolioStorage(context.db_path, output_dir=output_dir, use_database=not context.dry_run)
+    storage = PortfolioStorage(
+        context.db_path,
+        output_dir=output_dir,
+        use_database=True,
+    )
     account = storage.load_account(f"paper_{context.user_id}") or create_default_account(
         context.user_id,
         initial_cash=_initial_cash_from_user_profile(context),
     )
     positions = storage.load_positions(context.user_id)
+    candidates = [_record_to_candidate(record) for record in final_recommendations]
+    trade_date = _resolve_trade_date(context, candidates)
+    record_context = context.with_trade_date(trade_date)
+    runtime_resolver = StrategyRuntimeResolver(
+        db_path=context.db_path,
+        output_dir=context.output_dir,
+    )
+    runtime_strategy = runtime_resolver.resolve(
+        user_id=context.user_id,
+        account_id=account.account_id,
+        as_of_date=trade_date,
+    )
+    if not runtime_strategy.binding_id:
+        legacy_config = {
+            "entry_top_k": int(context.entry_top_k),
+            "hold_buffer_rank": int(context.hold_buffer_rank),
+            "max_positions": int(context.max_positions),
+            "target_invested_weight": float(
+                context.target_invested_weight
+            ),
+            "minimum_cash_ratio": float(context.minimum_cash_ratio),
+            "min_rebalance_weight_delta": float(
+                context.min_rebalance_weight_delta
+            ),
+        }
+        if legacy_config != runtime_strategy.resolved_config():
+            runtime_strategy = runtime_resolver.with_config(
+                runtime_strategy,
+                legacy_config,
+            )
+    resolved_config = runtime_strategy.resolved_config()
     stored_settings = storage.load_trading_settings(context.user_id)
     settings_payload = {
         key: value
@@ -296,18 +338,31 @@ def run_paper_trading_pipeline(
         **{
             **settings_payload,
             "user_id": context.user_id,
-            "entry_top_k": int(context.entry_top_k or stored_settings.entry_top_k),
-            "hold_buffer_rank": int(context.hold_buffer_rank or stored_settings.hold_buffer_rank),
-            "max_positions": int(context.max_positions or stored_settings.max_positions),
-            "minimum_cash_ratio": float(context.minimum_cash_ratio or stored_settings.minimum_cash_ratio),
-            "min_rebalance_weight_delta": float(
-                context.min_rebalance_weight_delta or stored_settings.min_rebalance_weight_delta
+            "entry_top_k": int(resolved_config["entry_top_k"]),
+            "hold_buffer_rank": int(
+                resolved_config["hold_buffer_rank"]
             ),
-            "strategy_mode": stored_settings.strategy_mode if context.strategy == "top10" else context.strategy,
+            "max_positions": int(resolved_config["max_positions"]),
+            "target_invested_weight": float(
+                resolved_config["target_invested_weight"]
+            ),
+            "minimum_cash_ratio": float(
+                resolved_config["minimum_cash_ratio"]
+            ),
+            "min_rebalance_weight_delta": float(
+                resolved_config["min_rebalance_weight_delta"]
+            ),
+            "strategy_mode": (
+                "hierarchical_top10"
+                if runtime_strategy.module_path
+                == "strategies.adapters.hierarchical_top10_strategy"
+                else "runtime_plugin"
+            ),
             "execution_price_type": context.execution_price_type or stored_settings.execution_price_type,
         }
     )
-    storage.save_trading_settings(cost_config)
+    if not context.dry_run:
+        storage.save_trading_settings(cost_config)
     try:
         _, _, _, constraints = load_user_context(
             context.user_id,
@@ -318,9 +373,6 @@ def run_paper_trading_pipeline(
         constraints = build_user_constraints(default_user_profile(context.user_id))
     decision_time = context.decision_time or now_text()
     decision_token = _decision_time_token(decision_time)
-    candidates = [_record_to_candidate(record) for record in final_recommendations]
-    trade_date = _resolve_trade_date(context, candidates)
-    record_context = context.with_trade_date(trade_date)
     holding_days_by_code = _position_holding_days(output_dir, trade_date)
     for candidate in candidates:
         code = _stock_code(candidate.get("stock_code"))
@@ -345,6 +397,37 @@ def run_paper_trading_pipeline(
         code = _stock_code(candidate.get("stock_code"))
         if not candidate.get("decision_id"):
             candidate["decision_id"] = f"paper_decision_{context.user_id}_{trade_date}_{code}_{decision_token}"
+    plugin_result = None
+    if cost_config.strategy_mode == "runtime_plugin":
+        plugin_result = runtime_resolver.generate_target(
+            runtime_strategy,
+            StrategyContext(
+                user_id=context.user_id,
+                account_id=account.account_id,
+                trade_date=trade_date,
+                decision_time=decision_time,
+                predictions=candidates,
+                current_cash=float(account.cash or 0.0),
+                current_positions={
+                    _stock_code(item.stock_code): item.to_dict()
+                    for item in positions
+                },
+                runtime_config={
+                    **resolved_config,
+                    "total_assets": float(
+                        account.total_assets or account.initial_cash or 0.0
+                    ),
+                },
+            ),
+        )
+        target_weights = dict(plugin_result.target_weights or {})
+        for candidate in candidates:
+            candidate["target_weight"] = float(
+                target_weights.get(
+                    _stock_code(candidate.get("stock_code")),
+                    0.0,
+                )
+            )
     plan = build_rebalance_plan(
         user_id=context.user_id,
         trade_date=trade_date,
@@ -353,6 +436,9 @@ def run_paper_trading_pipeline(
         current_positions=positions,
         account=account,
         top_k=context.top_k,
+        target_invested_weight=float(
+            resolved_config["target_invested_weight"]
+        ),
         entry_top_k=cost_config.entry_top_k,
         hold_buffer_rank=cost_config.hold_buffer_rank,
         max_positions=cost_config.max_positions,
@@ -363,6 +449,11 @@ def run_paper_trading_pipeline(
         job_id=context.job_id,
         run_id=context.run_id,
         execution_source=context.execution_source,
+        strategy_id=runtime_strategy.strategy_id,
+        strategy_version=runtime_strategy.strategy_version,
+        binding_id=runtime_strategy.binding_id,
+        config_hash=runtime_strategy.config_hash,
+        resolved_config=resolved_config,
     )
     if isinstance(plan.execution_diagnostics, dict):
         plan.execution_diagnostics.update(
@@ -370,12 +461,23 @@ def run_paper_trading_pipeline(
                 "original_ranking_count": len(candidates),
                 "ai_adjustment_count": len(candidates),
                 "stored_input_only": context.execution_source == "backfill",
+                "strategy_id": runtime_strategy.strategy_id,
+                "strategy_version": runtime_strategy.strategy_version,
+                "binding_id": runtime_strategy.binding_id,
+                "config_hash": runtime_strategy.config_hash,
+                "resolved_config": resolved_config,
+                "runtime_strategy_source": runtime_strategy.source,
+                "plugin_result": (
+                    plugin_result.to_dict() if plugin_result else None
+                ),
             }
         )
     risk_report = calculate_portfolio_risk(context.user_id, account, positions, constraints)
     output_paths: dict[str, str] = {}
 
     if context.paper_trading_enabled and not context.dry_run:
+        positions_before = [item.to_dict() for item in positions]
+        cash_before = float(account.cash or 0.0)
         previous_total_assets = float(account.total_assets or account.initial_cash or 0.0)
         previous_twr = float(account.time_weighted_return or 0.0)
         executed = execute_paper_rebalance(
@@ -430,6 +532,36 @@ def run_paper_trading_pipeline(
             decisions=decisions,
             trade_date=trade_date,
             decision_time=decision_token,
+            strategy_metadata={
+                "strategy_id": plan.strategy_id,
+                "strategy_version": plan.strategy_version,
+                "binding_id": plan.binding_id,
+                "config_hash": plan.config_hash,
+                "resolved_config": plan.resolved_config,
+            },
+        )
+        storage.save_strategy_execution_history(
+            {
+                "user_id": context.user_id,
+                "account_id": account.account_id,
+                "trade_date": trade_date,
+                "run_id": context.run_id or decision_token,
+                "strategy_id": plan.strategy_id,
+                "strategy_version": plan.strategy_version,
+                "binding_id": plan.binding_id,
+                "config_hash": plan.config_hash,
+                "resolved_config": plan.resolved_config,
+                "positions_before": positions_before,
+                "target_portfolio": [
+                    item.to_dict() for item in plan.decisions
+                ],
+                "orders": [item.to_dict() for item in orders],
+                "positions_after": [
+                    item.to_dict() for item in positions
+                ],
+                "cash_before": cash_before,
+                "cash_after": float(account.cash or 0.0),
+            }
         )
         diagnostics_path = Path(output_dir) / "paper_execution_diagnostics_latest.json"
         diagnostics_path.write_text(json.dumps(plan.execution_diagnostics, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -604,10 +736,5 @@ def run_paper_trading_from_latest(
         db_path=db_path,
         dry_run=bool(dry_run),
         paper_trading_enabled=bool(paper_trading_enabled),
-        strategy="hierarchical_top10",
-        entry_top_k=10,
-        hold_buffer_rank=15,
-        max_positions=10,
-        minimum_cash_ratio=0.05,
     )
     return run_paper_trading_pipeline(context, recommendations.to_dict("records"))

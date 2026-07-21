@@ -1,18 +1,24 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 from .memory_manager import MemoryManager
+from .memory_retrieval_types import MemoryRetrievalRequest
 from .memory_sanitizer import MemorySanitizer
 from .memory_store import DEFAULT_MEMORY_STORE_PATH, SQLiteMemoryStore
+
+_STOCK_RE = re.compile(r"(?<!\d)\d{6}(?!\d)")
 
 
 def memory_store_path(output_dir: str | Path = "outputs") -> Path:
     return Path(output_dir) / "memory" / DEFAULT_MEMORY_STORE_PATH.name
 
 
-def get_memory_manager_for_output(output_dir: str | Path = "outputs") -> MemoryManager:
+def get_memory_manager_for_output(
+    output_dir: str | Path = "outputs",
+) -> MemoryManager:
     return MemoryManager(db_path=memory_store_path(output_dir))
 
 
@@ -21,26 +27,58 @@ def build_memory_context_view(
     user_id: str,
     query: str = "",
     output_dir: str | Path = "outputs",
-    limit: int = 6,
+    conversation_id: str = "",
+    run_id: str = "",
+    task_type: str = "",
+    agent_role: str = "supervisor",
+    entities: dict[str, Any] | None = None,
+    topics: list[str] | None = None,
+    stock_codes: list[str] | None = None,
+    candidate_top_n: int = 40,
+    relevance_threshold: float = 0.42,
+    token_budget: int = 360,
+    request: MemoryRetrievalRequest | None = None,
+    limit: int | None = None,
 ) -> dict[str, Any]:
+    """Build the only LLM-visible memory view for one request.
+
+    ``limit`` remains as an input compatibility alias for candidate_top_n.  It
+    never means a fixed number of memories admitted to context.
+    """
+
     manager = get_memory_manager_for_output(output_dir)
-    view = manager.retrieve_for_context(
-        user_id=user_id,
-        query=query,
-        limit=limit,
+    codes = list(stock_codes or [])
+    codes.extend(_STOCK_RE.findall(str(query or "")))
+    req = request or MemoryRetrievalRequest(
+        user_id=str(user_id or "default"),
+        query=str(query or ""),
+        conversation_id=str(conversation_id or ""),
+        run_id=str(run_id or ""),
+        task_type=str(task_type or ""),
+        agent_role=str(agent_role or "supervisor"),
+        entities=dict(entities or {}),
+        topics=list(topics or []),
+        stock_codes=list(dict.fromkeys(codes)),
+        candidate_top_n=int(limit or candidate_top_n),
+        relevance_threshold=relevance_threshold,
+        token_budget=token_budget,
         include_working=False,
         include_long_term=True,
     )
+    view = manager.retrieve_for_context(request=req)
     items = list(view.get("items") or [])
     memory_refs = [
         str((item.get("memory") or {}).get("memory_id") or "")
         for item in items
         if (item.get("memory") or {}).get("memory_id")
     ]
+    diagnostics = dict(view.get("diagnostics") or {})
     return {
+        "retrieval_id": str(view.get("retrieval_id") or ""),
         "memory_refs": memory_refs,
         "item_count": len(items),
         "items": items,
+        "diagnostics": diagnostics,
         "policy": view.get("policy") or {},
     }
 
@@ -63,7 +101,9 @@ def build_memory_store_health_summary(
             "total_count": total_count,
             "user_count": user_count,
             "latest_memory_count": len(latest),
-            "latest_memory_types": sorted({record.memory_type.value for record in latest}),
+            "latest_memory_types": sorted(
+                {record.memory_type.value for record in latest}
+            ),
             "secret_safe": True,
             "write_permission": "none",
         }
@@ -87,7 +127,10 @@ def build_memory_safe_summary(
     user_id: str = "default",
     output_dir: str | Path = "outputs",
 ) -> str:
-    health = build_memory_store_health_summary(user_id=user_id, output_dir=output_dir)
+    health = build_memory_store_health_summary(
+        user_id=user_id,
+        output_dir=output_dir,
+    )
     return (
         "Memory safe summary: "
         f"status={health.get('status')} | "
@@ -105,13 +148,15 @@ def list_memory_records_safe_page(
     limit: int = 5,
     offset: int = 0,
 ) -> dict[str, Any]:
-    """Return a small UI-safe page of memory records without raw internals."""
     try:
         store = SQLiteMemoryStore(memory_store_path(output_dir))
         total = store.count(user_id=user_id)
         start = max(0, int(offset or 0))
         page_size = max(1, min(50, int(limit or 5)))
-        records = store.list_records(user_id=user_id, limit=start + page_size)
+        records = store.list_records(
+            user_id=user_id,
+            limit=start + page_size,
+        )
         sanitizer = MemorySanitizer(max_text_chars=300)
         rows = []
         for record in records[start : start + page_size]:
@@ -120,9 +165,13 @@ def list_memory_records_safe_page(
                 {
                     "memory_id": str(safe.get("memory_id") or "")[:96],
                     "memory_type": str(safe.get("memory_type") or "")[:64],
-                    "memory_subtype": str(safe.get("memory_subtype") or "")[:64],
+                    "memory_subtype": str(
+                        safe.get("memory_subtype") or ""
+                    )[:64],
                     "scope": str(safe.get("scope") or "")[:64],
-                    "summary": str(safe.get("summary") or safe.get("content") or "")[:220],
+                    "summary": str(
+                        safe.get("summary") or safe.get("content") or ""
+                    )[:220],
                     "topics": list(safe.get("topics") or [])[:8],
                     "stock_codes": list(safe.get("stock_codes") or [])[:8],
                     "importance": safe.get("importance"),
@@ -167,7 +216,13 @@ def extract_memory_candidates_from_message_trace(
     manager = get_memory_manager_for_output(output_dir)
     candidates = []
     for message in messages:
-        candidates.extend(manager.remember_candidate(message, user_id=user_id, source_type="message"))
+        candidates.extend(
+            manager.remember_candidate(
+                message,
+                user_id=user_id,
+                source_type="message",
+            )
+        )
     return [candidate.to_dict() for candidate in candidates]
 
 
@@ -178,5 +233,21 @@ def extract_memory_candidates_from_artifact(
     output_dir: str | Path = "outputs",
 ) -> list[dict[str, Any]]:
     manager = get_memory_manager_for_output(output_dir)
-    candidates = manager.extractor.extract({"user_id": user_id, **dict(artifact or {})}, source_type="artifact", user_id=user_id)
+    candidates = manager.extractor.extract(
+        {"user_id": user_id, **dict(artifact or {})},
+        source_type="artifact",
+        user_id=user_id,
+    )
     return [candidate.to_dict() for candidate in candidates]
+
+
+__all__ = [
+    "build_memory_context_view",
+    "build_memory_safe_summary",
+    "build_memory_store_health_summary",
+    "extract_memory_candidates_from_artifact",
+    "extract_memory_candidates_from_message_trace",
+    "get_memory_manager_for_output",
+    "list_memory_records_safe_page",
+    "memory_store_path",
+]

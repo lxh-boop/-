@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 from agent.console_trace import flow_event, trace_event, trace_exception
+from core.llm.runtime_settings import LLMRuntimeSettings, resolve_active_llm_settings
 
 from agent.intent_decomposition.llm_decomposer import assess_completion_with_llm
 from agent.intent_decomposition.schemas import (
@@ -94,7 +95,10 @@ class UserGoal:
             objects=list(goal.objects),
             constraints=list(goal.constraints),
             expected_outputs=list(goal.expected_outputs),
-            conversation_context={"context_packet": dict(context_packet or {}), "follow_up": goal.follow_up.to_dict()},
+            conversation_context=_goal_context_refs(
+                context_packet or {},
+                follow_up=goal.follow_up.to_dict(),
+            ),
             follow_up=goal.follow_up.is_follow_up,
             requires_current_state=goal.requires_current_state,
             requires_external_evidence=goal.requires_external_evidence,
@@ -198,22 +202,56 @@ class GoalObserveResult:
         return asdict(self)
 
 
+def _goal_context_refs(
+    packet: dict[str, Any],
+    *,
+    follow_up: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    memory = packet.get("memory_context") if isinstance(packet.get("memory_context"), dict) else {}
+    return {
+        "context_id": str(packet.get("context_id") or ""),
+        "conversation_id": str(packet.get("conversation_id") or ""),
+        "memory_retrieval_id": str(memory.get("retrieval_id") or ""),
+        "memory_refs": list(memory.get("memory_refs") or [])[:20],
+        "artifact_refs": list(packet.get("artifact_refs") or [])[:20],
+        "reference_turn_ids": list(
+            (packet.get("turn_resolution") or {}).get("reference_turn_ids") or []
+        )[:20],
+        "follow_up": dict(follow_up or packet.get("follow_up") or {}),
+    }
+
+
 def build_context_packet(current_message: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build a compact planner packet; never embed another full context object."""
+
     payload = dict(context or {})
+    follow_up = payload.get("follow_up") if isinstance(payload.get("follow_up"), dict) else {}
+    is_follow_up = bool(follow_up.get("is_follow_up"))
+    memory = payload.get("memory_context") if isinstance(payload.get("memory_context"), dict) else {}
     packet = {
+        "context_id": str(payload.get("context_id") or ""),
         "current_message": str(current_message or "").strip(),
-        "conversation_id": payload.get("session_id") or payload.get("conversation_id") or "",
+        "resolved_message": str(payload.get("resolved_message") or current_message or "").strip(),
+        "conversation_id": payload.get("conversation_id") or payload.get("session_id") or "",
         "user_id": payload.get("user_id") or "",
-        "previous_user_goal": payload.get("previous_user_goal") or {},
-        "previous_result_summary": payload.get("previous_result_summary") or "",
-        "pending_proposal": payload.get("pending_proposal") or {},
-        "inherited_parameters": payload.get("inherited_parameters") or {},
-        "context_bundle": payload.get("context_bundle") or {},
-        "context_bundle_llm": payload.get("context_bundle_llm") or {},
-        "agent_context": payload.get("agent_context") or {},
-        "mcp": payload.get("mcp") or {},
-        "target_portfolio_refs": payload.get("target_portfolio_refs") or [],
-        "runtime_policy": payload.get("runtime_policy") or {},
+        "turn_resolution": dict(payload.get("turn_resolution") or {}),
+        "follow_up": follow_up,
+        "previous_user_goal": dict(payload.get("previous_user_goal") or {}) if is_follow_up else {},
+        "previous_result_summary": str(payload.get("previous_result_summary") or "")[:1200] if is_follow_up else "",
+        "pending_clarification": dict(payload.get("pending_clarification") or {}),
+        "pending_proposal": dict(payload.get("pending_proposal") or {}),
+        "explicit_parameters": dict(payload.get("explicit_parameters") or {}),
+        "inherited_parameters": dict(payload.get("inherited_parameters") or {}) if is_follow_up else {},
+        "active_entities": dict(payload.get("active_entities") or {}),
+        "memory_context": {
+            "retrieval_id": str(memory.get("retrieval_id") or ""),
+            "memory_refs": list(memory.get("memory_refs") or [])[:20],
+            "items": list(memory.get("items") or []),
+            "diagnostics": dict(memory.get("diagnostics") or {}),
+        },
+        "artifact_refs": list(payload.get("artifact_refs") or [])[:20],
+        "target_portfolio_refs": list(payload.get("target_portfolio_refs") or [])[:8],
+        "strategy_context": dict(payload.get("strategy_context") or {}),
         "default_top_k": payload.get("default_top_k"),
     }
     return packet
@@ -267,7 +305,7 @@ def build_user_goal(raw_message: str, *, resolution: ConversationResolution, can
             resolved_message=str(raw_message or ""),
             action="clarify",
             expected_outputs=[],
-            conversation_context={"context_packet": resolution.context_packet},
+            conversation_context=_goal_context_refs(resolution.context_packet),
             ambiguity=1.0,
             confidence=0.0,
             source="llm_missing",
@@ -350,7 +388,7 @@ def plan_from_user_goal(goal: UserGoal, *, old_decomposition: IntentDecompositio
         tasks = [
             IntentTask(task_id="task_1", intent="portfolio_state", confidence=0.86, capability_status="executable"),
             IntentTask(task_id="task_2", intent="portfolio_risk", depends_on=["task_1"], confidence=0.86, capability_status="executable"),
-            IntentTask(task_id="task_3", intent="ranking", parameters={"top_k": 10}, confidence=0.86, capability_status="executable"),
+            IntentTask(task_id="task_3", intent="ranking", confidence=0.86, capability_status="executable"),
         ]
     return TaskPlan(
         tasks=tasks,
@@ -503,15 +541,17 @@ def observe_goal_completion(
     api_key: str | None = None,
     base_url: str | None = None,
     model: str | None = None,
+    llm_settings: LLMRuntimeSettings | None = None,
     context: dict[str, Any] | None = None,
 ) -> GoalObserveResult:
     goal = goal_payload.to_dict() if isinstance(goal_payload, UserGoal) else dict(goal_payload or {})
     produced_payload = dict(produced or {})
-    saved_key, saved_base, saved_model = _load_llm_settings()
-    resolved_key = str(api_key or saved_key or "").strip() or None
-    resolved_base = str(base_url if base_url is not None else (saved_base or "")).strip() or None
-    resolved_model = str(model or saved_model or "").strip() or None
-    if not resolved_key:
+    active_llm = llm_settings or resolve_active_llm_settings(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+    )
+    if active_llm.mode == "api" and not active_llm.api_key:
         fallback = _technical_fallback_observe(goal, produced_payload)
         flow_event(
             "COMPLETION_OBSERVE",
@@ -532,9 +572,7 @@ def observe_goal_completion(
         assessment = assess_completion_with_llm(
             goal,
             produced_payload,
-            api_key=resolved_key,
-            base_url=resolved_base,
-            model=resolved_model,
+            llm_settings=active_llm,
             context=dict(context or {}),
         )
         result = GoalObserveResult(**assessment.to_dict())

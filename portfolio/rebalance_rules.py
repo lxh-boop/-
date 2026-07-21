@@ -236,12 +236,15 @@ def _build_hierarchical_top10_plan(
     top_k: int,
     entry_top_k: int,
     hold_buffer_rank: int,
+    max_positions: int,
+    target_invested_weight: float,
     minimum_cash_ratio: float,
     min_rebalance_weight_delta: float,
     trading_cost_config: TradingCostConfig | None,
     job_id: str,
     run_id: str,
     execution_source: str,
+    strategy_metadata: dict[str, Any],
 ) -> RebalancePlan:
     allow_high_volatility = bool(constraints.get("allow_high_volatility", False))
     trading_permissions = normalize_trading_permissions(
@@ -252,8 +255,13 @@ def _build_hierarchical_top10_plan(
     cash = float(account.cash or 0.0) if account else total_assets
     entry_top_k = max(1, int(entry_top_k or 10))
     hold_buffer_rank = max(entry_top_k, int(hold_buffer_rank or 15))
+    max_positions = max(1, int(max_positions or entry_top_k))
     effective_top_k = max(int(top_k or hold_buffer_rank), hold_buffer_rank, entry_top_k)
     min_delta = max(0.0, float(min_rebalance_weight_delta or 0.0))
+    requested_target_ratio = min(
+        max(0.0, float(target_invested_weight)),
+        max(0.0, 1.0 - float(minimum_cash_ratio or 0.0)),
+    )
     ranked = _ranked_candidates_by_rank(candidates, effective_top_k)
     ranked_by_code = {item["stock_code"]: item for item in ranked if item.get("stock_code")}
     permission_blocked_candidates: list[dict[str, Any]] = []
@@ -303,7 +311,7 @@ def _build_hierarchical_top10_plan(
 
     permission_adjusted_target_ratio = max(
         0.0,
-        TOP10_TARGET_RATIO
+        requested_target_ratio
         - permission_frozen_weight,
     )
     allocation_candidates = [
@@ -313,7 +321,7 @@ def _build_hierarchical_top10_plan(
         and not _hard_block(item, allow_high_volatility)
         and bool(item.get("_permission_allowed", True))
         and _price(item) > 0
-    ]
+    ][:max_positions]
     allocations, allocation_diagnostics = allocate_hierarchical_top10(
         allocation_candidates,
         total_assets=total_assets,
@@ -330,7 +338,8 @@ def _build_hierarchical_top10_plan(
     retained_codes: set[str] = set()
     reason_base = (
         "Hierarchical Top10 paper strategy: Top1-5 use allocation score 12, "
-        "Top6-10 use allocation score 5, normalized to an 80% Top10 target."
+        "Top6-10 use allocation score 5, normalized to the resolved account "
+        f"target {requested_target_ratio:.2%}."
     )
 
     for candidate in ranked:
@@ -434,7 +443,7 @@ def _build_hierarchical_top10_plan(
                 delta = target_weight - current_weight
                 if current and delta < -min_delta:
                     action = "sell"
-                elif current and abs(delta) <= min_delta:
+                elif abs(delta) <= min_delta:
                     action = "hold"
                 elif executable_quantity > 0:
                     action = "buy"
@@ -575,11 +584,15 @@ def _build_hierarchical_top10_plan(
             "strategy_mode": "hierarchical_top10",
             "entry_top_k": entry_top_k,
             "hold_buffer_rank": hold_buffer_rank,
+            "max_positions": max_positions,
+            "target_invested_weight": requested_target_ratio,
+            "minimum_cash_ratio": minimum_cash_ratio,
+            "min_rebalance_weight_delta": min_delta,
             "valid_price_count": sum(1 for item in entry_ranked if _price(item) > 0),
             "positive_target_weight_count": sum(1 for item in decisions if float(item.target_weight or 0.0) > 0),
             "executable_order_count": sum(1 for item in decisions if float(item.executable_quantity or 0.0) > 0),
             "reasons": sorted(set((diagnostics.get("reasons") or []) + missing_price_reasons)),
-            "top10_target_ratio": TOP10_TARGET_RATIO,
+            "top10_target_ratio": requested_target_ratio,
             "top10_target_weight_sum": diagnostics.get("normalized_target_weight_sum", 0.0),
             "top11_15_single_cap": BUFFER_SINGLE_CAP,
             "top11_15_bucket_cap": BUFFER_BUCKET_CAP,
@@ -622,6 +635,15 @@ def _build_hierarchical_top10_plan(
         job_id=job_id,
         run_id=run_id,
         execution_source=execution_source,
+        strategy_id=str(strategy_metadata.get("strategy_id") or ""),
+        strategy_version=str(
+            strategy_metadata.get("strategy_version") or ""
+        ),
+        binding_id=str(strategy_metadata.get("binding_id") or ""),
+        config_hash=str(strategy_metadata.get("config_hash") or ""),
+        resolved_config=dict(
+            strategy_metadata.get("resolved_config") or {}
+        ),
         is_paper_trading=True,
     )
 
@@ -645,6 +667,11 @@ def build_rebalance_plan(
     job_id: str = "",
     run_id: str = "",
     execution_source: str = "",
+    strategy_id: str = "",
+    strategy_version: str = "",
+    binding_id: str = "",
+    config_hash: str = "",
+    resolved_config: dict[str, Any] | None = None,
 ) -> RebalancePlan:
     """Build a Top10 paper-trading plan with a Top15 holding buffer."""
 
@@ -669,6 +696,13 @@ def build_rebalance_plan(
     effective_top_k = max(entry_top_k, hold_buffer_rank, int(top_k or entry_top_k))
     min_delta = max(0.0, float(min_rebalance_weight_delta or 0.0))
     investable_weight = min(float(target_invested_weight), max(0.0, 1.0 - float(minimum_cash_ratio or 0.0)))
+    strategy_metadata = {
+        "strategy_id": strategy_id,
+        "strategy_version": strategy_version,
+        "binding_id": binding_id,
+        "config_hash": config_hash,
+        "resolved_config": dict(resolved_config or {}),
+    }
 
     if str(strategy_mode or "").lower() in {"hierarchical_top10", "fixed_original_top10_ai_weight"}:
         return _build_hierarchical_top10_plan(
@@ -681,12 +715,15 @@ def build_rebalance_plan(
             top_k=top_k,
             entry_top_k=entry_top_k,
             hold_buffer_rank=hold_buffer_rank,
+            max_positions=max_positions,
+            target_invested_weight=target_invested_weight,
             minimum_cash_ratio=minimum_cash_ratio,
             min_rebalance_weight_delta=min_rebalance_weight_delta,
             trading_cost_config=trading_cost_config,
             job_id=job_id,
             run_id=run_id,
             execution_source=execution_source,
+            strategy_metadata=strategy_metadata,
         )
 
     position_map = _current_position_map(current_positions, account)
@@ -1015,5 +1052,10 @@ def build_rebalance_plan(
         job_id=job_id,
         run_id=run_id,
         execution_source=execution_source,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        binding_id=binding_id,
+        config_hash=config_hash,
+        resolved_config=dict(resolved_config or {}),
         is_paper_trading=True,
     )

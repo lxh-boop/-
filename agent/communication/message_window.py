@@ -11,6 +11,7 @@ from agent.communication.message_types import AgentMessage, MessageSummary, Mess
 REQUIRED_MESSAGE_TYPES = {
     MessageType.USER_REQUEST,
     MessageType.FINAL_REPORT,
+    MessageType.FINAL_RESPONSE,
 }
 
 
@@ -123,4 +124,3 @@ class MessageWindow:
             refs={key: value for key, value in refs.items() if value},
             original_size=self.estimate_message_size(message),
         )
-

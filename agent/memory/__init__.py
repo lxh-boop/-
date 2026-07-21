@@ -1,21 +1,5 @@
 from __future__ import annotations
 
-from .legacy import (
-    AGENT_MEMORY_TYPE_VIEWS,
-    LONG_TERM_USER_MEMORY_TYPES,
-    MEMORY_TYPE_ALIASES,
-    ONE_TIME_MARKERS,
-    PROTOCOL_MEMORY_TYPES,
-    SEMANTIC_MEMORY_TYPES,
-    SEMANTIC_SOURCE_TYPES,
-    LayeredMemoryService,
-    MemoryProtocolItem,
-    MemoryWeights,
-    ScoredMemory,
-    memory_protocol_from_record,
-    response_to_dict,
-    score_memory,
-)
 from .memory_candidate_extractor import MemoryCandidateExtractor
 from .memory_consolidator import MemoryConsolidator
 from .memory_context_bridge import (
@@ -28,10 +12,21 @@ from .memory_context_bridge import (
     list_memory_records_safe_page,
     memory_store_path,
 )
+from .memory_context_selector import MemoryContextSelector
 from .memory_importance import MemoryImportanceScorer
 from .memory_manager import MemoryManager
-from .memory_policy import MemoryPolicy
+from .memory_policy import (
+    DEFAULT_MEMORY_CANDIDATE_TOP_N,
+    DEFAULT_MEMORY_CONTEXT_TOKEN_BUDGET,
+    DEFAULT_MEMORY_RELEVANCE_THRESHOLD,
+    MemoryPolicy,
+)
 from .memory_pruner import MemoryPruner
+from .memory_retrieval_types import (
+    MemoryRetrievalDiagnostics,
+    MemoryRetrievalRequest,
+    MemorySelectionResult,
+)
 from .memory_retriever import MemoryRetriever, MemorySearchResult, score_record
 from .memory_sanitizer import MemorySanitizer
 from .memory_store import (
@@ -51,34 +46,30 @@ from .memory_types import (
 from .working_memory import WorkingMemory, WorkingMemoryEntry, is_record_expired
 
 __all__ = [
-    "AGENT_MEMORY_TYPE_VIEWS",
+    "DEFAULT_MEMORY_CANDIDATE_TOP_N",
+    "DEFAULT_MEMORY_CONTEXT_TOKEN_BUDGET",
+    "DEFAULT_MEMORY_RELEVANCE_THRESHOLD",
     "DEFAULT_MEMORY_STORE_PATH",
     "GraphMemoryStore",
-    "LONG_TERM_USER_MEMORY_TYPES",
-    "MEMORY_TYPE_ALIASES",
-    "MemoryRetriever",
-    "ONE_TIME_MARKERS",
-    "PROTOCOL_MEMORY_TYPES",
-    "SEMANTIC_MEMORY_TYPES",
-    "SEMANTIC_SOURCE_TYPES",
-    "LayeredMemoryService",
     "MemoryCandidateExtractor",
     "MemoryConsolidator",
+    "MemoryContextSelector",
     "MemoryImportanceScorer",
     "MemoryManager",
     "MemoryPolicy",
     "MemoryPruner",
-    "MemoryProtocolItem",
     "MemoryRecord",
-    "MemorySearchResult",
+    "MemoryRetrievalDiagnostics",
+    "MemoryRetrievalRequest",
+    "MemoryRetriever",
     "MemoryScope",
+    "MemorySearchResult",
+    "MemorySelectionResult",
     "MemoryStatus",
     "MemoryType",
     "MemoryVisibility",
     "MemorySanitizer",
     "SQLiteMemoryStore",
-    "MemoryWeights",
-    "ScoredMemory",
     "VectorMemoryStore",
     "WorkingMemory",
     "WorkingMemoryEntry",
@@ -91,10 +82,7 @@ __all__ = [
     "is_record_expired",
     "list_memory_records_safe_page",
     "memory_get_summary_adapter",
-    "memory_protocol_from_record",
     "memory_search_adapter",
     "memory_store_path",
-    "response_to_dict",
-    "score_memory",
     "score_record",
 ]

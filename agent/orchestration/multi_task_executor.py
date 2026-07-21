@@ -35,6 +35,7 @@ from agent.runtime_reliability import (
     classify_runtime_error,
     execute_with_policy,
 )
+from agent.replan_execution import ensure_replan_state
 
 
 READ_ONLY_MULTI_INTENTS = {
@@ -1874,9 +1875,15 @@ async def execute_multi_intent_plan_async(
     global_warnings: list[str] = []
     execution_batches: list[list[str]] = []
     observations: list[dict[str, Any]] = []
-    replan_audit: list[dict[str, Any]] = []
+    replan_state = ensure_replan_state(
+        execution_context.get("replan_state") if isinstance(execution_context.get("replan_state"), dict) else None,
+        replan_limit=MAX_REPLAN_ROUNDS,
+        replan_audit=execution_context.get("replan_audit") if isinstance(execution_context.get("replan_audit"), list) else None,
+    )
+    execution_context["replan_state"] = replan_state
+    replan_audit = replan_state["replan_audit"]
     invalid_replan_block_count = 0
-    replan_count = 0
+    replan_count = replan_state["replan_count"]
     replan_new_steps = 0
 
     while pending:
@@ -1991,6 +1998,9 @@ async def execute_multi_intent_plan_async(
         source_task_id, failed_task_id, failed_result, fingerprint = selected
         attempted_replans.add(fingerprint)
         replan_count += 1
+        replan_state["replan_count"] = replan_count
+        replan_state["executed_rounds"] = replan_count
+        replan_state["attempted_rounds"] += 1
         affected = _task_descendants(source_task_id, by_id)
         before_dag = _dag_snapshot(by_id)
         by_id[source_task_id] = _retry_task_with_feedback(
@@ -2132,12 +2142,12 @@ async def execute_multi_intent_plan_async(
     terminal_before_dag = _dag_snapshot(by_id)
     changed, terminal_warnings = _apply_terminal_replan_for_empty_dependencies(task_results, by_id)
     if changed:
-        replan_count += 1
         global_warnings.extend(terminal_warnings)
         replan_audit.append(
             {
-                "source": "deterministic_observe",
+                "source": "deterministic_observe_terminal_skip",
                 "trigger_reason": "empty_dependency_terminal_skip",
+                "status": "skipped_no_replan_execution",
                 "before_dag": terminal_before_dag,
                 "after_dag": _dag_snapshot(by_id),
                 "added_tasks": [],
@@ -2240,6 +2250,9 @@ async def execute_multi_intent_plan_async(
 
     if replan_candidates:
         replan_count += 1
+        replan_state["replan_count"] = replan_count
+        replan_state["executed_rounds"] = replan_count
+        replan_state["attempted_rounds"] += 1
         observations.append(
             {
                 **_observe_task_results(
@@ -2349,6 +2362,7 @@ async def execute_multi_intent_plan_async(
         "observations": observations,
         "replan_count": replan_count,
         "replan_audit": replan_audit,
+        "replan_state": replan_state,
         "invalid_replan_block_count": invalid_replan_block_count,
         "replan_limits": {
             "max_rounds": MAX_REPLAN_ROUNDS,

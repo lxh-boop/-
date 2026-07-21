@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.services.portfolio_proposal_service import portfolio_proposal_service
+from agent.top_k import DEFAULT_TOOL_TOP_K
 
 
 def _context_value(args: dict[str, Any], context: dict[str, Any], key: str, default: Any = None) -> Any:
@@ -49,7 +50,7 @@ def portfolio_recommend_position_adapter(args: dict[str, Any], context: dict[str
         requested_weight=_float_or_none(args.get("requested_weight")),
         output_dir=_output_dir(context),
         db_path=_db_path(context),
-        top_k=_int_value(args.get("top_k") or context.get("default_top_k"), 50),
+        top_k=_int_value(args.get("top_k") or context.get("default_top_k"), DEFAULT_TOOL_TOP_K),
     )
 
 
@@ -76,7 +77,7 @@ def portfolio_preview_manual_change_adapter(args: dict[str, Any], context: dict[
         query=str(args.get("query") or context.get("query") or ""),
         output_dir=_output_dir(context),
         db_path=_db_path(context),
-        top_k=_int_value(args.get("top_k") or context.get("default_top_k"), 50),
+        top_k=_int_value(args.get("top_k") or context.get("default_top_k"), DEFAULT_TOOL_TOP_K),
         session_id=_session_id(context),
     )
 
@@ -88,7 +89,7 @@ def portfolio_preview_rebalance_adapter(args: dict[str, Any], context: dict[str,
         requested_weight=_float_or_none(args.get("requested_weight")),
         output_dir=_output_dir(context),
         db_path=_db_path(context),
-        top_k=_int_value(args.get("top_k") or context.get("default_top_k"), 50),
+        top_k=_int_value(args.get("top_k") or context.get("default_top_k"), DEFAULT_TOOL_TOP_K),
         session_id=_session_id(context),
     )
 
@@ -102,7 +103,7 @@ def portfolio_preview_adjust_position_adapter(args: dict[str, Any], context: dic
         requested_quantity=_float_or_none(args.get("requested_quantity")),
         output_dir=_output_dir(context),
         db_path=_db_path(context),
-        top_k=_int_value(args.get("top_k") or context.get("default_top_k"), 50),
+        top_k=_int_value(args.get("top_k") or context.get("default_top_k"), DEFAULT_TOOL_TOP_K),
         session_id=_session_id(context),
     )
 
@@ -114,7 +115,7 @@ def portfolio_preview_paper_trade_adapter(args: dict[str, Any], context: dict[st
         requested_weight=_float_or_none(args.get("requested_weight")),
         output_dir=_output_dir(context),
         db_path=_db_path(context),
-        top_k=_int_value(args.get("top_k") or context.get("default_top_k"), 50),
+        top_k=_int_value(args.get("top_k") or context.get("default_top_k"), DEFAULT_TOOL_TOP_K),
         session_id=_session_id(context),
     )
 

@@ -577,6 +577,52 @@ def _overlap(left: str, right: str) -> float:
     return len(a & b) / max(1, len(a | b)) if a and b else 0.0
 
 
+def _select_relevant_history(
+    history: list[ConversationMessage],
+    raw: str,
+    *,
+    relation: str,
+    candidate_top_n: int = 12,
+    relevance_threshold: float = 0.12,
+    token_budget_chars: int = 3200,
+) -> list[dict[str, Any]]:
+    """Select conversational history by relevance, not a fixed recent TopK.
+
+    The last ``candidate_top_n`` messages form a broad candidate pool.  New
+    goals receive no inherited history.  Follow-ups are filtered by text
+    overlap, reference markers and recency, then packed into a small character
+    budget before entering planner context.
+    """
+
+    if relation in {RELATION_NEW_GOAL, RELATION_TOPIC_SWITCH, RELATION_RETRY_GOAL}:
+        return []
+    candidates = [item for item in history[-max(1, candidate_top_n):] if item.content]
+    scored: list[tuple[float, int, ConversationMessage]] = []
+    has_reference = _contains(raw, _REFERENCE)
+    total = max(1, len(candidates))
+    for index, item in enumerate(candidates):
+        overlap = _overlap(raw, item.content)
+        recency = (index + 1) / total
+        role_bonus = 0.08 if item.role == "assistant" else 0.04
+        reference_bonus = 0.18 if has_reference else 0.0
+        score = 0.62 * overlap + 0.20 * recency + role_bonus + reference_bonus
+        if score >= relevance_threshold:
+            scored.append((score, index, item))
+    scored.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    selected: list[ConversationMessage] = []
+    used_chars = 0
+    for _score, _index, item in scored:
+        size = len(item.content)
+        if used_chars + size > token_budget_chars and selected:
+            continue
+        selected.append(item)
+        used_chars += min(size, token_budget_chars)
+        if used_chars >= token_budget_chars:
+            break
+    selected.sort(key=lambda item: history.index(item))
+    return [item.safe_dict() for item in selected]
+
+
 def _looks_follow_up(raw: str, goal: dict[str, Any], summary: str, active: dict[str, Any], explicit: dict[str, Any]) -> tuple[bool, float]:
     if not raw or not goal:
         return False, 0.0
@@ -696,6 +742,16 @@ def resolve_turn_from_messages(raw_message: str, *, conversation_id: str, messag
         relation = RELATION_FOLLOW_UP if follows else RELATION_NEW_GOAL
         confidence = score if follows else max(0.72, 1.0 - score)
 
+    if relation in {RELATION_NEW_GOAL, RELATION_TOPIC_SWITCH}:
+        # A new goal must not inherit stale objectives, results, entities or
+        # references.  Relevant long-term memory is retrieved separately by
+        # MemoryManager using the new query.
+        goal = {}
+        summary = ""
+        active = {}
+        refs = []
+        pending = {}
+
     inherited: dict[str, Any] = {}
     if relation in {RELATION_FOLLOW_UP, RELATION_CLARIFICATION_ANSWER, RELATION_CORRECTION, RELATION_CONTINUATION}:
         inherited.update(active)
@@ -720,7 +776,14 @@ def resolve_turn_from_messages(raw_message: str, *, conversation_id: str, messag
         inherited_parameters=inherited,
         active_entities=active,
         reference_turn_ids=refs[:20],
-        recent_messages=[item.safe_dict() for item in history[-12:] if item.content],
+        recent_messages=_select_relevant_history(
+            history,
+            raw,
+            relation=relation,
+            candidate_top_n=12,
+            relevance_threshold=0.12,
+            token_budget_chars=3200,
+        ),
         confidence=round(float(confidence), 4),
         warnings=list(warnings or []),
     )

@@ -210,6 +210,16 @@ def cached_retrieve_stock_context(
 from datetime import datetime, time as datetime_time
 
 from local_config import load_local_config, save_local_config
+from core.llm.ollama_manager import (
+    PROJECT_MODEL as OLLAMA_PROJECT_MODEL,
+    RECOMMENDED_BASE_MODEL,
+    create_project_model,
+    get_ollama_version,
+    list_local_models,
+    pull_model,
+    validate_local_model,
+)
+from core.llm.runtime_settings import resolve_active_llm_settings
 from agent.mcp.config import build_mcp_context_from_local_config, mcp_sdk_version
 from agent.mcp.discovery import discover_mcp_tools, reset_discovery_cache
 from scheduler_manager import (
@@ -1293,69 +1303,118 @@ if st.session_state["token_message"]:
 # ============================================================
 
 st.sidebar.header("AI 接口设置")
-
-default_llm_api_key = (
-    local_cfg.get("llm_api_key")
-    or os.environ.get(LLM_API_KEY_ENV, "")
-    or os.environ.get("OPENAI_API_KEY", "")
+active_llm_settings = resolve_active_llm_settings(local_config=local_cfg)
+mode_options = {"远程 API": "api", "本地模型": "local"}
+selected_mode_label = st.sidebar.radio(
+    "当前模型来源（仅手动切换）",
+    options=list(mode_options),
+    index=0 if active_llm_settings.mode == "api" else 1,
+    horizontal=True,
+    key="llm_mode_selector",
 )
-default_llm_base_url = (
-    local_cfg.get("llm_base_url")
-    or os.environ.get(LLM_BASE_URL_ENV, DEFAULT_LLM_BASE_URL)
-    or DEFAULT_LLM_BASE_URL
+selected_llm_mode = mode_options[selected_mode_label]
+st.sidebar.info(
+    f"当前已应用：{'远程 API' if active_llm_settings.mode == 'api' else '本地模型'} / {active_llm_settings.model}"
 )
-default_llm_model = (
-    local_cfg.get("llm_model")
-    or os.environ.get(LLM_MODEL_ENV, DEFAULT_LLM_MODEL)
-    or DEFAULT_LLM_MODEL
-)
+st.sidebar.caption("切换只会在“保存并应用”且验证成功后影响下一次 Agent 运行；不会自动回退到另一种模型。")
 
-llm_api_key_input = st.sidebar.text_input(
-    "AI API Key",
-    value="",
-    type="password",
-    placeholder="已配置时可留空；输入新 Key 才会覆盖",
-    help="支持 OpenAI-compatible API。Key 只来自输入、本地配置或环境变量。",
-)
-llm_api_key = llm_api_key_input.strip() or default_llm_api_key
-st.sidebar.caption("AI Key 状态：已配置" if default_llm_api_key else "AI Key 状态：未配置")
-llm_base_url = st.sidebar.text_input(
-    "Base URL",
-    value=default_llm_base_url,
-    help="OpenAI 官方接口可留空；DeepSeek/通义等兼容服务填写对应 base_url。",
-)
-llm_model = st.sidebar.text_input(
-    "Model",
-    value=default_llm_model,
-)
+candidate_llm_settings = active_llm_settings
+if selected_llm_mode == "api":
+    default_llm_api_key = local_cfg.get("llm_api_key") or os.environ.get(LLM_API_KEY_ENV, "") or os.environ.get("OPENAI_API_KEY", "")
+    api_key_input = st.sidebar.text_input(
+        "AI API Key",
+        value="",
+        type="password",
+        placeholder="已配置时可留空；输入新 Key 才会覆盖",
+        help="仅用于远程 OpenAI-compatible API；不会写入本地 Ollama 配置。",
+    )
+    st.sidebar.caption("AI Key 状态：已配置" if default_llm_api_key else "AI Key 状态：未配置")
+    api_base_url = st.sidebar.text_input("Base URL", value=str(local_cfg.get("llm_api_base_url") or local_cfg.get("llm_base_url") or DEFAULT_LLM_BASE_URL))
+    api_model = st.sidebar.text_input("Model", value=str(local_cfg.get("llm_api_model") or local_cfg.get("llm_model") or DEFAULT_LLM_MODEL))
+    candidate_llm_settings = resolve_active_llm_settings(
+        local_config={**local_cfg, "llm_mode": "api", "llm_api_base_url": api_base_url, "llm_api_model": api_model},
+        mode="api",
+        api_key=api_key_input.strip() or None,
+        base_url=api_base_url,
+        model=api_model,
+    )
+    verify_button, save_button = st.sidebar.columns(2)
+    validate_ai_button = verify_button.button("验证 AI", key="validate_remote_ai")
+    save_ai_button = save_button.button("保存并应用", key="save_remote_ai")
+    if validate_ai_button:
+        ok, message = LLMClient(settings=candidate_llm_settings).validate_connection()
+        (st.sidebar.success if ok else st.sidebar.error)(message)
+    if save_ai_button:
+        ok, message = LLMClient(settings=candidate_llm_settings).validate_connection()
+        if not ok:
+            st.sidebar.error(f"保存失败，仍使用原来的模型配置：{message}")
+        else:
+            if api_key_input.strip():
+                local_cfg["llm_api_key"] = api_key_input.strip()
+            local_cfg.update({
+                "llm_mode": "api",
+                "llm_api_base_url": api_base_url.strip(),
+                "llm_api_model": api_model.strip(),
+                "llm_base_url": api_base_url.strip(),
+                "llm_model": api_model.strip(),
+            })
+            save_local_config(local_cfg)
+            st.sidebar.success("远程 API 配置已验证并应用；本地配置已保留。")
+            st.rerun()
+else:
+    local_base_url = st.sidebar.text_input(
+        "本地 Base URL",
+        value="http://127.0.0.1:11434/v1",
+        disabled=True,
+        help="本地模式固定为本机 Ollama 回环地址，不会改为远程 API。",
+    )
+    status_col, refresh_col = st.sidebar.columns(2)
+    if status_col.button("检查 Ollama", key="check_ollama"):
+        version = get_ollama_version()
+        (st.sidebar.success if version.success else st.sidebar.error)(version.message)
+    models_result = list_local_models()
+    if refresh_col.button("刷新模型列表", key="refresh_ollama_models"):
+        models_result = list_local_models()
+    models = list(models_result.data.get("models") or []) if models_result.success else []
+    st.sidebar.caption("Ollama 状态：连接正常" if models_result.success else models_result.message)
+    local_model = st.sidebar.selectbox(
+        "已安装本地模型",
+        options=models or [str(local_cfg.get("llm_local_model") or OLLAMA_PROJECT_MODEL)],
+        index=0 if not models else (models.index(str(local_cfg.get("llm_local_model") or OLLAMA_PROJECT_MODEL)) if str(local_cfg.get("llm_local_model") or OLLAMA_PROJECT_MODEL) in models else 0),
+    )
+    st.sidebar.caption(f"推荐模型：{OLLAMA_PROJECT_MODEL}（基础模型：{RECOMMENDED_BASE_MODEL}）")
+    install_col, validate_col, apply_col = st.sidebar.columns(3)
+    if install_col.button("下载推荐模型", key="install_ollama_model"):
+        with st.sidebar.spinner("正在下载并创建本地模型，请勿关闭页面…"):
+            pulled = pull_model()
+            created = create_project_model(Path("models") / "ollama" / "Modelfile.stock-agent-qwen3-4b") if pulled.success else pulled
+        (st.sidebar.success if created.success else st.sidebar.error)(created.message)
+    candidate_llm_settings = resolve_active_llm_settings(
+        local_config={**local_cfg, "llm_mode": "local", "llm_local_base_url": local_base_url, "llm_local_model": local_model},
+        mode="local",
+    )
+    if validate_col.button("验证本地模型", key="validate_local_ai"):
+        ok, message = LLMClient(settings=candidate_llm_settings).validate_connection()
+        (st.sidebar.success if ok else st.sidebar.error)(message)
+    if apply_col.button("保存并应用", key="save_local_ai"):
+        ok, message = LLMClient(settings=candidate_llm_settings).validate_connection()
+        if not ok:
+            st.sidebar.error(f"保存失败，仍使用原来的模型配置：{message}")
+        else:
+            local_cfg.update({
+                "llm_mode": "local",
+                "llm_local_base_url": local_base_url.strip(),
+                "llm_local_model": local_model.strip(),
+                "llm_local_disable_thinking": True,
+            })
+            save_local_config(local_cfg)
+            st.sidebar.success("本地模型配置已验证并应用；远程 API 配置已保留。")
+            st.rerun()
 
-ai_col_1, ai_col_2 = st.sidebar.columns(2)
-
-with ai_col_1:
-    validate_ai_button = st.button("验证 AI")
-
-with ai_col_2:
-    save_ai_button = st.button("保存 AI")
-
-if validate_ai_button:
-    ok, msg = LLMClient(
-        api_key=llm_api_key,
-        base_url=llm_base_url,
-        model=llm_model,
-    ).validate_connection()
-
-    if ok:
-        st.sidebar.success(msg)
-    else:
-        st.sidebar.error(msg)
-
-if save_ai_button:
-    if llm_api_key_input.strip():
-        local_cfg["llm_api_key"] = llm_api_key_input.strip()
-    local_cfg["llm_base_url"] = llm_base_url
-    local_cfg["llm_model"] = llm_model
-    save_local_config(local_cfg)
-    st.sidebar.success("AI 接口设置已保存到本地配置。")
+active_llm_settings = resolve_active_llm_settings(local_config=local_cfg)
+llm_api_key = active_llm_settings.api_key
+llm_base_url = active_llm_settings.base_url
+llm_model = active_llm_settings.model
 
 
 # ============================================================
@@ -1670,7 +1729,7 @@ if selected_top_level_page == "AI 模拟盘":
             user_id=current_user_id,
             output_dir=OUTPUT_DIR,
             db_path=AGENT_QUANT_DB_PATH,
-            top_k=50,
+            top_k=10,
         )
         st.stop()
     except (ImportError, Exception) as _page_err:
@@ -1681,8 +1740,9 @@ if selected_top_level_page == "AI Agent":
         user_id=current_user_id,
         output_dir=OUTPUT_DIR,
         db_path=AGENT_QUANT_DB_PATH,
-        default_topk=50,
+        default_topk=10,
         ranking=None,
+        llm_settings=active_llm_settings,
     )
     st.stop()
 if selected_top_level_page == "系统监控":

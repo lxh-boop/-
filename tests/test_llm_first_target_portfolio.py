@@ -68,9 +68,9 @@ def test_construct_requires_llm_design_instead_of_asking_user_to_design(tmp_path
     )
     assert result["success"] is False
     assert result["data"]["replan_required"] is True
-    assert result["data"]["next_action"] == "replan_readonly"
+    assert result["data"]["next_action"] == "replan_target_design"
     assert "target_design" in result["data"]["missing_sources"]
-    assert "不会要求用户代替 Agent 设计参数" in result["message"]
+    assert result["data"].get("need_clarification") is not True
 
 
 
@@ -87,6 +87,12 @@ def test_llm_design_uses_real_sources_and_does_not_ask_for_user_parameters(monke
               "target_design": {
                 "target_position_count": 4,
                 "target_cash_weight": 0.20,
+                "selected_candidates": [
+                  {"stock_code": "000003", "target_weight": 0.20, "selection_reason": "diversification"},
+                  {"stock_code": "000004", "target_weight": 0.20, "selection_reason": "diversification"},
+                  {"stock_code": "000005", "target_weight": 0.20, "selection_reason": "diversification"},
+                  {"stock_code": "000006", "target_weight": 0.20, "selection_reason": "diversification"}
+                ],
                 "candidate_policy": "ranking_only",
                 "allocation_method": "equal_weight_with_caps",
                 "max_single_weight": 0.30,
@@ -153,6 +159,16 @@ def test_construct_save_load_and_compare_are_read_only(tmp_path: Path):
             },
             "target_position_count": 4,
             "target_cash_weight": 0.20,
+            "target_design": {
+                "target_position_count": 4,
+                "target_cash_weight": 0.20,
+                "selected_candidates": [
+                    {"stock_code": "000003", "target_weight": 0.20},
+                    {"stock_code": "000004", "target_weight": 0.20},
+                    {"stock_code": "000005", "target_weight": 0.20},
+                    {"stock_code": "000006", "target_weight": 0.20},
+                ],
+            },
             "candidate_policy": "ranking_only",
             "allocation_method": "equal_weight_with_caps",
         },
@@ -245,10 +261,10 @@ def test_failed_llm_design_returns_replan_instead_of_asking_user_to_design(tmp_p
     assert result["data"]["replan_required"] is True
     assert result["data"]["next_action"] == "replan_target_design"
     assert result["data"].get("need_clarification") is not True
-    assert "由 LLM 重新设计" in result["message"]
+    assert result["data"]["validation_stage"] == "construction_precondition_validation"
 
 
-def test_construct_automatically_asks_llm_to_redesign_after_deterministic_failure(monkeypatch, tmp_path: Path):
+def test_construct_returns_auditable_replan_request_after_deterministic_failure(monkeypatch, tmp_path: Path):
     class FakeRedesignClient:
         def __init__(self, api_key=None, base_url=None, model=None):
             self.api_key = api_key
@@ -305,8 +321,7 @@ def test_construct_automatically_asks_llm_to_redesign_after_deterministic_failur
             "llm_api_key": "test-key",
         },
     )
-    assert result["success"] is True
-    assert result["data"]["automatic_llm_replan_attempted"] is True
-    assert result["data"]["replanned_target_design"]["target_position_count"] == 4
-    assert result["data"]["target_position_count"] == 4
-    assert "automatic_llm_target_redesign_attempted" in result["warnings"]
+    assert result["success"] is False
+    assert result["data"]["replan_required"] is True
+    assert result["data"]["next_action"] == "replan_target_design"
+    assert result["data"]["repairable"] is True

@@ -35,6 +35,21 @@ def preview_add_stock_to_paper(
     recommendation = dict(recommendation_result.data)
     analysis = dict(recommendation.get("analysis") or {})
     state = query_portfolio_state(user_id, output_dir=output_dir, db_path=db_path)
+    if not bool(state.get("safe_to_continue", state.get("consistency_status") != "rejected")):
+        return ToolResult(
+            success=False,
+            message="Portfolio data is inconsistent, so no recommendation or paper-trade preview was created.",
+            data={
+                "status": "logic_error",
+                "error_code": str(state.get("error_code") or "portfolio_snapshot_inconsistent"),
+                "snapshot_id": str(state.get("snapshot_id") or ""),
+                "safe_to_continue": False,
+                "safe_to_write": False,
+            },
+            errors=list(state.get("consistency_errors") or ["portfolio_snapshot_inconsistent"]),
+            permission=ToolPermission.PREVIEW,
+            tool_name="rebalance_plan_preview",
+        )
     account = dict(state.get("account") or {})
     if recommendation.get("hard_rejection"):
         return ToolResult(
@@ -238,6 +253,21 @@ def preview_adjust_position_to_weight(
     _ = top_k
     code = _stock_code(stock_code)
     state = query_portfolio_state(user_id, output_dir=output_dir, db_path=db_path)
+    if not bool(state.get("safe_to_continue", state.get("consistency_status") != "rejected")):
+        return ToolResult(
+            success=False,
+            message="Portfolio data is inconsistent, so no adjustment preview was created.",
+            data={
+                "status": "logic_error",
+                "error_code": str(state.get("error_code") or "portfolio_snapshot_inconsistent"),
+                "snapshot_id": str(state.get("snapshot_id") or ""),
+                "safe_to_continue": False,
+                "safe_to_write": False,
+            },
+            errors=list(state.get("consistency_errors") or ["portfolio_snapshot_inconsistent"]),
+            permission=ToolPermission.PREVIEW,
+            tool_name="adjust_position_preview",
+        )
     account = dict(state.get("account") or {})
     positions = [dict(item or {}) for item in state.get("positions") or []]
     current = next(

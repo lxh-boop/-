@@ -8,7 +8,7 @@ from typing import Any
 
 from agent.context.context_sanitizer import ContextSanitizer
 from agent.context.context_types import ContextBundle
-from agent.context.schemas import estimate_tokens
+from agent.context.token_budget import estimate_tokens
 
 
 def _plain(value: Any) -> Any:
@@ -30,35 +30,55 @@ def _plain(value: Any) -> Any:
 
 
 class ContextWindow:
-    def __init__(self, sanitizer: ContextSanitizer | None = None, *, default_budget: int = 1800) -> None:
+    def __init__(
+        self,
+        sanitizer: ContextSanitizer | None = None,
+        *,
+        default_budget: int = 1800,
+    ) -> None:
         self.sanitizer = sanitizer or ContextSanitizer()
         self.default_budget = int(default_budget or 1800)
 
     def estimate_context_size(self, value: Any) -> int:
-        return estimate_tokens(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
+        return estimate_tokens(
+            json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        )
 
     def keep_required_refs(self, value: dict[str, Any]) -> dict[str, Any]:
         data = deepcopy(value)
         task = data.setdefault("task_context", {})
         artifact = data.setdefault("artifact_context", {})
         approval = data.setdefault("approval_context", {})
+        memory = data.setdefault("memory_context", {})
         kept_refs: list[str] = []
 
         for ref in task.get("required_refs") or []:
-            if ref not in kept_refs:
+            if str(ref) not in kept_refs:
                 kept_refs.append(str(ref))
         for ref in artifact.get("readable_artifact_ids") or []:
-            if ref not in kept_refs:
+            if str(ref) not in kept_refs:
                 kept_refs.append(str(ref))
         for item in artifact.get("artifact_refs") or []:
-            if isinstance(item, dict) and item.get("artifact_id") and item.get("artifact_id") not in kept_refs:
-                kept_refs.append(str(item.get("artifact_id")))
-        if approval.get("pending_plan_id") and approval.get("pending_plan_id") not in kept_refs:
-            kept_refs.append(str(approval.get("pending_plan_id")))
+            if isinstance(item, dict) and item.get("artifact_id"):
+                value = str(item.get("artifact_id"))
+                if value not in kept_refs:
+                    kept_refs.append(value)
+        for ref in memory.get("memory_refs") or []:
+            if str(ref) not in kept_refs:
+                kept_refs.append(str(ref))
+        if approval.get("pending_plan_id"):
+            value = str(approval.get("pending_plan_id"))
+            if value not in kept_refs:
+                kept_refs.append(value)
         data.setdefault("metadata", {})["required_refs_kept"] = kept_refs
         return data
 
-    def summarize_old_context(self, value: dict[str, Any], *, max_messages: int = 4) -> dict[str, Any]:
+    def summarize_old_context(
+        self,
+        value: dict[str, Any],
+        *,
+        max_messages: int = 4,
+    ) -> dict[str, Any]:
         data = deepcopy(value)
         conversation = data.get("conversation_context")
         if isinstance(conversation, dict):
@@ -67,8 +87,12 @@ class ContextWindow:
                 conversation["recent_messages"] = messages[-max_messages:]
                 conversation["dropped_message_count"] = len(messages) - max_messages
             for message in conversation.get("recent_messages") or []:
-                if isinstance(message, dict) and isinstance(message.get("content"), str) and len(message["content"]) > 600:
-                    message["content"] = message["content"][:600] + "...[truncated]"
+                if (
+                    isinstance(message, dict)
+                    and isinstance(message.get("content"), str)
+                    and len(message["content"]) > 600
+                ):
+                    message["content"] = message["content"][:600] + "…"
         return data
 
     def trim_to_budget(
@@ -90,6 +114,7 @@ class ContextWindow:
             data = self.sanitizer.sanitize_for_llm(base)
 
         data = self.summarize_old_context(data)
+        data = self._enforce_selected_memory_budget(data)
         data = self.keep_required_refs(data)
         if self.estimate_context_size(data) <= max_tokens:
             return data
@@ -99,10 +124,60 @@ class ContextWindow:
             return data
 
         data = self._shrink_evidence_and_positions(data)
-        while self.estimate_context_size(data) > max_tokens and self._drop_one_history_message(data):
+        while (
+            self.estimate_context_size(data) > max_tokens
+            and self._drop_one_history_message(data)
+        ):
             pass
-        data.setdefault("metadata", {})["window_token_estimate"] = self.estimate_context_size(data)
+        # Memory items were threshold-selected before this stage.  Under final
+        # pressure, remove the lowest-scored selected item rather than arbitrary
+        # facts or refs.
+        while (
+            self.estimate_context_size(data) > max_tokens
+            and self._drop_lowest_memory_item(data)
+        ):
+            pass
+        data.setdefault("metadata", {})["window_token_estimate"] = (
+            self.estimate_context_size(data)
+        )
         data["metadata"]["window_max_tokens"] = max_tokens
+        return data
+
+    def _enforce_selected_memory_budget(self, data: dict[str, Any]) -> dict[str, Any]:
+        data = deepcopy(data)
+        memory = data.get("memory_context")
+        if not isinstance(memory, dict):
+            return data
+        items = memory.get("items")
+        if not isinstance(items, list):
+            return data
+        budget = max(0, int(memory.get("token_budget") or 0))
+        if budget <= 0:
+            memory["items"] = []
+            memory["memory_refs"] = []
+            memory["selected_count"] = 0
+            memory["token_used"] = 0
+            return data
+        ordered = sorted(
+            [item for item in items if isinstance(item, dict)],
+            key=lambda item: float(item.get("score") or 0.0),
+            reverse=True,
+        )
+        kept: list[dict[str, Any]] = []
+        used = 0
+        for item in ordered:
+            tokens = int(item.get("token_estimate") or estimate_tokens(item))
+            if used + tokens <= budget:
+                kept.append(item)
+                used += tokens
+        memory["items"] = kept
+        memory["memory_refs"] = [
+            str((item.get("memory") or {}).get("memory_id") or "")
+            for item in kept
+            if (item.get("memory") or {}).get("memory_id")
+        ]
+        memory["selected_count"] = len(kept)
+        memory["token_used"] = used
         return data
 
     def _summarize_large_objects(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -138,10 +213,14 @@ class ContextWindow:
     def _shrink_evidence_and_positions(self, data: dict[str, Any]) -> dict[str, Any]:
         data = deepcopy(data)
         portfolio = data.get("portfolio_context")
-        if isinstance(portfolio, dict) and isinstance(portfolio.get("positions_summary"), list):
+        if isinstance(portfolio, dict) and isinstance(
+            portfolio.get("positions_summary"), list
+        ):
             portfolio["positions_summary"] = portfolio["positions_summary"][:8]
         evidence = data.get("evidence_context")
-        if isinstance(evidence, dict) and isinstance(evidence.get("evidence_summary"), list):
+        if isinstance(evidence, dict) and isinstance(
+            evidence.get("evidence_summary"), list
+        ):
             evidence["evidence_summary"] = evidence["evidence_summary"][:8]
         return data
 
@@ -154,5 +233,35 @@ class ContextWindow:
         if not isinstance(messages, list) or len(messages) <= 1:
             return False
         messages.pop(0)
-        conversation["dropped_message_count"] = int(conversation.get("dropped_message_count") or 0) + 1
+        conversation["dropped_message_count"] = int(
+            conversation.get("dropped_message_count") or 0
+        ) + 1
         return True
+
+    @staticmethod
+    def _drop_lowest_memory_item(data: dict[str, Any]) -> bool:
+        memory = data.get("memory_context")
+        if not isinstance(memory, dict):
+            return False
+        items = memory.get("items")
+        if not isinstance(items, list) or not items:
+            return False
+        lowest_index = min(
+            range(len(items)),
+            key=lambda index: float((items[index] or {}).get("score") or 0.0),
+        )
+        items.pop(lowest_index)
+        memory["memory_refs"] = [
+            str((item.get("memory") or {}).get("memory_id") or "")
+            for item in items
+            if isinstance(item, dict)
+            and (item.get("memory") or {}).get("memory_id")
+        ]
+        memory["selected_count"] = len(items)
+        memory["token_used"] = sum(
+            int((item or {}).get("token_estimate") or 0) for item in items
+        )
+        return True
+
+
+__all__ = ["ContextWindow"]

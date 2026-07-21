@@ -76,7 +76,6 @@ WRITE_INTENTS = {
     "preview_add_stock",
     "adjust_position",
     "one_time_position_operation",
-    "strategy_change",
     "confirm_execute",
     "reject_execute",
     "capital_management",

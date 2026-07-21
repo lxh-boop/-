@@ -15,6 +15,14 @@ DEFAULT_LOCAL_CONFIG = {
     "llm_api_key": "",
     "llm_base_url": "",
     "llm_model": "",
+    "llm_mode": "api",
+    "llm_api_base_url": "",
+    "llm_api_model": "",
+    "llm_local_base_url": "http://127.0.0.1:11434/v1",
+    "llm_local_model": "stock-agent-qwen3-4b",
+    "llm_local_disable_thinking": True,
+    "llm_request_timeout_seconds": 120,
+    "llm_max_retries": 0,
     "current_user_id": "default",
     "model_backend": "zoo:chronos_bolt_small",
     "dft_unet_checkpoint_path": "",
@@ -41,6 +49,14 @@ def load_local_config() -> Dict[str, Any]:
 
         cfg = DEFAULT_LOCAL_CONFIG.copy()
         cfg.update(data)
+        # Legacy fields remain present for older callers, while the API
+        # profile is migrated non-destructively on first read/save.
+        if not str(cfg.get("llm_api_base_url") or "").strip() and str(cfg.get("llm_base_url") or "").strip():
+            cfg["llm_api_base_url"] = str(cfg["llm_base_url"]).strip()
+        if not str(cfg.get("llm_api_model") or "").strip() and str(cfg.get("llm_model") or "").strip():
+            cfg["llm_api_model"] = str(cfg["llm_model"]).strip()
+        if str(cfg.get("llm_mode") or "").strip().lower() not in {"api", "local"}:
+            cfg["llm_mode"] = "api"
         return cfg
 
     except Exception:
@@ -50,6 +66,14 @@ def load_local_config() -> Dict[str, Any]:
 def save_local_config(config: Dict[str, Any]) -> None:
     cfg = DEFAULT_LOCAL_CONFIG.copy()
     cfg.update(config)
+    if not str(cfg.get("llm_api_base_url") or "").strip() and str(cfg.get("llm_base_url") or "").strip():
+        cfg["llm_api_base_url"] = str(cfg["llm_base_url"]).strip()
+    if not str(cfg.get("llm_api_model") or "").strip() and str(cfg.get("llm_model") or "").strip():
+        cfg["llm_api_model"] = str(cfg["llm_model"]).strip()
+    # Keep legacy readers working without replacing either saved profile.
+    if str(cfg.get("llm_mode") or "api").lower() == "api":
+        cfg["llm_base_url"] = str(cfg.get("llm_api_base_url") or cfg.get("llm_base_url") or "")
+        cfg["llm_model"] = str(cfg.get("llm_api_model") or cfg.get("llm_model") or "")
 
     path = Path(LOCAL_CONFIG_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -7,6 +7,7 @@ from database.repositories.portfolio_repository import PortfolioRepository
 from database.repositories.prediction_repository import PredictionRepository
 from database.repositories.stock_repository import StockRepository
 from database.repositories.system_monitor_repository import SystemMonitorRepository
+from database.repositories.strategy_workflow_repository import StrategyWorkflowRepository
 from database.repositories.user_repository import UserRepository
 
 __all__ = [
@@ -17,6 +18,7 @@ __all__ = [
     "PredictionRepository",
     "StockRepository",
     "SystemMonitorRepository",
+    "StrategyWorkflowRepository",
     "UserRepository",
     "assign_news_trade_date",
 ]

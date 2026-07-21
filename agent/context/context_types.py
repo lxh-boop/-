@@ -152,9 +152,18 @@ class RuntimeContext:
 
 @dataclass
 class MemoryContext:
+    retrieval_id: str = ""
     memory_refs: list[str] = field(default_factory=list)
+    items: list[dict[str, Any]] = field(default_factory=list)
     user_preference_refs: list[str] = field(default_factory=list)
     recent_decision_refs: list[str] = field(default_factory=list)
+    candidate_count: int = 0
+    threshold_pass_count: int = 0
+    selected_count: int = 0
+    relevance_threshold: float = 0.0
+    token_budget: int = 0
+    token_used: int = 0
+    diagnostics: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -213,6 +222,12 @@ class ContextBundle:
                 "token_present": self.approval_context.token_present,
             },
             "artifact_refs": list(self.artifact_context.artifact_refs),
+            "memory": {
+                "retrieval_id": self.memory_context.retrieval_id,
+                "memory_refs": list(self.memory_context.memory_refs),
+                "selected_count": self.memory_context.selected_count,
+                "relevance_threshold": self.memory_context.relevance_threshold,
+            },
             "observation_refs": list(self.runtime_context.observation_refs),
             "blocking_observation_ids": list(self.runtime_context.blocking_observation_ids),
             "latest_replan_decision_id": self.runtime_context.latest_replan_decision_id,

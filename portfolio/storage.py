@@ -445,11 +445,13 @@ class PortfolioStorage:
         decisions: list[dict[str, Any]] | None = None,
         trade_date: str | None = None,
         decision_time: str | None = None,
+        strategy_metadata: dict[str, Any] | None = None,
     ) -> dict[str, str]:
         self._ensure_output_dir()
         decision_time = decision_time or datetime.now().strftime("%Y%m%d_%H%M%S")
         trade_date = trade_date or datetime.now().strftime("%Y-%m-%d")
         paths: dict[str, str] = {}
+        strategy_metadata = dict(strategy_metadata or {})
         real_order_records = [
             order.to_dict()
             for order in (orders or [])
@@ -460,6 +462,28 @@ class PortfolioStorage:
         ]
         active_positions = [position for position in (positions or []) if float(position.quantity or 0.0) > 0]
         position_records = self._position_snapshot_records(active_positions, trade_date, run_id=str(decision_time or ""))
+        for record in position_records:
+            record.update(
+                {
+                    "strategy_id": str(
+                        strategy_metadata.get("strategy_id") or ""
+                    ),
+                    "strategy_version": str(
+                        strategy_metadata.get("strategy_version") or ""
+                    ),
+                    "binding_id": str(
+                        strategy_metadata.get("binding_id") or ""
+                    ),
+                    "config_hash": str(
+                        strategy_metadata.get("config_hash") or ""
+                    ),
+                    "resolved_config": json.dumps(
+                        strategy_metadata.get("resolved_config") or {},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                }
+            )
         position_market_value = sum(float(position.market_value or 0.0) for position in active_positions)
         price_missing_count = sum(
             1
@@ -490,8 +514,56 @@ class PortfolioStorage:
                     "position_snapshot_count": len(position_records),
                     "order_count": len(real_order_records),
                     "price_missing_count": price_missing_count,
+                    **strategy_metadata,
                 }
             )
+            snapshot_record = {
+                "snapshot_id": (
+                    f"paper_account_snapshot_{account.user_id}_"
+                    f"{self._latest_date_token(trade_date)}_{decision_time}"
+                ),
+                "user_id": account.user_id,
+                "account_id": account.account_id,
+                "trade_date": trade_date,
+                "cash": float(account.cash or 0.0),
+                "position_market_value": position_market_value,
+                "total_assets": recalculated_total,
+                "net_contribution": float(
+                    account.net_contribution or 0.0
+                ),
+                "daily_return": float(account.daily_return or 0.0),
+                "cumulative_return": float(
+                    account.cumulative_return or 0.0
+                ),
+                "time_weighted_return": float(
+                    account.time_weighted_return or 0.0
+                ),
+                "nav": float(account.nav or 1.0),
+                "drawdown": float(account.drawdown or 0.0),
+                "strategy_id": str(
+                    strategy_metadata.get("strategy_id") or ""
+                ),
+                "strategy_version": str(
+                    strategy_metadata.get("strategy_version") or ""
+                ),
+                "binding_id": str(
+                    strategy_metadata.get("binding_id") or ""
+                ),
+                "config_hash": str(
+                    strategy_metadata.get("config_hash") or ""
+                ),
+                "resolved_config": dict(
+                    strategy_metadata.get("resolved_config") or {}
+                ),
+            }
+            try:
+                self._try_database(
+                    lambda: self.repo.insert_account_snapshot(
+                        snapshot_record
+                    )
+                )
+            except Exception:
+                pass
             account_payload = json.dumps(account_record, ensure_ascii=False, indent=2)
             dated_account = self.output_dir / "history" / "accounts" / f"account_{self._latest_date_token(trade_date)}.json"
             account_path = self._history_path("accounts", "account", trade_date, f"{decision_time}.json")
@@ -553,6 +625,74 @@ class PortfolioStorage:
             decision_paths = self.save_ai_paper_decisions(decisions, trade_date, decision_time)
             paths.update({f"decisions_{key}": str(value) for key, value in decision_paths.items()})
         return paths
+
+    def save_strategy_execution_history(
+        self,
+        record: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = dict(record)
+        identity = "_".join(
+            [
+                str(payload.get("user_id") or ""),
+                str(payload.get("account_id") or ""),
+                self._latest_date_token(
+                    str(payload.get("trade_date") or "")
+                ),
+                str(payload.get("run_id") or ""),
+            ]
+        )
+        payload.setdefault(
+            "execution_history_id",
+            f"strategy_execution_{identity}",
+        )
+        try:
+            return self._try_database(
+                lambda: self.repo.insert_strategy_execution_history(
+                    payload
+                )
+            )
+        except Exception:
+            history_path = self._history_path(
+                "strategy",
+                "strategy_execution",
+                str(payload.get("trade_date") or ""),
+                f"{payload.get('run_id') or 'run'}.json",
+            )
+            history_path.parent.mkdir(parents=True, exist_ok=True)
+            history_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            return payload
+
+    def list_strategy_execution_history(
+        self,
+        user_id: str,
+        account_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        try:
+            return self._try_database(
+                lambda: self.repo.list_strategy_execution_history(
+                    user_id,
+                    account_id,
+                )
+            )
+        except Exception:
+            root = self.output_dir / "history" / "strategy"
+            rows: list[dict[str, Any]] = []
+            for path in sorted(root.glob("strategy_execution_*.json")):
+                try:
+                    row = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if str(row.get("user_id") or "") != str(user_id):
+                    continue
+                if account_id and str(row.get("account_id") or "") != str(
+                    account_id
+                ):
+                    continue
+                rows.append(row)
+            return rows
 
     def load_risk_report(self) -> dict[str, Any] | None:
         if not self.risk_report_path.exists():
@@ -621,6 +761,7 @@ class PortfolioStorage:
             total_assets=total_assets,
             industry=str(row.get("industry") or ""),
             position_id=str(row.get("position_id") or ""),
+            updated_at=str(row.get("updated_at") or ""),
         )
 
     def _order_from_record(self, row: dict[str, Any]) -> PaperOrder:
@@ -654,4 +795,18 @@ class PortfolioStorage:
             job_id=str(row.get("job_id") or ""),
             run_id=str(row.get("run_id") or ""),
             execution_source=str(row.get("execution_source") or ""),
+            strategy_id=str(row.get("strategy_id") or ""),
+            strategy_version=str(
+                row.get("strategy_version") or ""
+            ),
+            binding_id=str(row.get("binding_id") or ""),
+            config_hash=str(row.get("config_hash") or ""),
+            resolved_config=(
+                row.get("resolved_config")
+                if isinstance(row.get("resolved_config"), dict)
+                else json.loads(
+                    str(row.get("resolved_config") or "{}")
+                    .replace("'", '"')
+                )
+            ),
         )

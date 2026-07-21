@@ -101,6 +101,12 @@ LLM_MODEL_ENV = "LLM_MODEL"
 
 DEFAULT_LLM_MODEL = "gpt-4o-mini"
 DEFAULT_LLM_BASE_URL = ""
+DEFAULT_LLM_MODE = "api"
+DEFAULT_API_LLM_PROVIDER = "openai_compatible"
+DEFAULT_LOCAL_LLM_PROVIDER = "ollama_local"
+DEFAULT_LOCAL_LLM_BASE_URL = "http://127.0.0.1:11434/v1"
+DEFAULT_LOCAL_LLM_MODEL = "stock-agent-qwen3-4b"
+DEFAULT_LOCAL_LLM_DISABLE_THINKING = True
 
 
 # ============================================================

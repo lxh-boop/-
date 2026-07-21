@@ -6,6 +6,7 @@ import time
 import uuid
 from datetime import datetime
 from typing import Any
+from core.llm.runtime_settings import LLMRuntimeSettings
 
 import pandas as pd
 
@@ -74,6 +75,7 @@ from agent.tools.scheduler_tool import query_scheduler_status
 from agent.tools.tool_registry import list_tools
 from agent.tools.tool_schemas import PAPER_AGENT_DISCLAIMER
 from agent.write_gateway import execute_confirmed_plan_v2
+from agent.services.strategy_proposal_service import StrategyProposalService
 from app.reflection_ui import build_reflection_safe_summary, format_reflection_caption
 from app.handoff_ui import build_handoff_safe_summary, format_handoff_caption
 from database.repositories.agent_repository import AgentRepository
@@ -994,6 +996,23 @@ OPERATION_TYPE_LABELS = {
     "register_strategy": "注册策略",
     "enable_strategy": "启用策略",
     "strategy_change": "策略变更",
+    "apply_strategy_implementation": "Implementation 预览",
+    "activate_strategy_binding": "Activation 预览",
+    "rollback_strategy_binding": "Binding 回滚预览",
+    "confirmation_required_portfolio_operation": "Position 调仓预览",
+    "execute_strategy_position_change": "Position 调仓预览",
+}
+
+STRATEGY_CONFIRM_LABELS = {
+    "apply_strategy_implementation": "确认应用并注册",
+    "activate_strategy_binding": "确认启用未来策略",
+    "rollback_strategy_binding": "确认回滚未来策略",
+    "execute_strategy_position_change": "确认执行模拟盘调仓",
+    "execute_add_stock": "确认执行模拟盘加仓",
+    "execute_adjust_position": "确认执行模拟盘调仓",
+    "execute_portfolio_rebalance": "确认执行模拟盘组合调仓",
+    "capital_change": "确认资金变更",
+    "paper_backfill": "确认执行历史回放",
 }
 
 
@@ -1079,6 +1098,188 @@ def _build_plan_card(plan: dict[str, Any]) -> dict[str, Any]:
 def _technical_plan_details(plan: dict[str, Any]) -> dict[str, Any]:
     hidden = {"confirmation_token", "confirmation_token_hash", "plan_hash", "business_state_version", "snapshot_id", "state_id"}
     return {key: _redact_ui_payload(value) for key, value in plan.items() if str(key) not in hidden}
+
+
+def _strategy_plan_kind(plan: dict[str, Any]) -> str:
+    intent = str(plan.get("intent") or plan.get("operation_type") or "")
+    if intent == "apply_strategy_implementation":
+        return "implementation"
+    if intent in {
+        "activate_strategy_binding",
+        "rollback_strategy_binding",
+    }:
+        return "activation"
+    if intent == "execute_strategy_position_change":
+        return "position"
+    return "generic"
+
+
+def _strategy_plan_title(plan: dict[str, Any]) -> str:
+    return {
+        "implementation": "Implementation 预览",
+        "activation": "Activation 预览",
+        "position": "Position 调仓预览",
+    }.get(_strategy_plan_kind(plan), "待确认操作")
+
+
+def _strategy_plan_summary_rows(
+    plan: dict[str, Any],
+) -> list[dict[str, str]]:
+    kind = _strategy_plan_kind(plan)
+    if kind == "implementation":
+        validation = dict(plan.get("validation_results") or {})
+        changes = list(plan.get("proposed_changes") or [])
+        change = dict(changes[0] or {}) if changes else {}
+        rows = [
+            ("实现路径", change.get("implementation_type")),
+            ("准备写入", change.get("formal_target")),
+            ("Diff", plan.get("diff_hash")),
+            ("安全检查", validation.get("security")),
+            ("测试", validation.get("tests")),
+            ("回测", validation.get("backtest")),
+            ("回滚", "失败时回滚文件与 Registry"),
+        ]
+    elif kind == "activation":
+        before = dict(plan.get("before_state_summary") or {})
+        current = dict(before.get("current_binding") or {})
+        after = dict(plan.get("after_state_preview") or {})
+        rows = [
+            (
+                "当前策略",
+                " / ".join(
+                    filter(
+                        None,
+                        [
+                            str(current.get("strategy_id") or ""),
+                            str(current.get("strategy_version") or ""),
+                        ],
+                    )
+                )
+                or "内置默认策略",
+            ),
+            (
+                "新策略",
+                f"{plan.get('strategy_id') or '-'} / "
+                f"{plan.get('strategy_version') or '-'}",
+            ),
+            ("生效日期", plan.get("effective_from")),
+            (
+                "影响当前持仓",
+                "否"
+                if after.get("changes_current_positions") is False
+                else "需复核",
+            ),
+        ]
+    elif kind == "position":
+        after = dict(plan.get("after_state_preview") or plan.get("after") or {})
+        rows = [
+            (
+                "TargetPortfolio",
+                f"{len(plan.get('target_portfolio') or [])} 项",
+            ),
+            ("买卖清单", f"{len(plan.get('orders_preview') or [])} 笔"),
+            (
+                "金额/费用",
+                f"预计费用 {after.get('estimated_fee', 0)}",
+            ),
+            ("现金", after.get("estimated_cash")),
+            (
+                "风险变化",
+                {
+                    "before": plan.get("risk_before") or {},
+                    "after": plan.get("risk_after") or {},
+                },
+            ),
+        ]
+    else:
+        return _phase51_plan_summary_rows(plan)
+    return [
+        {
+            "label": label,
+            "value": _format_business_value(value),
+        }
+        for label, value in rows
+    ]
+
+
+def _render_strategy_proposal_card(
+    *,
+    user_id: str,
+    account_id: str,
+    conversation_id: str,
+    db_path: str | None,
+) -> None:
+    try:
+        service = StrategyProposalService(db_path)
+        proposal = service.get_active(
+            user_id=user_id,
+            account_id=account_id,
+            conversation_id=conversation_id,
+        )
+        if proposal is None:
+            return
+        versions = service.list_versions(
+            proposal.proposal_id,
+            user_id=user_id,
+        )
+    except Exception:
+        return
+    current = versions[-1] if versions else None
+    payload = dict(current.proposal_json or {}) if current else {}
+    with st.expander("Proposal 策略草稿", expanded=True):
+        st.table(
+            [
+                {
+                    "项目": "当前版本",
+                    "内容": f"v{proposal.current_version} / {proposal.status}",
+                },
+                {
+                    "项目": "相对当前策略变化",
+                    "内容": _format_business_value(
+                        payload.get("changes")
+                        or payload.get("proposed_changes")
+                        or payload.get("config")
+                        or payload.get("generated_config")
+                        or {}
+                    ),
+                },
+                {
+                    "项目": "保留规则",
+                    "内容": _format_business_value(
+                        payload.get("retained_rules")
+                        or payload.get("preserved_rules")
+                        or []
+                    ),
+                },
+                {
+                    "项目": "预期效果",
+                    "内容": _format_business_value(
+                        payload.get("expected_effects")
+                        or payload.get("expected_impact")
+                        or {}
+                    ),
+                },
+                {
+                    "项目": "代价",
+                    "内容": _format_business_value(
+                        payload.get("tradeoffs")
+                        or payload.get("costs")
+                        or []
+                    ),
+                },
+                {
+                    "项目": "修改历史摘要",
+                    "内容": " / ".join(
+                        f"v{item.version}: "
+                        f"{item.change_summary or item.user_feedback or '已保存'}"
+                        for item in versions[-5:]
+                    ),
+                },
+            ]
+        )
+        st.caption(
+            "草稿卡片仅用于继续讨论，不提供正式应用或执行按钮。"
+        )
 
 
 def _phase51_plan_summary_rows(plan: dict[str, Any]) -> list[dict[str, str]]:
@@ -1345,6 +1546,7 @@ def _run_agent(
     llm_api_key: str | None = None,
     llm_base_url: str | None = None,
     llm_model: str | None = None,
+    llm_settings: LLMRuntimeSettings | None = None,
 ) -> dict[str, Any]:
     trace_event("ui.agent.submit", {"query": query, "user_id": user_id, "session_id": session_id})
     try:
@@ -1353,11 +1555,12 @@ def _run_agent(
             user_id=user_id,
             output_dir=output_dir,
             db_path=db_path,
-            top_k=int(default_topk or 50),
+            top_k=int(default_topk),
             session_id=session_id,
             llm_api_key=llm_api_key,
             llm_base_url=llm_base_url,
             llm_model=llm_model,
+            llm_settings=llm_settings,
         )
         if isinstance(result, dict):
             return result
@@ -1389,6 +1592,13 @@ def _render_result_details(
 ) -> None:
     if not result:
         return
+
+    feature_state = dict(result.get("data") or {}) if isinstance(result.get("data"), dict) else {}
+    if str(feature_state.get("status") or result.get("status") or "") == "feature_unavailable":
+        st.error("功能状态：暂不可用（逻辑错误）")
+        st.caption("写操作：未执行。请等待后续版本更新后再试。")
+        if feature_state.get("error_code"):
+            st.caption(f"错误代码：{feature_state['error_code']}")
 
     for warning in _extract_warnings(result):
         st.warning(warning)
@@ -1640,14 +1850,22 @@ def _render_pending_plan(
     intent = str(plan.get("intent") or "")
 
     with st.expander(
-        f"待确认计划：{intent} / {plan_id}",
+        f"{_strategy_plan_title(plan)}："
+        f"{OPERATION_TYPE_LABELS.get(intent, intent)}",
         expanded=False,
     ):
-        st.json(_technical_plan_details(plan))
+        st.table(
+            [
+                {"项目": row["label"], "内容": row["value"]}
+                for row in _strategy_plan_summary_rows(plan)
+            ]
+        )
+        with st.expander("审计与技术详情", expanded=False):
+            st.json(_technical_plan_details(plan))
 
         confirm_col, reject_col = st.columns(2)
         if confirm_col.button(
-            "确认执行",
+            STRATEGY_CONFIRM_LABELS.get(intent, "确认提交该操作"),
             key=f"agent_confirm_button_{plan_id}",
         ):
             token = str(plan.get("confirmation_token") or "")
@@ -1673,7 +1891,7 @@ def _render_pending_plan(
             return
 
         if reject_col.button(
-            "拒绝计划",
+            "拒绝",
             key=f"agent_reject_button_{plan_id}",
         ):
             rejected, status, _ = reject_confirmation_plan(
@@ -1688,47 +1906,6 @@ def _render_pending_plan(
             else:
                 st.error(f"计划拒绝失败：{status}")
             return
-
-            if intent == "execute_add_stock":
-                result = _legacy_direct_commit_disabled(
-                    user_id,
-                    plan_id,
-                    token,
-                    output_dir=output_dir,
-                    db_path=db_path,
-                    session_id=session_id,
-                )
-            elif intent == "capital_change":
-                result = _legacy_direct_commit_disabled(
-                    user_id,
-                    plan_id,
-                    token,
-                    output_dir=output_dir,
-                    db_path=db_path,
-                    session_id=session_id,
-                )
-            elif intent == "paper_backfill":
-                result = _legacy_direct_commit_disabled(
-                    user_id,
-                    plan_id,
-                    token,
-                    output_dir=output_dir,
-                    db_path=db_path,
-                    session_id=session_id,
-                )
-            else:
-                st.error(f"不支持的确认计划类型：{intent}")
-                return
-
-            if result.success:
-                st.success(result.message)
-            else:
-                st.error(result.message)
-
-            st.json(_redact_ui_payload_for_display(result.to_dict()))
-
-            if result.success:
-                _phase8_rerun(user_id, "pending_confirm")
 
 
 def _safe_portfolio_state(
@@ -1786,6 +1963,7 @@ def render_ai_agent_page(
     llm_api_key: str | None = None,
     llm_base_url: str | None = None,
     llm_model: str | None = None,
+    llm_settings: LLMRuntimeSettings | None = None,
     default_topk: int = 10,
     model_name: str | None = None,
     user_id: str = "default",
@@ -1820,6 +1998,13 @@ def render_ai_agent_page(
     cols[2].metric("待确认", len(active_pending))
     cols[3].metric("DB queries", _phase8_perf_state(user_id).get("db_query_count", 0))
     cols[4].metric("Cache hit", _phase8_perf_state(user_id).get("cache_hit", 0))
+
+    _render_strategy_proposal_card(
+        user_id=user_id,
+        account_id=f"paper_{user_id}",
+        conversation_id=session_id,
+        db_path=db_path,
+    )
 
     title_col, clear_col = st.columns([5, 1])
 
@@ -1896,17 +2081,19 @@ def render_ai_agent_page(
 
         with st.chat_message("assistant"):
             with st.spinner("Agent 正在识别意图并调用工具..."):
-                result = _run_agent(
-                    question,
-                    user_id=user_id,
-                    output_dir=output_dir,
-                    db_path=db_path,
-                    default_topk=default_topk,
-                    session_id=session_id,
-                    llm_api_key=llm_api_key,
-                    llm_base_url=llm_base_url,
-                    llm_model=llm_model,
-                )
+                agent_kwargs: dict[str, Any] = {
+                    "user_id": user_id,
+                    "output_dir": output_dir,
+                    "db_path": db_path,
+                    "default_topk": default_topk,
+                    "session_id": session_id,
+                    "llm_api_key": llm_api_key,
+                    "llm_base_url": llm_base_url,
+                    "llm_model": llm_model,
+                }
+                if llm_settings is not None:
+                    agent_kwargs["llm_settings"] = llm_settings
+                result = _run_agent(question, **agent_kwargs)
 
             answer = _normalise_answer(result)
 

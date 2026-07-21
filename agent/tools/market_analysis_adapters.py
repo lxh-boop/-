@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.services.market_analysis_service import market_analysis_service
+from agent.top_k import DEFAULT_TOOL_TOP_K, resolve_requested_top_k
 
 
 def _context_value(args: dict[str, Any], context: dict[str, Any], key: str, default: Any = None) -> Any:
@@ -23,10 +24,10 @@ def _db_path(context: dict[str, Any]) -> str | Path | None:
 
 
 def _int_value(value: Any, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return int(default)
+    return resolve_requested_top_k(
+        task_top_k=value,
+        tool_default_top_k=default,
+    )
 
 
 def _strip_dataframe(result: dict[str, Any]) -> dict[str, Any]:
@@ -40,7 +41,12 @@ def _strip_dataframe(result: dict[str, Any]) -> dict[str, Any]:
 def market_get_ranking_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
     return market_analysis_service.get_ranking(
         stock_code=args.get("stock_code"),
-        top_k=args.get("top_k") or context.get("default_top_k") or 50,
+        top_k=resolve_requested_top_k(
+            user_explicit_top_k=context.get("user_explicit_top_k"),
+            task_top_k=args.get("top_k"),
+            request_default_top_k=context.get("default_top_k"),
+            tool_default_top_k=DEFAULT_TOOL_TOP_K,
+        ),
         output_dir=_output_dir(context),
         model_name=args.get("model_name"),
     )
@@ -53,7 +59,12 @@ def market_analyze_stock_adapter(args: dict[str, Any], context: dict[str, Any]) 
         as_of_date=args.get("as_of_date"),
         output_dir=_output_dir(context),
         db_path=_db_path(context),
-        top_k=_int_value(args.get("top_k") or context.get("default_top_k"), 50),
+        top_k=resolve_requested_top_k(
+            user_explicit_top_k=context.get("user_explicit_top_k"),
+            task_top_k=args.get("top_k"),
+            request_default_top_k=context.get("default_top_k"),
+            tool_default_top_k=DEFAULT_TOOL_TOP_K,
+        ),
         include_rag=bool(args.get("include_rag", True)),
         tool_name="market.analyze_stock",
     )
@@ -73,7 +84,12 @@ def market_compare_stocks_adapter(args: dict[str, Any], context: dict[str, Any])
         user_id=str(_context_value(args, context, "user_id", "default")),
         output_dir=_output_dir(context),
         db_path=_db_path(context),
-        top_k=_int_value(args.get("top_k") or context.get("default_top_k"), 50),
+        top_k=resolve_requested_top_k(
+            user_explicit_top_k=context.get("user_explicit_top_k"),
+            task_top_k=args.get("top_k"),
+            request_default_top_k=context.get("default_top_k"),
+            tool_default_top_k=DEFAULT_TOOL_TOP_K,
+        ),
     )
 
 

@@ -26,6 +26,7 @@ class TradingCostConfig:
     entry_top_k: int = DEFAULT_ENTRY_TOP_K
     hold_buffer_rank: int = DEFAULT_HOLD_BUFFER_RANK
     max_positions: int = DEFAULT_MAX_POSITIONS
+    target_invested_weight: float = 0.80
     minimum_cash_ratio: float = DEFAULT_MINIMUM_CASH_RATIO
     target_cash_ratio: float = DEFAULT_TARGET_CASH_RATIO
     maximum_cash_ratio: float = DEFAULT_MAXIMUM_CASH_RATIO
@@ -71,6 +72,11 @@ def cost_config_from_dict(data: dict[str, Any] | None, user_id: str = "default")
         entry_top_k=int(float(data.get("entry_top_k") or DEFAULT_ENTRY_TOP_K)),
         hold_buffer_rank=int(float(data.get("hold_buffer_rank") or DEFAULT_HOLD_BUFFER_RANK)),
         max_positions=int(float(data.get("max_positions") or DEFAULT_MAX_POSITIONS)),
+        target_invested_weight=float(
+            data.get("target_invested_weight")
+            or data.get("target_ratio")
+            or 0.80
+        ),
         minimum_cash_ratio=target_cash_ratio,
         target_cash_ratio=target_cash_ratio,
         maximum_cash_ratio=maximum_cash_ratio,

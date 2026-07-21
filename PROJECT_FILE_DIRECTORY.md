@@ -1,6 +1,6 @@
 # 项目文件目录与作用说明
 
-更新时间：2026-07-08
+更新时间：2026-07-17
 
 本文面向 AI、Codex 和新接手开发者，用于快速判断“文件在哪里、负责什么、改某个功能先看哪里”。高层架构和运行链路见 [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md)。
 
@@ -17,6 +17,18 @@
 - 旧本地 MLP / `torch_mlp` 链路已经移除，不要恢复旧训练、旧模型保存或旧预测入口。
 - 当前默认模型路线是外部模型：`Model Zoo: zoo:chronos_bolt_small` 和 `DFT_UNET: dft_unet_external`。
 
+## 当前开发运行环境
+
+```text
+项目根目录：D:\stock_daily_app
+项目虚拟环境：D:\stock_daily_app\.venv
+虚拟环境基础解释器：D:\python_runtime\cpython-3.12.0-windows-x86_64-none\python.exe
+Streamlit 地址：http://127.0.0.1:8501
+健康检查：http://127.0.0.1:8501/_stcore/health
+```
+
+所有源码开发、测试、每日更新和本地 Web 启动命令均应显式调用 `.\.venv\Scripts\python.exe`。不要使用 `py -3`、裸 `python` 或 C 盘 Python。当前 8501 部署仅监听本机 `127.0.0.1`。
+
 ## 根目录核心文件
 
 | 文件 / 目录 | 作用 |
@@ -28,6 +40,7 @@
 | `requirements.txt` | 主应用依赖。 |
 | `requirements-desktop.txt` | Windows 桌面启动和打包依赖，例如 `pywebview`、`pyinstaller`。 |
 | `requirements-ragas.txt` | Ragas 离线评测相关依赖。 |
+| `.venv/` | 项目虚拟环境；当前绑定 D 盘 CPython 3.12.0，开发和本地部署必须通过 `.\.venv\Scripts\python.exe` 运行，默认不提交。 |
 | `.streamlit/config.toml` | Streamlit 本地/发布配置，只监听本机地址并关闭不必要统计。 |
 | `config.py` | 全局配置：Universe、Qlib 路径、输出目录、默认回放日期、模型参数等。 |
 | `core/config/paths.py` | 开发模式和冻结发布模式的统一路径策略。 |
@@ -38,7 +51,7 @@
 | `app.py` | Streamlit 主入口，负责侧边栏、页面路由、首页、每日更新触发和免责声明。 |
 | `desktop_launcher.py` | Windows 桌面启动器，发布后生成 `StockDailyApp.exe`。 |
 | `stock_daily_app.spec` | PyInstaller `onedir` 构建配置。 |
-| `build_windows.ps1` | Windows 构建脚本，准备资源、运行 PyInstaller，并在可用时生成 Inno 安装包。 |
+| `build_windows.ps1` | Windows 构建脚本，准备资源、运行 PyInstaller，并在可用时生成 Inno 安装包；当前仍会自行检测 `py`/`python`，不属于已验证的 D 盘 8501 启动链路。 |
 | `daily_incremental_update.py` | 每日增量更新入口，只使用外部模型后端，生成最新排名。 |
 | `auto_model_search.py` | 模型搜索兼容入口，转向内部搜索实现。 |
 | `scheduler_manager.py` | APP 侧每日自动任务配置和状态管理。 |
@@ -46,7 +59,9 @@
 | `ranking_schema.py` | 排名结果字段规范。 |
 | `risk_scoring.py`、`confidence_scoring.py`、`calibration.py` | 旧式评分、置信度和校准辅助，仍可能被兼容流程或测试引用。 |
 | `market_context.py` | 市场上下文构造辅助。 |
-| `llm_client.py`、`llm_prompts.py`、`llm_explainer.py` | OpenAI-compatible LLM 客户端、提示词和解释生成。 |
+| `llm_client.py`、`llm_prompts.py`、`llm_explainer.py` | OpenAI-compatible LLM 客户端、提示词和解释生成；`LLMClient` 通过不可变运行快照区分远程 API 与本机 Ollama，不自动回退。 |
+| `core/llm/runtime_settings.py` | API / Ollama 双 profile 的迁移、解析与不可变运行快照；公开字典与哈希不包含 API Key。 |
+| `core/llm/ollama_manager.py` | 固定 loopback Ollama 的版本、模型列表、推荐模型拉取、项目模型创建与 chat 验证；不执行任意用户命令。 |
 | `news_data.py`、`news_features.py`、`event_rules.py`、`news_db_sync.py` | 新闻/公告读取、事件特征、规则和数据库同步。 |
 | `rag_store.py`、`rag_indexer.py`、`rag_retriever.py`、`rag_utils.py` | 旧 RAG 兼容模块；新实现主要在 `rag/`。 |
 | `github_auth_*.ps1/log`、`streamlit_*.log` | 本机辅助脚本或日志，通常不属于业务核心。 |
@@ -77,7 +92,7 @@
 | `app/components/compact_metric.py` | 紧凑指标卡组件，AI 模拟盘账户摘要使用。 |
 | `app/reflection_ui.py` | Reflection Critic 安全摘要展示组件。 |
 | `app/handoff_ui.py` | Handoff 安全摘要展示组件。 |
-| `app/pages/ai_agent.py` | AI Agent 页面：多会话、新建/切换/删除、对话、审批、运行轨迹、Context/Message/Memory/ReAct/Reflection/Handoff 安全摘要。 |
+| `app/pages/ai_agent.py` | AI Agent 页面：多会话、对话、Proposal 草稿、Implementation/Activation/Position 独立确认卡片、审批和运行轨迹；确认 token 不向用户展示。 |
 | `app/pages/ai_paper_trading.py` | AI 模拟盘页面：账户、持仓、订单、资金、回放、策略说明和组合展示。 |
 | `app/pages/system_monitor.py` | 系统监控页面：数据、模型、RAG、Agent、组合五层指标、告警和历史快照。 |
 | `app/pages/model_search.py` | 模型搜索与回测页面。 |
@@ -130,12 +145,13 @@ AI Agent
 |---|---|
 | `portfolio/schemas.py` | 账户、持仓、订单、调仓计划、资金流水和设置的数据结构。 |
 | `portfolio/storage.py` | 模拟盘文件和数据库存储，核心输出在 `outputs/portfolio/<user_id>/`。 |
+| `portfolio/portfolio_snapshot.py` | 只读归一化快照构建器：`cash` 固定为未投资现金，按“现金 + 有效持仓市值”重算总资产；输出逐项 `calculation_trace` 和稳定 `snapshot_id`，拒绝跨用户/账户/显式快照时间、负数和 NaN/Inf。 |
 | `portfolio/paper_account.py` | 创建账户、资金流水、账户指标和快照读取。 |
 | `portfolio/paper_position.py` | 持仓对象创建、更新和序列化。 |
 | `portfolio/paper_order.py` | 纸面订单对象创建和字段规范。 |
 | `portfolio/paper_trading_engine.py` | 执行调仓计划：先卖后买，按价格、现金、费用和一手约束生成订单并更新账户。 |
-| `portfolio/rebalance_rules.py` | 构建调仓计划；AI 模拟盘使用固定 `hierarchical_top10`。 |
-| `portfolio/hierarchical_top10_allocator.py` | 当前固定策略核心分配器：Top1-5、Top6-10、Top15 缓冲、现金、单股上限和一手约束。 |
+| `portfolio/rebalance_rules.py` | 使用 `ResolvedStrategyConfig` 构建调仓计划；无 Binding 时保持默认 `hierarchical_top10`。 |
+| `portfolio/hierarchical_top10_allocator.py` | 默认策略核心分配器：Top1-5、Top6-10、Top15 缓冲、现金、单股上限和一手约束。 |
 | `portfolio/target_weight_allocator.py` | 通用目标权重分配器，处理价格有效性、现金保留、一手和成本。 |
 | `portfolio/trading_permissions.py` | A 股交易权限、代码可交易性和业务限制规则。 |
 | `portfolio/trading_cost_config.py` | 交易成本、现金比例、调仓阈值和策略模式配置。 |
@@ -148,6 +164,24 @@ AI Agent
 | `portfolio/user_profile.py` | 用户画像、风险约束和默认配置。 |
 | `portfolio/behavior_profile.py` | 用户行为画像。 |
 | `portfolio/decision_attribution.py` | 单股决策归因，只读解释正式推荐、纸面决策和执行诊断。 |
+
+## Strategies / 长期策略调整
+
+| 文件 / 目录 | 作用 |
+|---|---|
+| `strategies/registry.py` | 内置策略和用户版本注册表；应用成功后的用户版本保持 `registered_disabled`。 |
+| `strategies/binding_repository.py` | 保存用户/账户/生效日隔离的 Strategy Binding 及历史版本。 |
+| `strategies/runtime_resolver.py` | 按用户、账户和交易日解析默认或 Binding 策略，生成规范化 `ResolvedStrategyConfig`。 |
+| `strategies/adapters/hierarchical_top10_strategy.py` | 默认策略 adapter，将 config 传给原组合分配和调仓链。 |
+| `agent/services/strategy_proposal_service.py` | Proposal 草稿、修订、版本历史、用户/账户/会话隔离。 |
+| `agent/services/strategy_implementation_service.py` | 锁定 Proposal 版本并在 `runtime/strategy_drafts/` 生成隔离实现。 |
+| `agent/services/strategy_validation_service.py`、`strategy_review_service.py`、`strategy_backtest_service.py` | schema、安全、接口、测试、隔离回测、diff、tradeoff 和 rollback 预览。 |
+| `agent/services/strategy_apply_service.py` | 应用计划、hash 重校验、原子文件/Registry 写入、幂等和失败回滚。 |
+| `agent/services/strategy_binding_service.py` | 未来策略启用/回滚计划与独立确认；不会修改当前持仓。 |
+| `agent/services/strategy_position_service.py` | 当前仓位预览与第三次确认；重校验账户和 Binding 后调用原模拟盘 pipeline。 |
+| `agent/services/strategy_context_service.py` | 汇总对话、Proposal、Binding、运行时策略及模拟盘状态。 |
+| `agent/services/strategy_audit_service.py` | 按 Proposal/Implementation/Plan/Commit/Binding/Run/Conversation ID 重建脱敏审计链。 |
+| `agent/tools/strategy_workflow_tools.py` | 长期策略只读、提案、实现、应用、Binding、当前仓位和审计工具包装。 |
 
 ## Scoring / AI 调整层
 
@@ -170,6 +204,10 @@ AI Agent
 |---|---|
 | `agent/agent_core.py` | 早期 Agent 核心执行入口，部分兼容测试仍引用。 |
 | `agent/executor.py` | 当前 Agent 主执行器，串联 Goal Planning、TaskPlan、ToolExecutor、Context、Message、Memory、Observe/Replan、Reflection、Handoff 和结果汇总。 |
+| `agent/llm_audit.py` | 脱敏的 LLM 调用收据；记录部署模式、provider、model、配置哈希、耗时和 schema 结果，不记录密钥、完整提示词或完整回复。 |
+| `agent/logic_integrity.py` | 不依赖 LLM 的流程完整性安全门；校验资产快照、任务/完成契约、Replan 审计与写入边界，并在逻辑错误时返回不可写、不可覆盖的 `feature_unavailable` 状态。 |
+| `agent/replan_execution.py` | Completion 与 Critic 的 `REPLAN_READONLY` 统一消费器；仅生成并执行已注册的只读工具计划，以计划/结果签名、输出差异、缺失项变化和轮次上限审计进展，重复或无进展立即停止。 |
+| `agent/top_k.py` | TopK 单一解析器，按“用户明确值 → 任务值 → 请求默认值 → 工具默认值 → 系统兜底”确定 1–100 的有效数量。 |
 | `agent/router.py`、`agent/intent_router.py` | Agent 路由辅助和旧意图路由兼容层。 |
 | `agent/intent_classifier.py` | 意图分类。 |
 | `agent/parameter_extractor.py` | 从自然语言提取参数。 |
@@ -180,7 +218,7 @@ AI Agent
 | `agent/tools/tool_registry.py` | 工具注册中心，声明权限、副作用、是否需要确认、并发、超时和保留策略。 |
 | `agent/tools/*_adapters.py` | v2 服务收敛后的工具适配器，Agent 默认路径优先走这些适配器。 |
 | `agent/tools/*_tool.py` | 兼容工具包装，旧页面、测试或 pipeline 仍可能引用。 |
-| `agent/services/` | 工具服务层：市场分析、证据/RAG、组合、风险、提案、写操作、系统辅助、用户画像等。 |
+| `agent/services/` | 工具服务层：市场分析、证据/RAG、组合、风险、版本化长期策略闭环、写操作、系统辅助、用户画像等。 |
 | `agent/write_gateway.py` | P0 写操作网关，负责 approval / revalidate / idempotency / commit 边界。 |
 | `agent/session/confirmation_manager.py` | 确认令牌、审批和确认状态管理。 |
 | `agent/session/pending_action_store.py` | 待确认动作存储。 |
@@ -257,7 +295,7 @@ AI Agent
 | `database/repositories/agent_repository.py` | Agent runs、steps、tool calls、messages、approvals、commits、memory、artifacts 等 repository。 |
 | `database/repositories/evaluation_repository.py` | 评估 repository。 |
 | `database/repositories/system_monitor_repository.py` | 系统监控快照和告警 repository。 |
-| `database/migrations/001_initial_schema.sql` 到 `017_system_monitor.sql` | 当前 SQLite migration 序列。安装版首次启动使用 migration 初始化用户数据库，不复制开发机 live 数据库。 |
+| `database/migrations/001_initial_schema.sql` 到 `023_paper_decision_strategy_metadata.sql` | 当前 SQLite migration 序列。`019`—`023` 增加 Proposal/Implementation、Strategy Binding、运行审计和纸面决策策略元数据；安装版首次启动只用 migration 初始化。 |
 | `database/seed/agent_rules.example.json` | Agent 规则示例。 |
 
 ## Scheduler / 自动任务
@@ -281,7 +319,8 @@ AI Agent
 
 | 文件 / 目录 | 作用 |
 |---|---|
-| `scripts/start_local_web.ps1` | 本地启动 Streamlit Web。 |
+| `scripts/start_local_web.ps1` | 本地启动 Streamlit Web 的辅助脚本；当前仍调用 `py`，D 盘 8501 部署不要使用该脚本，应显式调用 `.\.venv\Scripts\python.exe`。 |
+| `scripts/setup_ollama_qwen3_4b.ps1` | 使用官方 Ollama CLI 拉取 `qwen3:4b`、创建 `stock-agent-qwen3-4b` 并验证本机 OpenAI-compatible 端点。 |
 | `scripts/prepare_distribution_assets.py` | 构建前分发资源检查，不修改开发 live 数据库。 |
 | `scripts/verify_distribution.py` | 构建后分发目录检查，确认 EXE、migration、resources 和敏感文件策略。 |
 | `scripts/smoke_test_dist_exe.ps1` | Windows dist EXE 冒烟测试。 |
@@ -340,9 +379,17 @@ local_app_config.json
 | `docs/phase14_memory_system_docs/` | Phase 14 MemoryManager 文档、阶段报告和最终报告。 |
 | `docs/phase15_react_observe_replan_docs/` | Phase 15 ReAct Observe/Replan 文档、阶段报告和最终报告。 |
 | `docs/phase16_17_reflection_handoff_docs/` | Phase 16 Reflection Critic 与 Phase 17 Handoff 文档、阶段报告和最终报告。 |
+| `docs/strategy_adjustment_phases/` | 长期模拟盘策略调整 Phase 0—8 验收报告与最终报告。 |
 | `docs/sample_data/` | 脱敏样例数据。 |
 | `docs/screenshots/` | 页面检查截图。 |
 | `docs/portfolio_risk_and_multi_conversation_audit_fix_report.md` | 组合风险意图边界和 AI Agent 多会话 UI 修复报告。 |
+| `docs/diagnostics/AGENT_LOGIC_REPLAN_ASSET_RECHECK.md` | 112000/122000 资产夹具、现金语义和本次修复前基线复核记录。 |
+| `docs/diagnostics/AGENT_LOGIC_REPLAN_ASSET_FIX_REPORT.md` | 资产口径、流程完整性、Replan 进展和故障提示的最终验收报告。 |
+| `docs/diagnostics/AGENT_CAPABILITY_BENCHMARK_BASELINE.md` | L1 真实 LLM Agent 能力测评的模型入口、L0 对照、已知失败与严格隔离基线。 |
+| `docs/diagnostics/AGENT_CAPABILITY_BENCHMARK_REPORT.md` | L1 隐藏集真实模型结果、门禁、延迟和可恢复续跑说明。 |
+| `docs/diagnostics/AGENT_CAPABILITY_BENCHMARK_DIAGNOSTIC_REPORT.md` | 门禁不通过时由保留轨迹生成的低分自动诊断和最小复现。 |
+| `docs/setup/LOCAL_LLM_SETUP.md` | 本地 Ollama 安装、模型创建、UI 手动切换和无自动回退说明。 |
+| `docs/diagnostics/LOCAL_LLM_SWITCH_BASELINE.md`、`LOCAL_LLM_SWITCH_IMPLEMENTATION_REPORT.md` | 本地模型切换的排查基线、实现边界、测试结果和运行条件。 |
 
 ## 运行产物目录
 
@@ -351,12 +398,46 @@ local_app_config.json
 | `data/` | 本地行情、特征、股票池、SQLite 开发数据库等。开发数据库为 `data/agent_quant.db`。 |
 | `models/` | 外部模型文件、Model Zoo 下载、DFT_UNET 相关文件和缓存。 |
 | `outputs/` | 最新排名、历史排名、报告、用户推荐、模拟盘账户/持仓/订单/净值等输出。 |
-| `runtime/` | Streamlit 日志、job 状态、Agent artifacts、replay audit、临时运行文件。 |
+| `runtime/` | Streamlit 日志、job 状态、Agent artifacts、replay audit、`strategy_drafts` 隔离实现和临时运行文件。 |
 | `logs/` | 训练、更新、APP、调度和诊断日志。 |
 | `build/`、`dist/`、`installer_output/` | Windows 构建产物，默认不提交。 |
-| `.venv/`、`.pytest_cache/`、`__pycache__/` | 本地虚拟环境和缓存，默认不提交。 |
+| `.venv/`、`.pytest_cache/`、`__pycache__/` | 本地虚拟环境和缓存，默认不提交；当前 `.venv/` 的基础解释器位于 `D:\python_runtime\cpython-3.12.0-windows-x86_64-none\python.exe`。 |
+
+## L1 real-LLM benchmark audit and repair (2026-07-20)
+
+| File / directory | Purpose |
+|---|---|
+| `agent/llm_audit.py` | Redacted durable `LLM_CALL` receipt store. It keeps transport timing/status/schema evidence only and never persists API keys, prompts, full responses or local paths. |
+| `llm_client.py` | `LLMClient.chat_audited(...)` is the LLM-decomposition call path used when formal Agent audit context is active. |
+| `agent/executor.py` | `run_agent_request` persists `formal_entry_used=true` and binds the executor-owned run/conversation/case context before Planner, Completion, Report or Critic calls. |
+| `agent/intent_decomposition/llm_decomposer.py` | Maps actual calls to `planner`, `goal_reviewer`, `completion` and `critic`, with an explicit persisted schema-result record. |
+| `benchmarks/agent_capability/scoring.py` | Validity partition, Agent-only aggregation, N/A-safe metric records and independent provider/infrastructure metrics. |
+| `benchmarks/agent_capability/run_benchmark.py` | Isolated real-LLM runner; retries invalid infrastructure runs, preserves raw/failure evidence and refuses to publish an official hidden-set report with zero valid samples. |
+| `tests/benchmark/test_agent_capability_pipeline_repair.py` | Regression tests for receipts, redaction, formal entry, conditional reviewer validity, provider/trace exclusion, zero-sample N/A and resume behavior. |
+| `docs/diagnostics/AGENT_CAPABILITY_BENCHMARK_PIPELINE_REPAIR_BASELINE.md` | Pre-repair evidence baseline and failure taxonomy. |
 
 ## Tests
+
+### Stable portfolio workflow diagnostics and benchmark
+
+| File / directory | Purpose |
+|---|---|
+| `agent/runtime_reliability.py` | LLM token/call budget limits are disabled by default through `ENABLE_LLM_BUDGET_LIMITS`; independent tool, timeout, retry, step, Replan, approval and write safeguards remain active. |
+| `agent/replan_execution.py` | Shared Replan state (`replan_count`, executed/attempted rounds, limit and audit) plus readonly task validation, signatures and progress records. |
+| `agent/logic_integrity.py` | Terminal-priority guard. A logic error produces deterministic `feature_unavailable`, suppresses Completion/Critic Replan and blocks plan, approval and writes. |
+| `agent/top_k.py` | Business TopK policy: explicit user value, task value, target holding count × 2 redundancy, request default, tool default, then system fallback. |
+| `agent/tools/portfolio_comparison_tools.py` | Strict target-portfolio validation for total weight, cash, duplicate/unknown securities, single-position and industry limits, and explanation conflicts. |
+| `benchmarks/agent/` | 84 stable-portfolio benchmark cases and resumable runner. |
+| `tests/unit/test_stable_portfolio_workflow.py` | Regression tests for LLM budget policy, terminal suppression, Replan state, constraints, TopK and final-response message type. |
+| `tests/benchmark/test_stable_portfolio_benchmark.py` | Release-gate test for benchmark volume and zero safety violations. |
+| `outputs/benchmarks/agent/` | Generated raw JSONL, metrics JSON/CSV and Markdown benchmark report. |
+| `docs/diagnostics/STABLE_PORTFOLIO_REPAIR_BASELINE.md` | Real-chain Phase 0 reproduction and baseline test results. |
+| `docs/diagnostics/STABLE_PORTFOLIO_WORKFLOW_AND_BENCHMARK_REPORT.md` | Final stable-portfolio repair, verification and benchmark report. |
+| `benchmarks/agent_capability/` | L1 真实 LLM Agent 能力测评：180 个 A–F 案例、隐藏 Gold、隔离 fixture、runner/resume、规范化轨迹和评分。 |
+| `benchmarks/agent_capability/cases/` | 108 development、36 validation、36 hidden 案例；`hidden_gold.jsonl` 与隐藏输入分离，绝不注入模型 Prompt。 |
+| `benchmarks/agent_capability/run_benchmark.py`、`resume.py` | 通过正式 Agent 入口执行真实 LLM，按 case + iteration + model-config hash checkpoint/续跑。 |
+| `tests/benchmark/test_agent_capability_dataset.py` | L1 数据集数量、分层、隐藏 Gold 隔离与安全评分结构测试（不冒充真实 LLM 测试）。 |
+| `outputs/benchmarks/agent_capability/` | L1 脱敏 raw/normalized traces、metrics、类别指标、失败轨迹、报告及隔离工作区。 |
 
 | 目录 / 文件 | 作用 |
 |---|---|
@@ -367,9 +448,9 @@ local_app_config.json
 常用验证：
 
 ```powershell
-py -3 -m compileall -q agent app portfolio scoring rag pipelines database scripts
-py -3 -m pytest tests\unit -q
-py -3 -m streamlit run app.py --server.port 8501 --server.address 127.0.0.1
+.\.venv\Scripts\python.exe -m compileall -q agent app portfolio scoring rag pipelines database strategies scripts
+.\.venv\Scripts\python.exe -m pytest tests\unit -q
+.\.venv\Scripts\python.exe -m streamlit run app.py --server.port 8501 --server.address 127.0.0.1 --server.headless true --browser.gatherUsageStats false
 ```
 
 针对 Agent / UI 改动，至少补跑相关单测，并真实打开 8501 页面检查：首页、AI Agent、AI 模拟盘、系统监控。
