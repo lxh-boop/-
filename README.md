@@ -1,141 +1,208 @@
-# A 股每日股票评分系统
+# 多 Agent 智能任务编排系统
 
-本项目支持两种并存运行方式：
+> 一套面向复杂任务的可控、可扩展、可追溯多 Agent 系统。  
+> 核心编排、上下文管理和安全执行机制均自主设计，而非简单封装通用 Agent 框架。
 
-```powershell
-# 开发模式
-python -m streamlit run app.py
+---
 
-# 源码桌面模式
-python desktop_launcher.py
+## 项目简介
 
-# Windows 发布构建
-powershell -ExecutionPolicy Bypass -File .\build_windows.ps1
+传统 Agent 框架通常将任务规划、上下文、工具调用和执行状态隐藏在框架内部。随着任务复杂度上升，容易出现提示词膨胀、执行链路不透明、错误难定位、上下文重复传递等问题。
+
+本项目采用 **主 Agent + 专业 Agent + 工具层** 的分层设计，将复杂请求拆分为可执行的任务图，并通过统一协议完成任务调度、上下文共享、工具调用、结果汇总和安全写入。
+
+项目重点不是“接入多个大模型角色”，而是实现一套真正可运行的 **多 Agent 协作基础设施**。
+
+---
+
+## 核心亮点
+
+### 1. 自主设计多 Agent 分层架构
+
+- **主 Agent**：理解用户需求、拆解任务、调度执行并汇总结果。
+- **专业 Agent**：处理特定类型的分析任务，保持职责单一。
+- **工具层**：封装检索、数据查询和业务操作，避免 Agent 直接操作底层系统。
+
+各层之间通过结构化协议通信，专业 Agent 可以独立开发、注册、替换和扩展。
+
+### 2. 显式 DAG 任务编排
+
+复杂请求会被拆解为带依赖关系的任务节点，并形成可观察的任务 DAG。
+
+系统支持：
+
+- 任务依赖管理
+- 跨任务参数传递
+- 无依赖任务并发执行
+- 失败隔离与状态汇总
+- 有限重试与重新规划
+
+相比通用框架中的黑盒式执行链，本项目的任务流更加可控、可调试。
+
+### 3. 按需上下文读取
+
+系统不会将全部历史信息一次性塞入每个 Agent。
+
+主 Agent 只传递完成任务所需的基础信息；专业 Agent 在发现信息不足时，可以通过统一接口申请补充上下文。若仍无法获得必要参数，则向主 Agent 返回结构化缺参结果，由主 Agent 统一与用户交互。
+
+该机制能够：
+
+- 减少重复上下文传递
+- 降低 Token 消耗
+- 避免无关信息干扰
+- 明确区分“缺少用户参数”和“业务数据不存在”
+
+### 4. 会话级共享记忆
+
+系统为每次任务创建临时共享记忆空间，用于保存：
+
+- 用户输入
+- 任务规划结果
+- Agent 中间结论
+- 工具调用结果
+- 上下文补充记录
+- 最终输出
+
+多个专业 Agent 可以按需读取同一份会话记忆，任务结束后自动清理，避免临时信息污染长期记忆。
+
+### 5. 可追溯执行链路
+
+系统记录从用户请求到最终结果的完整执行过程，包括：
+
+- 任务拆解
+- Agent 调用关系
+- 上下文来源
+- 工具输入与输出
+- 节点执行状态
+- 异常与重试信息
+- 最终结果生成过程
+
+相比只返回最终答案的通用 Agent，系统更便于问题定位、效果评估和后续优化。
+
+### 6. 安全写操作机制
+
+分析类 Agent 只负责生成建议或操作提案，不允许直接修改系统状态。
+
+涉及写操作时，必须经过：
+
+1. 参数校验
+2. 操作提案生成
+3. 用户确认
+4. 执行前状态复校
+5. 幂等提交
+6. 审计记录
+
+该设计将“大模型决策”与“系统执行”分离，降低误操作和重复提交风险。
+
+---
+
+## 相比通用 Agent 框架的优势
+
+| 通用框架常见方式 | 本项目设计 |
+|---|---|
+| 执行流程由框架内部隐式控制 | 使用显式 DAG 管理任务依赖和执行状态 |
+| 将大量上下文直接传给 Agent | 专业 Agent 按需申请上下文 |
+| 多角色主要依赖提示词区分 | 通过职责、协议、工具和输入输出模型隔离 |
+| 异常通常直接终止整个流程 | 支持节点级失败隔离和有限重规划 |
+| 工具调用结果难以追踪 | 保存完整任务、上下文和工具调用链路 |
+| Agent 可直接触发业务修改 | 写操作必须经过确认、复校和幂等提交 |
+| 框架升级可能影响核心流程 | 核心编排逻辑自主可控，便于定制和扩展 |
+
+---
+
+## 系统架构
+
+```mermaid
+flowchart TD
+    U[用户请求] --> S[主 Agent / Supervisor]
+    S --> P[任务规划器]
+    P --> D[DAG 调度器]
+
+    D --> A1[专业 Agent A]
+    D --> A2[专业 Agent B]
+    D --> A3[专业 Agent C]
+
+    A1 --> C[会话上下文与共享记忆]
+    A2 --> C
+    A3 --> C
+
+    A1 --> T[工具注册与调用层]
+    A2 --> T
+    A3 --> T
+
+    T --> R[数据查询 / 检索 / 业务能力]
+    D --> O[运行追踪与状态管理]
+    D --> S
+    S --> W[提案与安全执行层]
+    W --> F[最终结果]
 ```
 
-Windows 发布模式入口为 `desktop_launcher.py` 打包后的 `StockDailyApp.exe`。安装版会后台启动本地 Streamlit，只监听 `127.0.0.1` 的动态端口，并用桌面窗口打开页面。
+---
 
-开发模式继续使用项目根目录中的 `data/`、`models/`、`outputs/`、`runtime/`、`logs/` 和 `local_app_config.json`。安装版用户数据写入：
+## 任务执行流程
 
 ```text
-%LOCALAPPDATA%\StockDailyApp\
+用户输入
+  ↓
+主 Agent 识别任务目标
+  ↓
+规划器拆解子任务并生成 DAG
+  ↓
+调度器根据依赖关系执行任务
+  ↓
+专业 Agent 按需读取上下文并调用工具
+  ↓
+中间结果写入会话共享记忆
+  ↓
+主 Agent 汇总多个专业 Agent 的结果
+  ↓
+生成最终回答或安全操作提案
 ```
 
-其中 SQLite 数据库位于 `%LOCALAPPDATA%\StockDailyApp\database\agent_quant.db`，本地 Token/AI 配置位于 `%LOCALAPPDATA%\StockDailyApp\config\local_app_config.json`。安装和升级不会覆盖用户数据库、配置、模拟盘数据、输出和日志。
+---
 
-详细发布说明见 `docs/WINDOWS_DISTRIBUTION.md`。
+## 技术栈
 
-## 金融 Agent 分阶段改进
+- **开发语言**：Python
+- **大模型接入**：LLM API、Function Calling
+- **数据建模与校验**：Pydantic、类型注解
+- **并发调度**：Asyncio
+- **检索增强**：RAG、BM25、Dense Retrieval、Reranking
+- **状态与审计**：SQLite
+- **展示层**：Streamlit
+- **工程能力**：模块化工具注册、运行追踪、异常处理、幂等控制
 
-阶段 0/1/2/3 已建立基线、新闻 RAG/Dense 检索改造入口、统一系统监控和 Agent 轻量 ContextBuilder：
+---
 
-- `docs/IMPROVEMENT_BASELINE.md`
-- `docs/handoff/00_BASELINE_FREEZE.md`
-- `docs/handoff/01_NEWS_RAG_DENSE_RETRIEVAL.md`
-- `docs/handoff/02_SYSTEM_MONITORING.md`
-- `docs/handoff/03_CONTEXT_BUILDER.md`
-- `docs/handoff/04_LAYERED_MEMORY.md`
-- `docs/handoff/05_AGENT_HARNESS_QUALITY.md`
-- `docs/handoff/06_RUNTIME_RELIABILITY_FAULT_INJECTION.md`
-- `docs/handoff/07_DECISION_ATTRIBUTION.md`
-
-新闻 RAG 重同步、清理旧 chunk、重建 BM25/Dense 索引和执行诊断：
-
-```powershell
-py scripts\resync_news_rag.py --from-cache --db-path data\agent_quant.db --output-dir outputs --query "000001 news risk" --stock-code 000001 --decision-time "2026-06-24 14:30:00"
-```
-
-严格 Dense 验收：
-
-```powershell
-py -m evaluation.news_rag_diagnostics --db-path data\agent_quant.db --output-dir outputs --query "000001 news risk" --stock-code 000001 --decision-time "2026-06-24 14:30:00" --require-dense
-```
-
-本阶段不修改交易策略、模拟盘规则、原始模型排名或四个旧 Agent 文件。
-
-阶段 2 系统监控快照命令：
-
-```powershell
-py scripts\run_system_monitor_snapshot.py --db-path data\agent_quant.db --output-dir outputs --user-id cht --trade-date 2026-07-01
-```
-
-APP 顶层页面新增 `系统监控`。该页面只读采集数据、模型、RAG、Agent 和组合五层指标；保存快照时只写 `system_monitor_snapshots` 和 `system_monitor_alerts`，不会修改模拟盘订单、持仓、策略或 Prompt。
-
-阶段 3 新增 `agent/context/` 轻量 ContextBuilder。它在 Agent 执行前后收集只读上下文、按预算压缩并保留股票代码、日期、数值和证据 ID；不修改交易策略、模拟盘规则、RAG 主链路或四个旧 Agent 文件。
-阶段 4 新增分层 Memory 服务，复用现有 `conversation_summaries`、`memory_items` 和 `memory_links`。它支持 Working/Episodic/Semantic 三层检索、用户隔离、来源追踪、过期、删除和用户纠正覆盖；不会把一次性调仓或 Agent 推断自动写成长期偏好。
-阶段 5 扩展 `evaluation/agent_harness/`，新增证据质量、回答质量、只读业务安全和综合评分指标。Harness 可发现错误股票证据、未来证据、回答缺关键数字或免责声明、只读场景产生业务写入等问题。
-阶段 6 新增运行时可靠性工具和故障注入套件，覆盖超时、取消、只读重试、SQLite lock 重试、熔断、P95 延迟和大输出截断；不改变交易策略或模拟盘执行规则。
-阶段 7 新增 `portfolio/decision_attribution.py` 单股决策归因服务，并在 AI 模拟盘页面提供“单股决策归因”入口。它只读取已保存的最终推荐、模拟盘决策和执行诊断，展示基础仓位、原始排名、新闻/用户调整、公式核对、一手约束、递归分配、最终仓位和证据来源；不重新计算或改写实际业务结果。
-
-## Ragas 离线评测
-
-项目新增独立离线评测模块 `evaluation/ragas_eval/`，用于评估股票新闻 RAG 检索和 Agent 回答。Ragas 是可选依赖，未安装时不影响 App、日更、Agent 或模拟盘；可用 `--no-llm` 只运行确定性指标。当前验证组合见 `requirements-ragas.txt`。
-
-```powershell
-python -m evaluation.ragas_eval.cli `
-  --dataset data/evaluation/rag_eval_template.jsonl `
-  --config configs/ragas_eval/retrieval_only.yaml `
-  --experiment-name smoke_test `
-  --mode retrieval `
-  --no-llm
-```
-
-详细说明见 `docs/RAGAS_EVALUATION_GUIDE.md`。
-
-# 用户交易权限补丁
-
-将压缩包内容复制到项目根目录：
+## 核心模块
 
 ```text
-D:\stock_daily_app
+agent/
+├── supervisor/          # 主 Agent、任务理解与结果汇总
+├── planner/             # 任务拆解与 DAG 生成
+├── specialists/         # 专业 Agent
+├── scheduler/           # 依赖调度与并发执行
+├── context/             # 按需上下文读取
+├── memory/              # 会话级共享记忆
+├── protocols/           # Agent 间结构化通信协议
+├── tools/               # 工具定义、注册与调用
+├── tracing/             # 运行链路与状态追踪
+├── approval/            # 人工确认与安全执行
+└── schemas/             # Pydantic 输入输出模型
 ```
 
-保持目录结构并覆盖同名文件。
+---
 
-## 新增文件
+## 设计原则
 
-- `portfolio/trading_permissions.py`
-- `docs/TRADING_PERMISSION_RULES.md`
-- `docs/TRADING_PERMISSION_DATA_DICTIONARY.md`
+- **职责单一**：主 Agent 负责调度，专业 Agent 负责分析，工具负责执行。
+- **显式控制**：任务依赖、上下文来源和执行状态均可观察。
+- **最小上下文**：只向 Agent 提供完成当前任务所需的信息。
+- **读写分离**：分析结果不能直接转化为系统修改。
+- **结构化通信**：避免 Agent 之间依赖不稳定的自然语言约定。
+- **可替换扩展**：新增 Agent 或工具时不需要重写整体流程。
+- **可追踪调试**：任何输出都可以追溯到任务节点和工具结果。
 
-## 覆盖文件
+---
 
-- `portfolio/user_profile.py`
-- `app/classic_services.py`
-- `app/pages/ai_paper_trading.py`
-- `portfolio/rebalance_rules.py`
-- `portfolio/paper_trading_engine.py`
-- `pipelines/paper_trading_pipeline.py`
-- `agent/tools/user_profile_tool.py`
 
-## 权限保存方式
-
-本次不修改数据库表结构。`save_classic_user_context` 原本就会保存完整用户画像 JSON，因此交易权限保存在：
-
-```text
-outputs/users/<user_id>/user_profile.json
-```
-
-加载用户画像时，会将数据库中的原有字段与 JSON 中的交易权限合并。
-
-## 默认权限
-
-- 沪深主板：开通
-- 创业板：未开通
-- 科创板：未开通
-- 北交所：未开通
-- 风险警示股票：未开通
-- 港股通：未开通
-
-## 执行规则
-
-- 无权限的新股票不能买入。
-- 无权限的已有持仓不能加仓。
-- 已有持仓仍可持有、减仓或卖出。
-- 权限阻断释放的目标权重由现有 Top10 分配逻辑重新分配。
-- 执行引擎会再次校验，防止计划层遗漏。
-- 历史回放通过同一 `paper_trading_pipeline` 自动应用权限。
-
-## 验证范围
-
-仅完成 Python 语法检查；未运行项目测试，未覆盖真实本地数据库和历史回放。
