@@ -28,7 +28,15 @@ class OllamaAdapter(OpenAICompatibleAdapter):
 
     @staticmethod
     def _provider_parameters(profile: ModelProfile) -> dict[str, Any]:
-        del profile
+        """Translate thinking configuration to Ollama's OpenAI-compatible API."""
+
+        if profile.disable_thinking:
+            return {
+                "extra_body": {
+                    "reasoning_effort": "none",
+                }
+            }
+
         return {}
 
     def _build_client(self, profile: ModelProfile, credential: str):
