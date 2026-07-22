@@ -18,6 +18,7 @@ from .agent_directory import (
 )
 from .context_service import ContextService
 from .control_gateway import ControlGateway
+from .contracts import STANDARDIZED_RESULTS_CONTRACT_VERSION, is_system_queryable_context_key
 from .entry_decision import EntryDecisionError, MainEntryDecisionPlanner, RequestMode
 from .models import AgentResult, AgentTask, MemoryUpdate, MissingContextItem, ResultStatus, TaskStatus
 from .planner import CoordinatorPlanner
@@ -296,7 +297,7 @@ class AgentCollaborationCoordinator:
             for result in results.values()
             if result.status == ResultStatus.NEED_CONTEXT
             for item in result.missing_items
-            if item.blocking
+            if item.blocking and not is_system_queryable_context_key(item.key)
         ]
         need_clarification = bool(missing)
         clarification_question = _clarification_question(missing, language) if missing else ""
@@ -309,9 +310,12 @@ class AgentCollaborationCoordinator:
             answer = clarification_question
             execution_status = "waiting_context"
         else:
-            safe_results = {task_id: result.safe_for_coordinator() for task_id, result in results.items()}
+            standardized_by_task = {
+                task_id: result.standardized_for_handoff()
+                for task_id, result in results.items()
+            }
             try:
-                answer = self.reporter.build(query, safe_results, language=language)
+                answer = self.reporter.build(query, standardized_by_task, language=language)
             except Exception as exc:
                 return self._entry_failure(
                     query=query,
@@ -325,6 +329,33 @@ class AgentCollaborationCoordinator:
             )
             failed_count = sum(1 for result in results.values() if result.status in {ResultStatus.FAILED, ResultStatus.BLOCKED})
             execution_status = "completed" if failed_count == 0 else ("partially_completed" if success_count else "failed")
+
+        standardized_by_task = {
+            task_id: result.standardized_for_handoff()
+            for task_id, result in results.items()
+        }
+        standardized_agent_results = {
+            "contract_version": STANDARDIZED_RESULTS_CONTRACT_VERSION,
+            "items": [
+                standardized_by_task[task.task_id]
+                for task in tasks
+                if task.task_id in standardized_by_task
+            ],
+            "task_count": len(standardized_by_task),
+            "completed_count": sum(
+                1
+                for result in results.values()
+                if result.status in {ResultStatus.COMPLETED, ResultStatus.PARTIAL, ResultStatus.PROPOSAL_READY}
+            ),
+            "failed_count": sum(
+                1
+                for result in results.values()
+                if result.status in {ResultStatus.FAILED, ResultStatus.BLOCKED}
+            ),
+            "waiting_context_count": sum(
+                1 for result in results.values() if result.status == ResultStatus.NEED_CONTEXT
+            ),
+        }
 
         safe_task_results = {
             task.task_id: _safe_result_for_compatibility(task, results[task.task_id])
@@ -348,6 +379,7 @@ class AgentCollaborationCoordinator:
             "success": bool(success),
             "answer": answer,
             "task_results": safe_task_results,
+            "standardized_agent_results": standardized_agent_results,
             "tool_calls": [],  # Hard boundary: coordinator never receives specialist Tool details.
             "internal_tool_call_count": sum(int(result.metadata.get("internal_call_count") or 0) for result in results.values()),
             "execution_order": [task.task_id for task in tasks if task.task_id in results],
@@ -371,7 +403,7 @@ class AgentCollaborationCoordinator:
             "replan_count": len(recovery_audit),
             "invalid_replan_block_count": 0,
             "replan_limits": {"max_rounds": MAX_CONTEXT_RECOVERY_ROUNDS},
-            "agent_outputs": {task_id: result.safe_for_coordinator() for task_id, result in results.items()},
+            "agent_outputs": standardized_by_task,
             "agent_timeline": [
                 {
                     "step_id": task.task_id,
@@ -439,6 +471,14 @@ class AgentCollaborationCoordinator:
             "success": False,
             "answer": answer,
             "task_results": {},
+            "standardized_agent_results": {
+                "contract_version": STANDARDIZED_RESULTS_CONTRACT_VERSION,
+                "items": [],
+                "task_count": 0,
+                "completed_count": 0,
+                "failed_count": 0,
+                "waiting_context_count": 0,
+            },
             "tool_calls": [],
             "internal_tool_call_count": 0,
             "execution_order": [],
@@ -624,7 +664,10 @@ class AgentCollaborationCoordinator:
                         user_id=user_id,
                         default_top_k=default_top_k,
                         language=language,
-                        dependency_results={dep: results[dep].safe_for_coordinator() for dep in task.dependency_task_ids},
+                        dependency_results={
+                            dep: results[dep].standardized_for_handoff()
+                            for dep in task.dependency_task_ids
+                        },
                         execution_context=execution_context,
                     ): task
                     for task in ready
@@ -784,8 +827,8 @@ class AgentCollaborationCoordinator:
             self.memory.put(
                 session_id=task.session_id,
                 key=f"agent_result:{task.task_id}",
-                value=result.safe_for_coordinator(),
-                value_type="agent_result",
+                value=result.standardized_for_handoff(),
+                value_type="standardized_agent_result",
                 summary=result.summary[:600],
                 source_type="agent_result",
                 source_ref=task.task_id,
@@ -921,7 +964,7 @@ class AgentCollaborationCoordinator:
                         default_top_k=default_top_k,
                         language=language,
                         dependency_results={
-                            dep: results[dep].safe_for_coordinator()
+                            dep: results[dep].standardized_for_handoff()
                             for dep in original.dependency_task_ids
                             if dep in results
                         },

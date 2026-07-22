@@ -14,6 +14,7 @@ from .agent_directory import (
     SYSTEM_DIAGNOSTIC,
 )
 from .context_service import ContextService
+from .contracts import sanitize_runtime_parameters
 from .models import AgentTask
 
 
@@ -81,16 +82,17 @@ _ROLE_INTENTS: dict[str, set[str]] = {
 }
 
 _DEFAULT_TASK_BLUEPRINTS: dict[tuple[str, str], list[dict[str, Any]]] = {
+    # Common flows are stable private contracts. They deliberately select the
+    # minimum reusable capability set and therefore do not require another LLM
+    # planning call inside the specialist.
     (EVIDENCE_RETRIEVER, "retrieve_evidence"): [
         {"intent": "evidence.get_market_evidence", "parameters": {}},
     ],
     (EVIDENCE_RETRIEVER, "analyze_stock_evidence"): [
         {"intent": "stock_analysis", "parameters": {}},
-        {"intent": "evidence.get_stock_evidence", "parameters": {}},
     ],
     (EVIDENCE_RETRIEVER, "compare_stock_evidence"): [
         {"intent": "market.compare_stocks", "parameters": {}},
-        {"intent": "evidence.get_market_evidence", "parameters": {}},
     ],
     (EVIDENCE_RETRIEVER, "resolve_context"): [
         {"intent": "evidence.get_market_evidence", "parameters": {}},
@@ -109,16 +111,16 @@ _DEFAULT_TASK_BLUEPRINTS: dict[tuple[str, str], list[dict[str, Any]]] = {
     (PORTFOLIO_ANALYST, "resolve_context"): [
         {"intent": "portfolio_state", "parameters": {}},
     ],
+    # Risk receives the Portfolio Agent's standardized result. It must not repeat
+    # account/profile retrieval unless its own risk capability needs to refresh it.
     (RISK_ANALYST, "analyze_risk"): [
         {"intent": "portfolio_risk", "parameters": {}},
-        {"intent": "user_profile", "parameters": {}},
     ],
     (RISK_ANALYST, "compare_risk"): [
         {"intent": "portfolio.compare_risk_before_after", "parameters": {}},
     ],
     (RISK_ANALYST, "review_risk_constraints"): [
         {"intent": "portfolio_risk", "parameters": {}},
-        {"intent": "user_profile", "parameters": {}},
     ],
     (RISK_ANALYST, "resolve_context"): [
         {"intent": "portfolio_risk", "parameters": {}},
@@ -154,7 +156,7 @@ def _stock_values(value: Any) -> list[str]:
     elif isinstance(value, str):
         cleaned = re.sub(r"^(?:请|帮我|比较|对比|分析|看看|股票|是|为|：|:|\s)+", "", value.strip(), flags=re.IGNORECASE)
         pieces = [item.strip() for item in re.split(r"(?:和|与|以及|、|，|,|/|\s+and\s+|\s+vs\.?\s+)", cleaned, flags=re.IGNORECASE) if item.strip()]
-        values = pieces if len(pieces) >= 2 else [value]
+        values = pieces if len(pieces) >= 2 else [cleaned or value]
     else:
         values = [value]
     result: list[str] = []
@@ -192,9 +194,15 @@ def _enrich_parameters(
     *,
     user_id: str,
     default_top_k: int,
+    current_user_request: str,
+    execution_context: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    args = dict(parameters or {})
-    args.setdefault("user_id", user_id)
+    args = sanitize_runtime_parameters(
+        parameters,
+        user_id=user_id,
+        current_user_request=current_user_request,
+        execution_context=execution_context,
+    )
     if "top_k" not in args and intent in {
         "ranking",
         "stock_analysis",
@@ -211,9 +219,11 @@ def _enrich_parameters(
         memory_stocks = _memory_value(
             context_service,
             task,
-            ["comparison_targets", "stock_codes", "stock_code", "active_stocks", "active_entities"],
+            ["comparison_targets", "stock_target", "stock_codes", "stock_code", "active_stocks", "active_entities"],
         )
         stocks = _stock_values(memory_stocks)
+        if not stocks:
+            stocks = _stock_values(current_user_request)
         if stocks:
             if intent in {"market.compare_stocks", "evidence.get_market_evidence"}:
                 args["stock_codes"] = stocks
@@ -449,6 +459,10 @@ class ScopedBusinessToolRuntime:
         self.llm_service = llm_service
 
     def _plan_internal_tasks(self, task: AgentTask, context: dict[str, Any]) -> list[dict[str, Any]]:
+        stable = _default_blueprints(task)
+        if stable:
+            return _normalize_internal_tasks(task, stable)
+
         catalog = _private_tool_catalog(task.assigned_agent)
         if not catalog:
             raise RuntimeError(f"specialist_private_capability_catalog_empty:{task.assigned_agent}")
@@ -569,6 +583,12 @@ class ScopedBusinessToolRuntime:
                 context_service,
                 user_id=user_id,
                 default_top_k=default_top_k,
+                current_user_request=str(
+                    ((context.get("auto_context") or {}).get("current_user_request") or "")
+                    if isinstance(context.get("auto_context"), dict)
+                    else ""
+                ),
+                execution_context=context,
             )
 
         names: list[str] = []
@@ -641,6 +661,9 @@ class ScopedBusinessToolRuntime:
         payload["tool_calls"] = [*lookup_calls, *list(payload.get("tool_calls") or [])]
         payload["warnings"] = [*lookup_warnings, *list(payload.get("warnings") or [])]
         payload["internal_task_count"] = len(internal_tasks) + len(lookup_calls)
+        payload["internal_plan_source"] = (
+            "stable_specialist_contract" if _default_blueprints(task) else "specialist_llm"
+        )
         payload["llm_profile_id"] = self.llm_service.profile_id
         payload["llm_config_hash"] = self.llm_service.config_hash
         return payload

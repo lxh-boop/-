@@ -6,6 +6,11 @@ from typing import Any
 from core.llm import LLMService
 
 from .agent_directory import AgentDirectory, REPORT_WRITER, STRATEGY_GUARD
+from .contracts import (
+    build_stable_analysis_tasks,
+    enforce_analysis_agent_scope,
+    enforce_risk_dependency,
+)
 from .models import AgentTask, TaskStatus
 
 
@@ -43,6 +48,21 @@ class CoordinatorPlanner:
         mode = str(request_mode or "analysis").strip().lower()
         if mode not in {"analysis", "proposal"}:
             raise CoordinatorPlanningError(f"unsupported_agent_request_mode:{mode}")
+
+        stable = (
+            build_stable_analysis_tasks(
+                query=query,
+                session_id=session_id,
+                run_id=run_id,
+            )
+            if mode == "analysis"
+            else None
+        )
+        if stable is not None:
+            tasks, metadata = stable
+            tasks = enforce_risk_dependency(tasks)
+            self._validate_dependencies(tasks)
+            return tasks, metadata
 
         cards = self.directory.safe_catalog()
 
@@ -94,6 +114,9 @@ class CoordinatorPlanner:
             "当 request_mode=proposal 时，必须包含 STRATEGY_GUARD 的 build_proposal/review_proposal 任务，"
             "并包含 REPORT_WRITER；STRATEGY_GUARD 只能生成待审批 Proposal，不能 Commit。"
             "当 request_mode=analysis 时，不得安排 STRATEGY_GUARD 生成 Proposal，除非用户明确要求审查已有方案。"
+            "只有用户明确涉及个人持仓、账户、现金、仓位、模拟盘或组合适配时，才能安排 PORTFOLIO_ANALYST。"
+            "RISK_ANALYST 只处理个人组合风险，并且必须依赖 PORTFOLIO_ANALYST 的账户与组合结果。"
+            "普通个股分析或个股风险问题只安排 EVIDENCE_RETRIEVER 和 REPORT_WRITER。"
             "严格输出 JSON：{\"tasks\":[{\"task_id\":\"task_1\","
             "\"assigned_agent\":\"...\",\"objective\":\"...\",\"task_type\":\"...\","
             "\"constraints\":[],\"dependency_task_ids\":[],"
@@ -151,6 +174,13 @@ class CoordinatorPlanner:
                     metadata={"request_mode": mode},
                 )
             )
+        tasks = (
+            enforce_analysis_agent_scope(tasks, query)
+            if mode == "analysis"
+            else enforce_risk_dependency(tasks)
+        )
+        if not tasks:
+            raise CoordinatorPlanningError("coordinator_plan_empty_after_scope_enforcement")
         self._validate_dependencies(tasks)
         return tasks, {
             "planner": "coordinator_llm",

@@ -180,7 +180,7 @@ class ContextService:
         *,
         current_user_request: str,
         dependency_results: dict[str, dict[str, Any]],
-        max_summary_chars: int = 6000,
+        max_summary_chars: int = 3000,
     ) -> dict[str, Any]:
         summary = self.memory.build_summary(
             task.session_id,
@@ -189,14 +189,16 @@ class ContextService:
         )
         dependencies = {
             task_id: {
+                "contract_version": str(result.get("contract_version") or "standardized_agent_result.v1"),
                 "agent_id": str(result.get("agent_id") or ""),
                 "status": str(result.get("status") or ""),
-                "summary": str(result.get("summary") or "")[:2000],
-                "findings": list(result.get("findings") or [])[:10],
+                "summary": str(result.get("summary") or "")[:1200],
+                "findings": list(result.get("findings") or [])[:8],
                 "recommendations": list(result.get("recommendations") or [])[:8],
-                "evidence_refs": list(result.get("evidence_refs") or [])[:20],
-                "artifact_refs": list(result.get("artifact_refs") or [])[:20],
-                "missing_items": list(result.get("missing_items") or [])[:10],
+                "evidence_refs": list(result.get("evidence_refs") or [])[:12],
+                "artifact_refs": list(result.get("artifact_refs") or [])[:12],
+                "missing_items": list(result.get("missing_items") or [])[:8],
+                "metadata": dict(result.get("metadata") or {}),
             }
             for task_id, result in dependency_results.items()
             if task_id in task.dependency_task_ids and isinstance(result, dict)

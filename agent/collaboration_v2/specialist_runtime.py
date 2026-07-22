@@ -10,6 +10,7 @@ from core.llm import LLMService
 
 from .agent_directory import REPORT_WRITER, STRATEGY_GUARD
 from .context_service import ContextService
+from .contracts import is_system_queryable_context_key, sanitize_runtime_parameters
 from .models import AgentResult, AgentTask, MemoryUpdate, MissingContextItem, ResultStatus, TaskStatus
 from .requirements import ContextRequirement, RequirementEngine
 from .tool_runtime import ScopedBusinessToolRuntime
@@ -139,6 +140,10 @@ def _missing_from_orchestration(orchestration: dict[str, Any]) -> list[MissingCo
                 keys.append(key)
     result: list[MissingContextItem] = []
     for key in list(dict.fromkeys(keys)):
+        if is_system_queryable_context_key(key):
+            # System-owned account/portfolio/profile data is never delegated to
+            # the user as a clarification request.
+            continue
         description = "需要分析的股票" if key in {"stock_target", "stock_code"} else key.replace("_", " ")
         expected = "股票名称或股票代码" if key in {"stock_target", "stock_code"} else "可识别的具体值"
         result.append(
@@ -358,7 +363,8 @@ class SpecialistRuntime:
                             break
             searched_sources[requirement.key] = list(dict.fromkeys(sources))
             if value in (None, "", [], {}):
-                unresolved.append(requirement)
+                if not is_system_queryable_context_key(requirement.key):
+                    unresolved.append(requirement)
             else:
                 resolved[requirement.key] = value
 
@@ -644,6 +650,8 @@ class SpecialistRuntime:
                 if not isinstance(item, dict):
                     continue
                 key = str(item.get("key") or "proposal_context")
+                if is_system_queryable_context_key(key):
+                    continue
                 missing_items.append(
                     MissingContextItem(
                         key=key,
@@ -657,6 +665,21 @@ class SpecialistRuntime:
                         ])),
                         blocking=True,
                     )
+                )
+            if not missing_items:
+                return AgentResult(
+                    task_id=task.task_id,
+                    agent_id=task.assigned_agent,
+                    status=ResultStatus.FAILED,
+                    summary="系统可查询上下文未能由内部能力取得，未向用户重复索取，且未进行任何写入。",
+                    warnings=["system_queryable_context_unavailable"],
+                    metadata={
+                        "task_type": task.task_type,
+                        "attempt": task.attempt,
+                        "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                        "internal_call_count": 0,
+                        "context_access_count": 0,
+                    },
                 )
             return AgentResult(
                 task_id=task.task_id,
@@ -688,8 +711,12 @@ class SpecialistRuntime:
             )
 
         capability = str(decision.get("capability") or "")
-        params = dict(decision.get("parameters") or {})
-        params.setdefault("user_id", user_id)
+        params = sanitize_runtime_parameters(
+            dict(decision.get("parameters") or {}),
+            user_id=user_id,
+            current_user_request=current_user_request,
+            execution_context=execution_context,
+        )
         try:
             raw = execute_tool_legacy_dict(
                 capability,
@@ -896,7 +923,7 @@ class SpecialistRuntime:
 
     def _generate_report(self, task: AgentTask, *, safe_results: dict[str, dict[str, Any]], language: str) -> str:
         system = (
-            "你是报告编写 Agent。只能使用给定的标准 AgentResult，不能请求或推断 Tool、原始持仓、"
+            "你是报告编写 Agent。只能使用给定的 standardized_agent_result.v1，不能请求或推断 Tool、原始持仓、"
             "原始证据或内部参数。清楚区分已完成、部分完成和信息不足；不得把 Proposal 写成已执行。"
         )
         return self.llm_service.generate_text(

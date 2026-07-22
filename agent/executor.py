@@ -31,6 +31,7 @@ from agent.context import (
     build_reporter_context,
 )
 from agent.collaboration_v2 import execute_unified_agent_request
+from agent.collaboration_v2.contracts import deterministic_completion_payload
 from agent.goal_planning import observe_goal_completion
 from agent.intent_decomposition.llm_decomposer import critique_report_with_llm, generate_report_with_llm
 from agent.handoff import AgentRole, HandoffCoordinator
@@ -3515,11 +3516,13 @@ def run_agent_request(
             }
         )
     route_context = dict(decomposition_context or {})
-    route_context.setdefault("user_id", user_id)
-    route_context.setdefault("session_id", session_id)
+    # Runtime identity is authoritative. Values produced by any model or inherited
+    # context are not allowed to replace the active user/session/run identity.
+    route_context["user_id"] = user_id
+    route_context["session_id"] = session_id
+    route_context["run_id"] = runtime.run_id
     route_context.setdefault("default_top_k", top_k)
     route_context.setdefault("candidate_redundancy_factor", DEFAULT_CANDIDATE_REDUNDANCY_FACTOR)
-    route_context.setdefault("run_id", runtime.run_id)
     route_context.setdefault("query", raw_query)
     route_context.setdefault("resolved_query", planner_query)
     route_context.setdefault("relation_type", resolved_turn.relation_type)
@@ -3744,6 +3747,7 @@ def run_agent_request(
         "success": bool(unified_execution.get("success")),
         "answer": str(unified_execution.get("answer") or ""),
         "task_results": task_results,
+        "standardized_agent_results": dict(unified_execution.get("standardized_agent_results") or {}),
         "tool_calls": [],
         "internal_tool_call_count": int(unified_execution.get("internal_tool_call_count") or 0),
         "execution_order": list(unified_execution.get("execution_order") or []),
@@ -3792,6 +3796,7 @@ def run_agent_request(
     result_data = {
         "agent_collaboration_v2": dict(unified_execution.get("agent_collaboration_v2") or {}),
         "task_results": task_results,
+        "standardized_agent_results": dict(unified_execution.get("standardized_agent_results") or {}),
         "agent_outputs": dict(unified_execution.get("agent_outputs") or {}),
         "missing_context": list(unified_execution.get("missing_context") or []),
         "need_clarification": bool(unified_execution.get("need_clarification")),
@@ -3935,90 +3940,22 @@ def run_agent_request(
         if isinstance(phase10_for_completion.get("semantic_goal"), dict)
         else decomposition.get("user_goal") or {}
     )
-    if semantic_goal_for_completion:
-        if initial_integrity.is_logic_error:
-            result_dict["llm_completion"] = terminal_completion_payload(initial_integrity)
-        else:
-            result_dict["llm_completion"] = observe_goal_completion(
-                semantic_goal_for_completion,
-                {
-                    "task_plan": phase10_for_completion.get("task_plan") or decomposition.get("task_plan") or {},
-                    "task_results": orchestration.get("task_results") if isinstance(orchestration, dict) else {},
-                    "result": result_dict,
-                    "orchestration_status": orchestration.get("execution_status") if isinstance(orchestration, dict) else "",
-                },
-                llm_service=llm_service,
-                context={
-                    "safe_context": build_observer_context(
-                        phase12_context_bundle,
-                        user_goal=semantic_goal_for_completion,
-                        task_plan=phase10_for_completion.get("task_plan") or decomposition.get("task_plan") or {},
-                        result=result_dict,
-                        orchestration=orchestration,
-                    ),
-                    "run_id": runtime.run_id,
-                },
-            ).to_dict()
-        trace_event("executor.completion.assessed", result_dict["llm_completion"], run_id=runtime.run_id)
-        if not isinstance(orchestration.get("task_results"), dict):
-            task_id = (
-                str((decomposition.get("tasks") or [{}])[0].get("task_id") or intent)
-                if isinstance(decomposition.get("tasks"), list)
-                else str(intent)
-            )
-            orchestration = {
-                **dict(orchestration or {}),
-                "task_results": {
-                    task_id: {
-                        "task_id": task_id,
-                        "intent": intent,
-                        "success": bool(result_dict.get("success")),
-                        "data": dict(result_dict.get("data") or {}),
-                        "arguments": dict(params or {}),
-                        "errors": list(result_dict.get("errors") or []),
-                    }
-                },
-                "replan_count": int(orchestration.get("replan_count") or 0),
-                "replan_audit": list(orchestration.get("replan_audit") or []),
-            }
-        orchestration, result_dict, completion_replan = _consume_post_execution_replan(
-            source="completion",
-            action=result_dict["llm_completion"].get("next_action"),
-            completion=result_dict["llm_completion"],
-            reflection=None,
-            orchestration=orchestration,
-            result_dict=result_dict,
-            user_goal=semantic_goal_for_completion,
-            user_id=user_id,
-            output_dir=output_dir,
-            db_path=db_path,
-            default_top_k=requested_top_k,
-            session_id=session_id,
-            language=language,
-            context=route_context,
+    # The single-entry collaboration flow already returns a bounded,
+    # standardized result contract. Completion is therefore assessed
+    # deterministically; the legacy LLM Completion Observer is not called with
+    # the full orchestration payload.
+    if initial_integrity.is_logic_error:
+        result_dict["llm_completion"] = terminal_completion_payload(initial_integrity)
+    else:
+        result_dict["llm_completion"] = deterministic_completion_payload(
+            unified_execution=unified_execution,
+            logic_error=False,
         )
-        if completion_replan.get("execution"):
-            result_dict["llm_completion"] = observe_goal_completion(
-                semantic_goal_for_completion,
-                {
-                    "task_plan": phase10_for_completion.get("task_plan") or decomposition.get("task_plan") or {},
-                    "task_results": orchestration.get("task_results") or {},
-                    "result": result_dict,
-                    "orchestration_status": orchestration.get("execution_status") or "",
-                },
-                llm_service=llm_service,
-                context={
-                    "safe_context": build_observer_context(
-                        phase12_context_bundle,
-                        user_goal=semantic_goal_for_completion,
-                        task_plan=phase10_for_completion.get("task_plan") or decomposition.get("task_plan") or {},
-                        result=result_dict,
-                        orchestration=orchestration,
-                    ),
-                    "run_id": runtime.run_id,
-                },
-            ).to_dict()
-            trace_event("executor.completion.reassessed_after_replan", result_dict["llm_completion"], run_id=runtime.run_id)
+    trace_event(
+        "executor.completion.assessed",
+        result_dict["llm_completion"],
+        run_id=runtime.run_id,
+    )
 
     try:
         context_manager.update_from_observation(
@@ -4267,26 +4204,23 @@ def run_agent_request(
                 *list((critic_replan.get("execution") or {}).get("tool_calls") or []),
             ]
             if critic_goal:
-                result_dict["llm_completion"] = observe_goal_completion(
-                    critic_goal,
-                    {
-                        "task_plan": phase10_for_completion.get("task_plan") or decomposition.get("task_plan") or {},
-                        "task_results": orchestration.get("task_results") or {},
-                        "result": result_dict,
-                        "orchestration_status": orchestration.get("execution_status") or "",
+                result_dict["llm_completion"] = deterministic_completion_payload(
+                    unified_execution={
+                        "success": bool(result_dict.get("success")),
+                        "execution_status": str(orchestration.get("execution_status") or ""),
+                        "standardized_agent_results": dict(
+                            orchestration.get("standardized_agent_results") or
+                            (result_dict.get("data") or {}).get("standardized_agent_results") or {}
+                        ),
+                        "need_clarification": bool(
+                            (result_dict.get("data") or {}).get("need_clarification")
+                        ),
+                        "missing_context": list(
+                            (result_dict.get("data") or {}).get("missing_context") or []
+                        ),
                     },
-                    llm_service=llm_service,
-                    context={
-                    "safe_context": build_observer_context(
-                        phase12_context_bundle,
-                        user_goal=semantic_goal_for_completion,
-                        task_plan=phase10_for_completion.get("task_plan") or decomposition.get("task_plan") or {},
-                        result=result_dict,
-                        orchestration=orchestration,
-                    ),
-                    "run_id": runtime.run_id,
-                },
-                ).to_dict()
+                    logic_error=False,
+                )
             answer_text = _sanitize_user_facing_answer(_answer(intent, result_dict, language), language)
         runtime_info["replan_count"] = int(orchestration.get("replan_count") or 0)
         runtime_info["replan_audit"] = list(orchestration.get("replan_audit") or [])

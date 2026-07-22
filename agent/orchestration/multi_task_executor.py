@@ -1826,8 +1826,9 @@ async def execute_multi_intent_plan_async(
         }
 
     execution_context = dict(context or {})
-    execution_context.setdefault("user_id", user_id)
-    execution_context.setdefault("session_id", session_id)
+    # Authoritative run identity must not be replaced by model-planned context.
+    execution_context["user_id"] = user_id
+    execution_context["session_id"] = session_id
     execution_context.setdefault("default_top_k", default_top_k)
     execution_context.setdefault(
         "artifact_metrics",

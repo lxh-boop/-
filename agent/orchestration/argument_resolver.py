@@ -419,10 +419,8 @@ def resolve_task_arguments(
         "user_profile",
     }
     if intent in user_scoped_intents:
-        resolved.setdefault(
-            "user_id",
-            context.get("user_id"),
-        )
+        # Runtime identity always overrides model-planned parameters.
+        resolved["user_id"] = context.get("user_id")
 
     top_k_intents = {
         "ranking",

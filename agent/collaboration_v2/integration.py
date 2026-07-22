@@ -6,6 +6,7 @@ from typing import Any
 from core.llm import LLMService
 
 from .control_gateway import ControlGateway
+from .contracts import STANDARDIZED_RESULTS_CONTRACT_VERSION
 from .coordinator import AgentCollaborationCoordinator
 from .entry_decision import EntryDecision, RequestMode
 from .llm_runtime import require_run_llm_service
@@ -111,6 +112,17 @@ def execute_unified_agent_request(
         run_id=str(run_id or ""),
         language=str(language or "zh"),
         execution_context=dict(context or {}),
+    )
+    result.setdefault(
+        "standardized_agent_results",
+        {
+            "contract_version": STANDARDIZED_RESULTS_CONTRACT_VERSION,
+            "items": [],
+            "task_count": 0,
+            "completed_count": 0,
+            "failed_count": 0,
+            "waiting_context_count": 0,
+        },
     )
     collab = result.setdefault("agent_collaboration_v2", {})
     collab["llm_binding"] = binding.public_dict()

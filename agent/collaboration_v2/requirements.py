@@ -5,6 +5,7 @@ from typing import Any
 
 from core.llm import LLMService
 
+from .contracts import is_system_queryable_context_key
 from .models import AgentTask
 
 
@@ -40,12 +41,69 @@ class RequirementEngine:
     def __init__(self, *, llm_service: LLMService) -> None:
         self.llm_service = llm_service
 
+    @staticmethod
+    def _stable_requirements(task: AgentTask) -> list[ContextRequirement] | None:
+        contracts: dict[str, list[ContextRequirement]] = {
+            "analyze_stock_evidence": [
+                ContextRequirement(
+                    key="stock_target",
+                    description="需要分析的股票",
+                    expected_format="股票名称或股票代码",
+                    required=True,
+                    search_queries=["股票目标", "stock_target", "stock_code"],
+                )
+            ],
+            "compare_stock_evidence": [
+                ContextRequirement(
+                    key="comparison_targets",
+                    description="两只或多只待比较股票",
+                    expected_format="至少两个股票名称或股票代码",
+                    required=True,
+                    search_queries=["比较对象", "comparison_targets", "stock_codes"],
+                )
+            ],
+            "retrieve_evidence": [],
+            "analyze_portfolio": [],
+            "analyze_portfolio_fit": [],
+            "compare_portfolios": [],
+            "analyze_risk": [],
+            "compare_risk": [],
+            "review_risk_constraints": [],
+            "write_report": [
+                ContextRequirement(
+                    key="specialist_results",
+                    description="上游专业 Agent 标准结果",
+                    expected_format="standardized_agent_results",
+                    required=True,
+                    search_queries=[],
+                )
+            ],
+            "summarize_results": [
+                ContextRequirement(
+                    key="specialist_results",
+                    description="上游专业 Agent 标准结果",
+                    expected_format="standardized_agent_results",
+                    required=True,
+                    search_queries=[],
+                )
+            ],
+        }
+        return contracts.get(task.task_type)
+
     def infer(
         self,
         task: AgentTask,
         *,
         auto_context: dict[str, Any],
     ) -> tuple[list[ContextRequirement], dict[str, Any]]:
+        stable = self._stable_requirements(task)
+        if stable is not None:
+            return stable, {
+                "source": "stable_requirement_contract",
+                "fallback_used": False,
+                "llm_profile_id": self.llm_service.profile_id,
+                "llm_config_hash": self.llm_service.config_hash,
+            }
         def validate(payload: dict[str, Any]) -> None:
             rows = payload.get("requirements")
             if not isinstance(rows, list):
@@ -97,9 +155,14 @@ class RequirementEngine:
         )
         result: list[ContextRequirement] = []
         for row in payload.get("requirements") or []:
+            key = str(row.get("key") or "")
+            if is_system_queryable_context_key(key):
+                # Account, holdings, cash and profile data are application-owned.
+                # Specialists must query them through their private read-only runtime.
+                continue
             result.append(
                 ContextRequirement(
-                    key=str(row.get("key") or ""),
+                    key=key,
                     description=str(row.get("description") or row.get("key") or ""),
                     expected_format=str(row.get("expected_format") or ""),
                     required=bool(row.get("required", True)),

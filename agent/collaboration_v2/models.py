@@ -44,6 +44,57 @@ def _dict_list(value: Any, *, limit: int = 100) -> list[dict[str, Any]]:
     return [dict(item) for item in list(value)[:limit] if isinstance(item, dict)]
 
 
+def _compact_contract_value(
+    value: Any,
+    *,
+    depth: int = 0,
+    max_depth: int = 4,
+    max_items: int = 10,
+    max_chars: int = 600,
+) -> Any:
+    """Bound data passed between specialists without dropping key business facts."""
+    if depth >= max_depth:
+        if isinstance(value, (dict, list, tuple, set)):
+            return "<summarized>"
+        return str(value)[:max_chars]
+    if isinstance(value, str):
+        return value[:max_chars] + ("…" if len(value) > max_chars else "")
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in list(value.items())[:max_items]:
+            lowered = str(key).lower()
+            if lowered in {
+                "raw_payload", "raw_tool_payload", "tool_calls", "arguments",
+                "sql", "traceback", "stack_trace", "confirmation_token",
+                "confirmation_token_hash", "api_key", "password", "secret",
+                "private_chain_of_thought", "chain_of_thought", "reasoning_content",
+            }:
+                continue
+            result[str(key)] = _compact_contract_value(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_chars=max_chars,
+            )
+        return result
+    if isinstance(value, (list, tuple, set)):
+        rows = list(value)
+        return [
+            _compact_contract_value(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_chars=max_chars,
+            )
+            for item in rows[:max_items]
+        ]
+    return str(value)[:max_chars]
+
+
 class TaskStatus(str, Enum):
     CREATED = "created"
     PENDING = "pending"
@@ -272,6 +323,50 @@ class AgentResult:
 
     def to_dict(self) -> dict[str, Any]:
         return _plain(self)
+
+    def standardized_for_handoff(self) -> dict[str, Any]:
+        """Compact, versioned contract used for Agent-to-Agent dependencies."""
+        safe_metadata = {
+            key: value
+            for key, value in self.metadata.items()
+            if key in {
+                "task_type",
+                "attempt",
+                "partial_reason",
+                "proposal_id",
+                "plan_id",
+                "requires_approval",
+            }
+        }
+        return {
+            "contract_version": "standardized_agent_result.v1",
+            "task_id": self.task_id,
+            "agent_id": self.agent_id,
+            "status": self.status.value,
+            "summary": self.summary[:1400],
+            "findings": [
+                _compact_contract_value(item, max_depth=4, max_items=8, max_chars=500)
+                for item in self.findings[:8]
+            ],
+            "recommendations": list(self.recommendations[:8]),
+            "confidence": self.confidence,
+            "evidence_refs": [
+                _compact_contract_value(item, max_depth=3, max_items=8, max_chars=300)
+                for item in self.evidence_refs[:12]
+            ],
+            "warnings": list(self.warnings[:8]),
+            "missing_items": [item.to_dict() for item in self.missing_items[:8]],
+            "artifact_refs": [
+                _compact_contract_value(item, max_depth=3, max_items=8, max_chars=300)
+                for item in self.artifact_refs[:12]
+            ],
+            "metadata": _compact_contract_value(
+                safe_metadata,
+                max_depth=3,
+                max_items=10,
+                max_chars=300,
+            ),
+        }
 
     def safe_for_coordinator(self) -> dict[str, Any]:
         # The coordinator receives only standardized specialist conclusions and
