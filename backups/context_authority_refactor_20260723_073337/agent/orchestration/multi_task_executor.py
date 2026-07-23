@@ -35,6 +35,7 @@ from agent.runtime_reliability import (
     classify_runtime_error,
     execute_with_policy,
 )
+from agent.replan_execution import ensure_replan_state
 
 
 READ_ONLY_MULTI_INTENTS = {
@@ -220,34 +221,6 @@ def _normalise_result(
             data.get("tool_name") or tool_name
         ),
     }
-
-
-def _artifact_ref_from_result(result: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(result, dict):
-        return {}
-    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-    raw_ref = metadata.get("artifact_ref") if isinstance(metadata.get("artifact_ref"), dict) else {}
-    artifact_id = str(result.get("artifact_id") or raw_ref.get("artifact_id") or "").strip()
-    if not artifact_id:
-        return {}
-    ref: dict[str, Any] = {"artifact_id": artifact_id}
-    for key in ("artifact_type", "schema_version", "producer_type", "producer_id", "tool_name"):
-        value = raw_ref.get(key) if raw_ref.get(key) not in (None, "") else result.get(key)
-        if value not in (None, ""):
-            ref[key] = value
-    return ref
-
-
-def _dedupe_artifact_refs(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for ref in refs:
-        artifact_id = str((ref or {}).get("artifact_id") or "")
-        if not artifact_id or artifact_id in seen:
-            continue
-        seen.add(artifact_id)
-        result.append(dict(ref))
-    return result
 
 
 def _filter_arguments(
@@ -1588,12 +1561,6 @@ async def _execute_task_async(
             "runtime_reliability": dict(reused.get("runtime_reliability") or {}),
             "artifact_reused": True,
             "artifact_id": artifact_id,
-            "artifact_refs": (
-                [dict(cached_result.get("artifact_ref") or {})]
-                if isinstance(cached_result.get("artifact_ref"), dict)
-                and cached_result.get("artifact_ref", {}).get("artifact_id")
-                else ([{"artifact_id": artifact_id}] if artifact_id else [])
-            ),
             "started_at": started_at,
             "finished_at": finished_at,
             "duration_seconds": round(time.perf_counter() - started_perf, 4),
@@ -1681,12 +1648,6 @@ async def _execute_task_async(
             warnings.append(f"{task_id} 有 {failed_count} 个批量项目执行失败。")
 
         finished_at = _now_iso()
-        batch_artifact_refs = _dedupe_artifact_refs([
-            ref
-            for item in item_results
-            for ref in [_artifact_ref_from_result(item)]
-            if ref
-        ])
         result = {
             "task_id": task_id,
             "intent": intent,
@@ -1705,12 +1666,6 @@ async def _execute_task_async(
             "message": "",
             "data": {"items": item_results},
             "items": item_results,
-            "artifact_refs": batch_artifact_refs,
-            "artifact_id": (
-                str(batch_artifact_refs[0].get("artifact_id") or "")
-                if len(batch_artifact_refs) == 1
-                else ""
-            ),
             "warnings": task_warnings,
             "errors": [] if success_count > 0 else ["all_batch_items_failed"],
             "started_at": started_at,
@@ -1735,12 +1690,9 @@ async def _execute_task_async(
         execution_context=task_execution_context,
     )
     finished_at = _now_iso()
-    single_artifact_ref = _artifact_ref_from_result(single_result)
-    single_artifact_id = str(single_artifact_ref.get("artifact_id") or "")
     if isinstance(artifact_cache, dict):
         artifact_cache[cache_key] = {
-            "artifact_id": single_artifact_id or f"runtime_cache_{cache_key[:16]}",
-            "artifact_ref": single_artifact_ref,
+            "artifact_id": f"runtime_cache_{cache_key[:16]}",
             "result": dict(single_result),
         }
 
@@ -1758,9 +1710,6 @@ async def _execute_task_async(
         "message": single_result.get("message", ""),
         "data": dict(single_result.get("data") or {}),
         "items": [],
-        "artifact_id": single_artifact_id,
-        "artifact_refs": [single_artifact_ref] if single_artifact_ref else [],
-        "metadata": dict(single_result.get("metadata") or {}),
         "warnings": list(single_result.get("warnings") or []),
         "errors": list(single_result.get("errors") or []),
         "runtime_reliability": single_result.get("runtime_reliability") or {},
@@ -1775,7 +1724,6 @@ async def _execute_task_async(
             "success": bool(single_result.get("success")),
             "arguments": arguments,
             "runtime_reliability": single_result.get("runtime_reliability") or {},
-            "artifact_ref": single_artifact_ref,
             "mcp": (
                 mcp_call_metadata(
                     tool_name=str(single_result.get("tool_name") or intent),
@@ -1878,8 +1826,9 @@ async def execute_multi_intent_plan_async(
         }
 
     execution_context = dict(context or {})
-    execution_context.setdefault("user_id", user_id)
-    execution_context.setdefault("session_id", session_id)
+    # Authoritative run identity must not be replaced by model-planned context.
+    execution_context["user_id"] = user_id
+    execution_context["session_id"] = session_id
     execution_context.setdefault("default_top_k", default_top_k)
     execution_context.setdefault(
         "artifact_metrics",
@@ -1927,9 +1876,15 @@ async def execute_multi_intent_plan_async(
     global_warnings: list[str] = []
     execution_batches: list[list[str]] = []
     observations: list[dict[str, Any]] = []
-    replan_audit: list[dict[str, Any]] = []
+    replan_state = ensure_replan_state(
+        execution_context.get("replan_state") if isinstance(execution_context.get("replan_state"), dict) else None,
+        replan_limit=MAX_REPLAN_ROUNDS,
+        replan_audit=execution_context.get("replan_audit") if isinstance(execution_context.get("replan_audit"), list) else None,
+    )
+    execution_context["replan_state"] = replan_state
+    replan_audit = replan_state["replan_audit"]
     invalid_replan_block_count = 0
-    replan_count = 0
+    replan_count = replan_state["replan_count"]
     replan_new_steps = 0
 
     while pending:
@@ -2044,6 +1999,9 @@ async def execute_multi_intent_plan_async(
         source_task_id, failed_task_id, failed_result, fingerprint = selected
         attempted_replans.add(fingerprint)
         replan_count += 1
+        replan_state["replan_count"] = replan_count
+        replan_state["executed_rounds"] = replan_count
+        replan_state["attempted_rounds"] += 1
         affected = _task_descendants(source_task_id, by_id)
         before_dag = _dag_snapshot(by_id)
         by_id[source_task_id] = _retry_task_with_feedback(
@@ -2185,12 +2143,12 @@ async def execute_multi_intent_plan_async(
     terminal_before_dag = _dag_snapshot(by_id)
     changed, terminal_warnings = _apply_terminal_replan_for_empty_dependencies(task_results, by_id)
     if changed:
-        replan_count += 1
         global_warnings.extend(terminal_warnings)
         replan_audit.append(
             {
-                "source": "deterministic_observe",
+                "source": "deterministic_observe_terminal_skip",
                 "trigger_reason": "empty_dependency_terminal_skip",
+                "status": "skipped_no_replan_execution",
                 "before_dag": terminal_before_dag,
                 "after_dag": _dag_snapshot(by_id),
                 "added_tasks": [],
@@ -2293,6 +2251,9 @@ async def execute_multi_intent_plan_async(
 
     if replan_candidates:
         replan_count += 1
+        replan_state["replan_count"] = replan_count
+        replan_state["executed_rounds"] = replan_count
+        replan_state["attempted_rounds"] += 1
         observations.append(
             {
                 **_observe_task_results(
@@ -2383,9 +2344,7 @@ async def execute_multi_intent_plan_async(
         success_value = True
     elif partial_success:
         execution_status = AgentTaskStatus.PARTIALLY_COMPLETED
-        # A partially completed business goal is not a successful request.
-        # Available results are still retained in task_results.
-        success_value = False
+        success_value = True
     else:
         execution_status = AgentTaskStatus.FAILED
         success_value = False
@@ -2404,6 +2363,7 @@ async def execute_multi_intent_plan_async(
         "observations": observations,
         "replan_count": replan_count,
         "replan_audit": replan_audit,
+        "replan_state": replan_state,
         "invalid_replan_block_count": invalid_replan_block_count,
         "replan_limits": {
             "max_rounds": MAX_REPLAN_ROUNDS,

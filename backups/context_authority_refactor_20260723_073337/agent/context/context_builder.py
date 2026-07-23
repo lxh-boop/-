@@ -71,7 +71,6 @@ class ContextManager:
         entities: dict[str, Any] | None = None,
         topics: list[str] | None = None,
         stock_codes: list[str] | None = None,
-        artifact_refs: list[dict[str, Any]] | None = None,
         memory_candidate_top_n: int = DEFAULT_MEMORY_CANDIDATE_TOP_N,
         memory_relevance_threshold: float = DEFAULT_MEMORY_RELEVANCE_THRESHOLD,
         memory_token_budget: int = DEFAULT_MEMORY_CONTEXT_TOKEN_BUDGET,
@@ -98,15 +97,6 @@ class ContextManager:
         items = list(memory_view.get("items") or [])
         diagnostics = dict(memory_view.get("diagnostics") or {})
         refs = list(memory_view.get("memory_refs") or [])
-        # Previous-turn artifacts are resolved by user + conversation scope.
-        # The current run_id is deliberately not required because the producer
-        # belongs to an earlier run in the same conversation.
-        artifact_context = self.resolver.artifact_context_from_refs(
-            list(artifact_refs or []),
-            user_id=str(user_id or "default"),
-            conversation_id=str(conversation_id or ""),
-            run_id="",
-        )
         return ContextBundle(
             user_id=str(user_id or "default"),
             conversation_id=str(conversation_id or ""),
@@ -152,7 +142,6 @@ class ContextManager:
                     "working_memory_model": "context_bundle_per_run",
                 },
             ),
-            artifact_context=artifact_context,
             memory_context=MemoryContext(
                 retrieval_id=str(memory_view.get("retrieval_id") or ""),
                 memory_refs=refs,
@@ -197,8 +186,6 @@ class ContextManager:
                 "memory_retrieval_id": str(memory_view.get("retrieval_id") or ""),
                 "working_memory_model": "context_bundle_per_run",
                 "working_memory_scope": "single_agent_run",
-                "context_authority": "conversation_state",
-                "artifact_reference_count": len(artifact_context.artifact_refs),
             },
         )
 

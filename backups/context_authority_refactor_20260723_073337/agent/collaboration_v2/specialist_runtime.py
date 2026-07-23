@@ -10,6 +10,7 @@ from core.llm import LLMService
 
 from .agent_directory import REPORT_WRITER, STRATEGY_GUARD
 from .context_service import ContextService
+from .contracts import is_system_queryable_context_key, sanitize_runtime_parameters
 from .models import AgentResult, AgentTask, MemoryUpdate, MissingContextItem, ResultStatus, TaskStatus
 from .requirements import ContextRequirement, RequirementEngine
 from .tool_runtime import ScopedBusinessToolRuntime
@@ -139,6 +140,10 @@ def _missing_from_orchestration(orchestration: dict[str, Any]) -> list[MissingCo
                 keys.append(key)
     result: list[MissingContextItem] = []
     for key in list(dict.fromkeys(keys)):
+        if is_system_queryable_context_key(key):
+            # System-owned account/portfolio/profile data is never delegated to
+            # the user as a clarification request.
+            continue
         description = "需要分析的股票" if key in {"stock_target", "stock_code"} else key.replace("_", " ")
         expected = "股票名称或股票代码" if key in {"stock_target", "stock_code"} else "可识别的具体值"
         result.append(
@@ -191,64 +196,19 @@ def _evidence_refs(orchestration: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _artifact_refs(orchestration: dict[str, Any]) -> list[dict[str, Any]]:
-    """Preserve persisted Artifact IDs across the specialist boundary.
-
-    Tool artifacts may appear at the task-result top level, in metadata, or in
-    the business data envelope.  Runtime cache identifiers are intentionally
-    not treated as persisted artifacts.
-    """
-
     refs: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    def add(value: Any, *, default_type: str = "tool_result") -> None:
-        if isinstance(value, str):
-            ref = {"artifact_id": value, "artifact_type": default_type}
-        elif isinstance(value, dict):
-            artifact_id = str(value.get("artifact_id") or "").strip()
-            if not artifact_id:
-                return
-            ref = {
-                str(key): _safe_scalar(item, 200)
-                for key, item in value.items()
-                if str(key).lower() not in _RAW_KEYS
-                and key in {
-                    "artifact_id", "artifact_type", "schema_version",
-                    "producer_type", "producer_id", "tool_name",
-                    "stock_code", "stock_name", "created_at", "expires_at",
-                }
-            }
-            ref.setdefault("artifact_id", artifact_id)
-            ref.setdefault("artifact_type", default_type)
-        else:
-            return
-        artifact_id = str(ref.get("artifact_id") or "")
-        if not artifact_id or artifact_id.startswith("runtime_cache_") or artifact_id in seen:
-            return
-        seen.add(artifact_id)
-        refs.append(ref)
-
     for result in (orchestration.get("task_results") or {}).values():
         if not isinstance(result, dict):
             continue
-        add(result)
-        metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-        add(metadata.get("artifact_ref"))
-        for ref in result.get("artifact_refs") or []:
-            add(ref)
         data = result.get("data") if isinstance(result.get("data"), dict) else {}
-        add(data)
-        for key in ("snapshot_id", "plan_id", "proposal_id"):
+        for key in ("artifact_id", "snapshot_id", "plan_id", "proposal_id"):
             if data.get(key):
-                add(
-                    {
-                        "artifact_type": key,
-                        "artifact_id": str(data[key])[:160],
-                    },
-                    default_type=key,
-                )
-        for ref in data.get("artifact_refs") or []:
-            add(ref)
+                refs.append({"artifact_type": key, "artifact_id": str(data[key])[:160]})
+        raw_refs = data.get("artifact_refs")
+        if isinstance(raw_refs, list):
+            for ref in raw_refs[:20]:
+                if isinstance(ref, dict):
+                    refs.append({k: _safe_scalar(v, 200) for k, v in ref.items() if str(k).lower() not in _RAW_KEYS})
     return refs[:50]
 
 
@@ -403,7 +363,8 @@ class SpecialistRuntime:
                             break
             searched_sources[requirement.key] = list(dict.fromkeys(sources))
             if value in (None, "", [], {}):
-                unresolved.append(requirement)
+                if not is_system_queryable_context_key(requirement.key):
+                    unresolved.append(requirement)
             else:
                 resolved[requirement.key] = value
 
@@ -689,6 +650,8 @@ class SpecialistRuntime:
                 if not isinstance(item, dict):
                     continue
                 key = str(item.get("key") or "proposal_context")
+                if is_system_queryable_context_key(key):
+                    continue
                 missing_items.append(
                     MissingContextItem(
                         key=key,
@@ -702,6 +665,21 @@ class SpecialistRuntime:
                         ])),
                         blocking=True,
                     )
+                )
+            if not missing_items:
+                return AgentResult(
+                    task_id=task.task_id,
+                    agent_id=task.assigned_agent,
+                    status=ResultStatus.FAILED,
+                    summary="系统可查询上下文未能由内部能力取得，未向用户重复索取，且未进行任何写入。",
+                    warnings=["system_queryable_context_unavailable"],
+                    metadata={
+                        "task_type": task.task_type,
+                        "attempt": task.attempt,
+                        "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                        "internal_call_count": 0,
+                        "context_access_count": 0,
+                    },
                 )
             return AgentResult(
                 task_id=task.task_id,
@@ -733,8 +711,12 @@ class SpecialistRuntime:
             )
 
         capability = str(decision.get("capability") or "")
-        params = dict(decision.get("parameters") or {})
-        params.setdefault("user_id", user_id)
+        params = sanitize_runtime_parameters(
+            dict(decision.get("parameters") or {}),
+            user_id=user_id,
+            current_user_request=current_user_request,
+            execution_context=execution_context,
+        )
         try:
             raw = execute_tool_legacy_dict(
                 capability,
@@ -941,7 +923,7 @@ class SpecialistRuntime:
 
     def _generate_report(self, task: AgentTask, *, safe_results: dict[str, dict[str, Any]], language: str) -> str:
         system = (
-            "你是报告编写 Agent。只能使用给定的标准 AgentResult，不能请求或推断 Tool、原始持仓、"
+            "你是报告编写 Agent。只能使用给定的 standardized_agent_result.v1，不能请求或推断 Tool、原始持仓、"
             "原始证据或内部参数。清楚区分已完成、部分完成和信息不足；不得把 Proposal 写成已执行。"
         )
         return self.llm_service.generate_text(

@@ -449,74 +449,28 @@ class SessionMemoryStore:
         session_id: str,
         *,
         task_objective: str = "",
-        max_chars: int = 3600,
-        limit: int = 18,
+        max_chars: int = 6000,
+        limit: int = 30,
     ) -> str:
-        """Build a compact specialist cache view, not a conversation transcript.
-
-        ConversationState is authoritative for the active goal and entities;
-        ArtifactStore is authoritative for full results.  Session memory only
-        contributes compact task-local facts and references.
-        """
-
         records = self.list_latest(session_id, limit=500)
         objective_tokens = _tokens(task_objective)
-        priority = {
-            "active_goal": 8.0,
-            "active_entities": 8.0,
-            "stock_target": 7.5,
-            "comparison_targets": 7.5,
-            "latest_result_ref": 7.0,
-            "latest_result_summary": 6.5,
-            "completed_dimensions": 6.0,
-            "missing_dimensions": 6.0,
-            "last_user_message": 4.0,
-        }
         ranked: list[tuple[float, SessionMemoryItem]] = []
         for item in records:
-            # Per-turn transcript mirrors are not injected automatically.  The
-            # authoritative turn resolver already supplies relevant turns.
-            if item.key.startswith("turn:"):
-                continue
             tokens = _tokens(" ".join([item.key, item.summary, _dumps(item.value)]))
-            relevance = (
-                len(objective_tokens & tokens) / max(1, len(objective_tokens))
-                if objective_tokens
-                else 0.0
-            )
-            base = priority.get(item.key, 0.0)
-            if item.key.startswith("agent_result:"):
-                base -= 1.0
-            score = (
-                base
-                + relevance * 5.0
-                + (1.0 if item.confirmed else 0.0)
-                + item.confidence
-                + min(item.version, 5) * 0.02
-            )
+            relevance = len(objective_tokens & tokens) / max(1, len(objective_tokens)) if objective_tokens else 0.0
+            score = relevance * 5.0 + (1.0 if item.confirmed else 0.0) + item.confidence + min(item.version, 5) * 0.02
             ranked.append((score, item))
         ranked.sort(key=lambda pair: (pair[0], pair[1].updated_at), reverse=True)
-
-        budget = max(600, min(int(max_chars or 3600), 3600))
         lines: list[str] = []
         used = 0
-        seen_text: set[str] = set()
-        for _, item in ranked[: max(1, min(24, int(limit or 18)))]:
+        for _, item in ranked[: max(1, int(limit or 30))]:
             marker = "confirmed" if item.confirmed else "unconfirmed"
-            per_item_limit = 320 if item.key.startswith("agent_result:") else 650
-            body = item.summary or _summary_from_value(item.value, max_chars=per_item_limit)
-            body = str(body or "")[:per_item_limit]
-            signature = " ".join(body.lower().split())[:180]
-            if signature and signature in seen_text:
-                continue
-            if signature:
-                seen_text.add(signature)
-            line = f"- {item.key} ({marker}, v{item.version}): {body}"
-            if used + len(line) + 1 > budget:
-                continue
+            line = f"- {item.key} ({marker}, v{item.version}): {item.summary or _summary_from_value(item.value)}"
+            if used + len(line) + 1 > max_chars:
+                break
             lines.append(line)
             used += len(line) + 1
-        return "\n".join(lines) if lines else "No reusable specialist working context is available."
+        return "\n".join(lines) if lines else "No reusable session context has been stored yet."
 
     def log_access(
         self,

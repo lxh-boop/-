@@ -22,15 +22,7 @@ _CONFIRM = {"确认", "确认执行", "同意", "执行", "可以执行", "yes",
 _CANCEL = {"取消", "不用了", "停止", "终止", "算了", "撤销", "cancel", "stop", "abort", "never mind"}
 _TOPIC_SWITCH = ("换个问题", "换一个问题", "另外一个问题", "另外问", "先不说这个", "先看别的", "重新开始", "新问题", "new question", "change topic", "something else")
 _CORRECTION = ("不是", "不对", "更正", "改成", "应该是", "我说的是", "我的意思是", "纠正", "no,", "not that", "i mean", "change it to", "correction")
-_CONTINUATION = (
-    "继续", "接着", "往下", "展开", "详细一点", "再详细", "再分析", "进一步",
-    "还需要更详细", "更详细的分析", "更详细", "深入分析", "详细分析", "补充分析",
-    "接着分析", "继续分析", "继续说", "展开说说", "然后呢", "还有呢",
-    "continue", "go on", "more detail", "more detailed", "elaborate", "next",
-)
-_FRESHNESS = ("当前", "现在", "最新", "重新查询", "重新查", "刷新", "今天", "实时", "latest", "current", "refresh", "re-query")
-_STOCK_CODE = re.compile(r"(?<![\d.])([034689]\d{5})(?:\.(?:SH|SZ|BJ))?(?!\d)", re.IGNORECASE)
-_STOCK_AMOUNT_SUFFIX = re.compile(r"^(?:元|万|万元|亿|亿元|%|％)")
+_CONTINUATION = ("继续", "接着", "往下", "展开", "详细一点", "再详细", "再分析", "进一步", "然后呢", "还有呢", "continue", "go on", "more detail", "elaborate", "next")
 _REFERENCE = ("这只股票", "该股票", "这只", "该股", "它", "这个", "上述", "上面", "刚才", "之前", "前面", "这个结果", "这个方案", "这个计划", "这条新闻", "为什么", "怎么", "如何", "那风险", "那收益", "this stock", "that stock", "it", "this result", "that result", "the previous", "above", "why", "how", "what about")
 _QUESTION = ("为什么", "怎么", "如何", "什么原因", "是否", "能不能", "可以吗", "多少", "哪", "谁", "什么", "why", "how", "what", "which", "where", "when", "can ", "could ", "is ", "are ")
 _CLARIFY = ("请提供", "请说明", "请明确", "请补充", "请指定", "具体是哪", "哪一", "哪个", "哪只", "which", "please provide", "please specify", "please clarify")
@@ -159,8 +151,6 @@ class ResolvedTurn:
     inherited_parameters: dict[str, Any] = field(default_factory=dict)
     active_entities: dict[str, Any] = field(default_factory=dict)
     reference_turn_ids: list[str] = field(default_factory=list)
-    reference_artifact_refs: list[dict[str, Any]] = field(default_factory=list)
-    reference_mode: str = ""
     recent_messages: list[dict[str, Any]] = field(default_factory=list)
     confidence: float = 0.0
     warnings: list[str] = field(default_factory=list)
@@ -193,8 +183,7 @@ class ResolvedTurn:
                 "is_follow_up": is_follow_up,
                 "reference_source": "conversation_state",
                 "reference_turn_ids": list(self.reference_turn_ids),
-                "reference_artifact_refs": list(self.reference_artifact_refs),
-                "reference_mode": self.reference_mode,
+                "reference_artifact_refs": [],
                 "reference_summary": self.previous_result_summary,
             },
         }
@@ -524,149 +513,31 @@ def _entities(
     return result
 
 
-def _extract_stock_codes(text: str) -> list[str]:
-    """Extract explicit A-share security codes without treating amounts as codes."""
-
-    raw = str(text or "")
-    result: list[str] = []
-    for match in _STOCK_CODE.finditer(raw):
-        suffix = raw[match.end(): match.end() + 3]
-        if _STOCK_AMOUNT_SUFFIX.match(suffix):
-            continue
-        code = str(match.group(1) or "")
-        if code and code not in result:
-            result.append(code)
-    return result
-
-
 def _explicit(text: str) -> dict[str, Any]:
-    """Extract only high-confidence identifiers needed for deterministic continuity.
+    """Do not infer business parameters with local regex rules.
 
-    All other business parameters remain LLM-planned.  This keeps the resolver
-    from guessing dates, amounts or weights while still making an explicit
-    stock target authoritative from the first turn.
+    The raw user message is always sent to the LLM planner together with the
+    pending clarification and prior structured state.  Only structured outputs
+    produced by the planner/tools are inherited between turns.
     """
 
-    codes = _extract_stock_codes(text)
-    if len(codes) == 1:
-        return {"stock_code": codes[0], "stock_codes": codes}
-    if codes:
-        return {"stock_codes": codes}
+    del text
     return {}
 
 
-def _artifact_ref(value: Any) -> dict[str, Any]:
-    if isinstance(value, str):
-        artifact_id = value.strip()
-        return {"artifact_id": artifact_id} if artifact_id else {}
-    if not isinstance(value, dict):
-        return {}
-    artifact_id = str(value.get("artifact_id") or "").strip()
-    if not artifact_id:
-        return {}
-    result = {"artifact_id": artifact_id}
-    for key in (
-        "artifact_type", "schema_version", "producer_type", "producer_id",
-        "tool_name", "stock_code", "stock_name", "created_at", "expires_at",
-    ):
-        item = value.get(key)
-        if item not in _EMPTY:
-            result[key] = item
-    return result
-
-
-def _extract_artifact_refs(value: Any, depth: int = 0) -> list[dict[str, Any]]:
-    if depth > 12:
-        return []
-    refs: list[dict[str, Any]] = []
-    if isinstance(value, dict):
-        direct = _artifact_ref(value)
-        if direct:
-            refs.append(direct)
-        for key, item in value.items():
-            name = str(key).lower()
-            if name in {"artifact_refs", "reference_artifact_refs", "evidence_refs"} and isinstance(item, list):
-                for ref in item:
-                    parsed = _artifact_ref(ref)
-                    if parsed:
-                        refs.append(parsed)
-            elif name == "artifact_ref":
-                parsed = _artifact_ref(item)
-                if parsed:
-                    refs.append(parsed)
-            refs.extend(_extract_artifact_refs(item, depth + 1))
-    elif isinstance(value, (list, tuple)):
-        for item in value[:100]:
-            refs.extend(_extract_artifact_refs(item, depth + 1))
-    deduped: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for ref in refs:
-        artifact_id = str(ref.get("artifact_id") or "")
-        if not artifact_id or artifact_id in seen:
-            continue
-        seen.add(artifact_id)
-        deduped.append(ref)
-    return deduped
-
-
-_INTERNAL_SUMMARIES = {
-    "deterministic_registered_capability_fallback",
-    "llm completion observer unavailable; deterministic output contract is incomplete.",
-    "deterministic output contract is incomplete.",
-}
-
-
-def _summary_candidate(value: Any) -> str:
-    if isinstance(value, str):
-        text = _text(value)
-        if text and text.lower() not in _INTERNAL_SUMMARIES:
-            return text
-    if isinstance(value, dict):
-        for key in ("answer", "final_answer", "report", "message"):
-            candidate = _summary_candidate(value.get(key))
-            if candidate:
-                return candidate
-        data = value.get("data") if isinstance(value.get("data"), dict) else {}
-        for key in ("summary", "analysis_conclusion", "result_summary"):
-            candidate = _summary_candidate(data.get(key))
-            if candidate:
-                return candidate
-        for key in ("summary", "result_summary", "reference_summary", "latest_result_summary", "content"):
-            candidate = _summary_candidate(value.get(key))
-            if candidate:
-                return candidate
-        for key in ("result", "produced_outputs", "conversation_state_after_run"):
-            candidate = _summary_candidate(value.get(key))
-            if candidate:
-                return candidate
-    return ""
-
-
-def _meaningful_result_summary(agent_result: dict[str, Any], assistant_text: str) -> str:
-    candidate = _summary_candidate(agent_result)
-    if candidate:
-        return candidate
-    text = _text(assistant_text)
-    return "" if text.lower() in _INTERNAL_SUMMARIES else text
-
-
-def _last_state(
-    messages: list[ConversationMessage],
-) -> tuple[dict[str, Any], str, dict[str, Any], list[str], list[dict[str, Any]]]:
+def _last_state(messages: list[ConversationMessage]) -> tuple[dict[str, Any], str, dict[str, Any], list[str]]:
     for index in range(len(messages) - 1, -1, -1):
         item = messages[index]
         if item.role != "assistant" or not item.agent_result:
             continue
         goal = _first_mapping(item.agent_result, "user_goal")
-        after_run = _first_mapping(item.agent_result, "conversation_state_after_run")
-        if not goal and isinstance(after_run.get("active_goal"), dict):
-            goal = dict(after_run.get("active_goal") or {})
-        summary = _meaningful_result_summary(item.agent_result, item.content)
-        artifact_refs = _extract_artifact_refs(item.agent_result)
+        summary = _first_text(item.agent_result, {"reason_summary", "result_summary", "reference_summary"}) or item.content
         refs = [value for value in (item.message_id, item.run_id) if value]
         previous = _previous_user(messages, index)
         entities: dict[str, Any] = {}
         if previous is not None:
+            # The user's explicit values are the strongest source and prevent a
+            # bulk ranking result from becoming the active topic by accident.
             entities.update(_explicit(previous.content))
             refs.insert(0, previous.message_id)
             if not goal:
@@ -679,20 +550,10 @@ def _last_state(
                     "expected_outputs": [],
                     "source": "conversation_state_reconstruction",
                 }
-        if isinstance(after_run.get("active_entities"), dict):
-            entities.update(after_run.get("active_entities") or {})
         for entity_key, entity_value in _entities(item.agent_result).items():
             entities.setdefault(entity_key, entity_value)
-        if len(entities.get("stock_codes") or []) == 1 and not entities.get("stock_code"):
-            entities["stock_code"] = list(entities["stock_codes"])[0]
-        return (
-            goal,
-            summary,
-            entities,
-            list(dict.fromkeys(refs)),
-            artifact_refs,
-        )
-    return {}, "", {}, [], []
+        return goal, summary, entities, list(dict.fromkeys(refs))
+    return {}, "", {}, []
 
 
 def _marker_text(text: str) -> str:
@@ -805,69 +666,46 @@ def _is_retry_of_goal(raw: str, goal: dict[str, Any]) -> bool:
     )
 
 
-def _active_subject(active: dict[str, Any], goal: dict[str, Any]) -> str:
-    stock_name = str(active.get("stock_name") or goal.get("stock_name") or "").strip()
-    stock_code = str(active.get("stock_code") or goal.get("stock_code") or "").strip()
-    if not stock_code:
-        codes = active.get("stock_codes") or goal.get("stock_codes") or []
-        if isinstance(codes, list) and len(codes) == 1:
-            stock_code = str(codes[0] or "").strip()
-    if stock_name and stock_code:
-        return f"{stock_name}（{stock_code}）"
-    return stock_name or stock_code or "上一轮对象"
-
-
-def _resolved_message(
-    *,
-    relation: str,
-    raw: str,
-    goal: dict[str, Any],
-    summary: str,
-    pending: dict[str, Any],
-    active: dict[str, Any],
-    explicit: dict[str, Any],
-    inherited: dict[str, Any],
-) -> str:
-    del summary, explicit, inherited
-    if relation in {
-        RELATION_NEW_GOAL,
-        RELATION_RETRY_GOAL,
-        RELATION_CONFIRMATION,
-        RELATION_CANCELLATION,
-        RELATION_TOPIC_SWITCH,
-    }:
+def _resolved_message(*, relation: str, raw: str, goal: dict[str, Any], summary: str, pending: dict[str, Any], active: dict[str, Any], explicit: dict[str, Any], inherited: dict[str, Any]) -> str:
+    if relation in {RELATION_NEW_GOAL, RELATION_RETRY_GOAL, RELATION_CONFIRMATION, RELATION_CANCELLATION, RELATION_TOPIC_SWITCH}:
         return raw
-    subject = _active_subject(active, goal)
-    if relation == RELATION_CONTINUATION:
-        if "详细" in raw:
-            return f"对{subject}进行更详细的分析。"
-        return f"继续上一轮关于{subject}的目标：{raw}"
-    if relation == RELATION_FOLLOW_UP:
-        return f"基于上一轮关于{subject}的结果回答：{raw}"
-    if relation == RELATION_CORRECTION:
-        return f"继续上一轮关于{subject}的目标，并按本轮纠正处理：{raw}"
     if relation == RELATION_CLARIFICATION_ANSWER:
-        original = _text(pending.get("original_query")) or _text(goal.get("raw_message"))
-        prefix = f"继续完成原始目标“{original}”。" if original else "继续完成上一轮目标。"
-        return f"{prefix}用户补充：{raw}"
-    return raw
-
-
-def _reference_mode(relation: str, raw: str, artifact_refs: list[dict[str, Any]]) -> str:
-    if _contains(raw, _FRESHNESS):
-        return "current_state"
-    if relation in {RELATION_FOLLOW_UP, RELATION_CONTINUATION, RELATION_CORRECTION}:
-        return "previous_result" if artifact_refs else "conversation_state"
-    if relation == RELATION_CLARIFICATION_ANSWER:
-        return "conversation_state"
-    return "current_state"
+        payload = {
+            "relation_type": relation,
+            "original_user_request": pending.get("original_query"),
+            "pending_clarification_question": pending.get("clarification_question"),
+            "missing_information": pending.get("missing_information") or [],
+            "user_answer": raw,
+            "explicit_parameters_from_answer": explicit,
+            "previous_user_goal": goal,
+        }
+        return (
+            "以下内容是同一会话中上一轮澄清问题的回答。必须恢复并继续完成原始目标，"
+            "不能把用户回答重新解释成一个无关的独立问题。\n"
+            + json.dumps(payload, ensure_ascii=False, default=str)
+        )
+    payload = {
+        "relation_type": relation,
+        "current_user_message": raw,
+        "previous_user_goal": goal,
+        "previous_result_summary": summary[:1800],
+        "active_entities": active,
+        "explicit_parameters": explicit,
+        "inherited_parameters": inherited,
+    }
+    instruction = {
+        RELATION_FOLLOW_UP: "这是对上一轮结果的追问。继承未被本轮显式覆盖的有效实体和参数。",
+        RELATION_CORRECTION: "这是对上一轮内容的纠正。本轮显式内容优先，并继续原目标。",
+        RELATION_CONTINUATION: "这是继续执行或继续解释上一轮目标的请求。",
+    }.get(relation, "结合当前会话状态理解本轮请求。")
+    return instruction + " 不得把指代词或简短补充内容当作完全独立的新问题。\n" + json.dumps(payload, ensure_ascii=False, default=str)
 
 
 def resolve_turn_from_messages(raw_message: str, *, conversation_id: str, messages: list[ConversationMessage], warnings: list[str] | None = None) -> ResolvedTurn:
     raw = _text(raw_message)
     history = _drop_current_echo(list(messages), raw)
     pending = _pending(history)
-    goal, summary, active, refs, artifact_refs = _last_state(history)
+    goal, summary, active, refs = _last_state(history)
     explicit = _explicit(raw)
 
     if pending:
@@ -891,18 +729,14 @@ def resolve_turn_from_messages(raw_message: str, *, conversation_id: str, messag
         # clarification question. Clear the stale pending state.
         relation, confidence = RELATION_RETRY_GOAL, 0.99
         pending = {}
-    elif pending and (_contains(raw, _CONTINUATION) or (_contains(raw, _QUESTION) and not explicit)):
-        # A new question or continuation is not a value for the pending slot.
-        relation, confidence = (RELATION_CONTINUATION, 0.96) if _contains(raw, _CONTINUATION) else (RELATION_FOLLOW_UP, 0.9)
-        pending = {}
     elif pending:
         relation, confidence = RELATION_CLARIFICATION_ANSWER, 0.98
     elif _is_retry_of_goal(raw, goal):
         relation, confidence = RELATION_RETRY_GOAL, 0.97
     elif _contains(raw, _CORRECTION):
         relation, confidence = RELATION_CORRECTION, 0.92
-    elif _contains(raw, _CONTINUATION) and (goal or active or artifact_refs):
-        relation, confidence = RELATION_CONTINUATION, 0.96
+    elif _contains(raw, _CONTINUATION):
+        relation, confidence = RELATION_CONTINUATION, 0.92
     else:
         follows, score = _looks_follow_up(raw, goal, summary, active, explicit)
         relation = RELATION_FOLLOW_UP if follows else RELATION_NEW_GOAL
@@ -916,11 +750,7 @@ def resolve_turn_from_messages(raw_message: str, *, conversation_id: str, messag
         summary = ""
         active = {}
         refs = []
-        artifact_refs = []
         pending = {}
-
-    if explicit:
-        active = {**active, **explicit}
 
     inherited: dict[str, Any] = {}
     if relation in {RELATION_FOLLOW_UP, RELATION_CLARIFICATION_ANSWER, RELATION_CORRECTION, RELATION_CONTINUATION}:
@@ -929,8 +759,6 @@ def resolve_turn_from_messages(raw_message: str, *, conversation_id: str, messag
         inherited.pop(key, None)
     if relation == RELATION_CLARIFICATION_ANSWER:
         inherited.update(explicit)
-
-    reference_mode = _reference_mode(relation, raw, artifact_refs)
 
     resolved = _resolved_message(
         relation=relation, raw=raw, goal=goal, summary=summary, pending=pending,
@@ -948,8 +776,6 @@ def resolve_turn_from_messages(raw_message: str, *, conversation_id: str, messag
         inherited_parameters=inherited,
         active_entities=active,
         reference_turn_ids=refs[:20],
-        reference_artifact_refs=artifact_refs[:20],
-        reference_mode=reference_mode,
         recent_messages=_select_relevant_history(
             history,
             raw,
@@ -999,8 +825,6 @@ def merge_planner_context(base_context: dict[str, Any] | None, turn: ResolvedTur
         "active_entities": dict(turn.active_entities),
         "pending_clarification": dict(turn.pending_clarification),
         "reference_turn_ids": list(turn.reference_turn_ids),
-        "reference_artifact_refs": list(turn.reference_artifact_refs),
-        "reference_mode": turn.reference_mode,
         "confidence": turn.confidence,
         "warnings": list(turn.warnings),
     }

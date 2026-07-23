@@ -24,15 +24,6 @@ def build_planner_context(
     )
     is_follow_up = bool((turn.get("follow_up") or {}).get("is_follow_up"))
     memory = bundle.memory_context
-    follow_up = dict(turn.get("follow_up") or {})
-    if is_follow_up and not follow_up.get("reference_artifact_refs"):
-        follow_up["reference_artifact_refs"] = list(
-            bundle.artifact_context.artifact_refs or []
-        )[:12]
-    follow_up.setdefault(
-        "reference_mode",
-        str((turn.get("conversation_state") or {}).get("reference_mode") or ""),
-    )
     return {
         "context_id": bundle.context_id,
         "user_id": bundle.user_id,
@@ -48,7 +39,7 @@ def build_planner_context(
                 or []
             )[:8],
         },
-        "follow_up": follow_up,
+        "follow_up": dict(turn.get("follow_up") or {}),
         "previous_user_goal": (
             dict(turn.get("previous_user_goal") or {}) if is_follow_up else {}
         ),
@@ -92,11 +83,6 @@ def build_planner_context(
             "token_present": bundle.approval_context.token_present,
         },
         "artifact_refs": list(bundle.artifact_context.artifact_refs)[:12],
-        "context_authority": {
-            "source": "conversation_state",
-            "artifact_store_role": "business_result_authority",
-            "session_memory_role": "specialist_working_cache",
-        },
         "target_portfolio_refs": list(target_portfolio_refs or [])[:8],
         "strategy_context": _compact_strategy_context(strategy_context or {}),
         "default_top_k": default_top_k,

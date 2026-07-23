@@ -31,6 +31,7 @@ from agent.context import (
     build_reporter_context,
 )
 from agent.collaboration_v2 import execute_unified_agent_request
+from agent.collaboration_v2.contracts import deterministic_completion_payload
 from agent.goal_planning import observe_goal_completion
 from agent.intent_decomposition.llm_decomposer import critique_report_with_llm, generate_report_with_llm
 from agent.handoff import AgentRole, HandoffCoordinator
@@ -3266,96 +3267,6 @@ def _llm_first_semantic_critic(
     return answer, review
 
 
-def _authoritative_entities_from_result(
-    result: Any,
-    *,
-    inherited: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Collect only explicit business entity fields from the final result."""
-
-    entities = dict(inherited or {})
-    codes: list[str] = []
-    names: list[str] = []
-
-    def visit(value: Any, depth: int = 0) -> None:
-        if depth > 10:
-            return
-        if isinstance(value, dict):
-            for key, item in value.items():
-                name = str(key)
-                if name == "stock_code":
-                    code = str(item or "").strip().upper().split(".")[0]
-                    if re.fullmatch(r"[034689]\d{5}", code) and code not in codes:
-                        codes.append(code)
-                elif name == "stock_codes" and isinstance(item, list):
-                    for raw in item[:20]:
-                        code = str(raw or "").strip().upper().split(".")[0]
-                        if re.fullmatch(r"[034689]\d{5}", code) and code not in codes:
-                            codes.append(code)
-                elif name == "stock_name":
-                    stock_name = str(item or "").strip()
-                    if stock_name and stock_name not in names:
-                        names.append(stock_name)
-                elif name in {"user_id", "conversation_id", "run_id", "task_id"}:
-                    continue
-                visit(item, depth + 1)
-        elif isinstance(value, list):
-            for item in value[:50]:
-                visit(item, depth + 1)
-
-    visit(result)
-    inherited_codes = entities.get("stock_codes")
-    if isinstance(inherited_codes, list):
-        for item in inherited_codes:
-            code = str(item or "")
-            if code and code not in codes:
-                codes.insert(0, code)
-    inherited_code = str(entities.get("stock_code") or "")
-    if inherited_code and inherited_code not in codes:
-        codes.insert(0, inherited_code)
-    if codes:
-        entities["stock_codes"] = codes
-        if len(codes) == 1:
-            entities["stock_code"] = codes[0]
-    if names and not entities.get("stock_name"):
-        entities["stock_name"] = names[0]
-    return entities
-
-
-def _conversation_state_after_run(
-    *,
-    resolved_turn: ResolvedTurn,
-    raw_query: str,
-    planner_query: str,
-    result_dict: dict[str, Any],
-    answer_text: str,
-    artifact_refs: list[dict[str, Any]],
-    active_goal: dict[str, Any] | None,
-    run_id: str,
-) -> dict[str, Any]:
-    entities = _authoritative_entities_from_result(
-        result_dict,
-        inherited=dict(resolved_turn.active_entities or {}),
-    )
-    goal = dict(active_goal or {})
-    if not goal:
-        goal = {
-            "raw_message": raw_query,
-            "resolved_message": planner_query,
-            "action": "continue_previous_goal",
-        }
-    return {
-        "authority_version": "conversation_state.v2",
-        "active_goal": goal,
-        "active_entities": entities,
-        "latest_result_summary": str(answer_text or "")[:1200],
-        "latest_artifact_refs": list(artifact_refs or [])[:20],
-        "source_run_id": str(run_id or ""),
-        "relation_type": resolved_turn.relation_type,
-        "reference_mode": resolved_turn.reference_mode,
-    }
-
-
 def run_agent_request(
     query: str,
     user_id: str = "default",
@@ -3499,39 +3410,16 @@ def run_agent_request(
     runtime_budget = RuntimeBudget(runtime_policy)
     runtime_circuit_registry = CircuitBreakerRegistry(runtime_policy)
     context_manager = ContextManager(db_path=db_path, output_dir=output_dir)
-    authoritative_stock_codes = list(
-        dict.fromkeys(
-            [
-                *(
-                    list(resolved_turn.active_entities.get("stock_codes") or [])
-                    if isinstance(resolved_turn.active_entities.get("stock_codes"), list)
-                    else []
-                ),
-                *(
-                    [str(resolved_turn.active_entities.get("stock_code") or "")]
-                    if resolved_turn.active_entities.get("stock_code")
-                    else []
-                ),
-                *re.findall(r"(?<![\d.])([034689]\d{5})(?:\.(?:SH|SZ|BJ))?(?!\d)", raw_query, flags=re.IGNORECASE),
-            ]
-        )
-    )
     phase12_context_bundle = context_manager.create_initial_context(
         user_id=user_id,
         query=planner_query,
         conversation_id=session_id,
         run_id=runtime.run_id,
         locale="zh-CN" if language == REPLY_LANGUAGE_ZH else "en-US",
-        user_goal={
-            "raw_message": raw_query,
-            "resolved_message": planner_query,
-            "relation_type": resolved_turn.relation_type,
-        },
         relation_type=resolved_turn.relation_type,
-        task_type=_memory_task_hint(raw_query),
+        task_type=_memory_task_hint(planner_query),
         entities=dict(resolved_turn.active_entities or {}),
-        stock_codes=[item for item in authoritative_stock_codes if item],
-        artifact_refs=list(resolved_turn.reference_artifact_refs or []),
+        stock_codes=list(dict.fromkeys(re.findall(r"(?<!\d)(\d{6})(?!\d)", planner_query))),
         memory_candidate_top_n=40,
         memory_relevance_threshold=0.42,
         memory_token_budget=360,
@@ -3628,11 +3516,13 @@ def run_agent_request(
             }
         )
     route_context = dict(decomposition_context or {})
-    route_context.setdefault("user_id", user_id)
-    route_context.setdefault("session_id", session_id)
+    # Runtime identity is authoritative. Values produced by any model or inherited
+    # context are not allowed to replace the active user/session/run identity.
+    route_context["user_id"] = user_id
+    route_context["session_id"] = session_id
+    route_context["run_id"] = runtime.run_id
     route_context.setdefault("default_top_k", top_k)
     route_context.setdefault("candidate_redundancy_factor", DEFAULT_CANDIDATE_REDUNDANCY_FACTOR)
-    route_context.setdefault("run_id", runtime.run_id)
     route_context.setdefault("query", raw_query)
     route_context.setdefault("resolved_query", planner_query)
     route_context.setdefault("relation_type", resolved_turn.relation_type)
@@ -3857,6 +3747,7 @@ def run_agent_request(
         "success": bool(unified_execution.get("success")),
         "answer": str(unified_execution.get("answer") or ""),
         "task_results": task_results,
+        "standardized_agent_results": dict(unified_execution.get("standardized_agent_results") or {}),
         "tool_calls": [],
         "internal_tool_call_count": int(unified_execution.get("internal_tool_call_count") or 0),
         "execution_order": list(unified_execution.get("execution_order") or []),
@@ -3905,6 +3796,7 @@ def run_agent_request(
     result_data = {
         "agent_collaboration_v2": dict(unified_execution.get("agent_collaboration_v2") or {}),
         "task_results": task_results,
+        "standardized_agent_results": dict(unified_execution.get("standardized_agent_results") or {}),
         "agent_outputs": dict(unified_execution.get("agent_outputs") or {}),
         "missing_context": list(unified_execution.get("missing_context") or []),
         "need_clarification": bool(unified_execution.get("need_clarification")),
@@ -4048,90 +3940,22 @@ def run_agent_request(
         if isinstance(phase10_for_completion.get("semantic_goal"), dict)
         else decomposition.get("user_goal") or {}
     )
-    if semantic_goal_for_completion:
-        if initial_integrity.is_logic_error:
-            result_dict["llm_completion"] = terminal_completion_payload(initial_integrity)
-        else:
-            result_dict["llm_completion"] = observe_goal_completion(
-                semantic_goal_for_completion,
-                {
-                    "task_plan": phase10_for_completion.get("task_plan") or decomposition.get("task_plan") or {},
-                    "task_results": orchestration.get("task_results") if isinstance(orchestration, dict) else {},
-                    "result": result_dict,
-                    "orchestration_status": orchestration.get("execution_status") if isinstance(orchestration, dict) else "",
-                },
-                llm_service=llm_service,
-                context={
-                    "safe_context": build_observer_context(
-                        phase12_context_bundle,
-                        user_goal=semantic_goal_for_completion,
-                        task_plan=phase10_for_completion.get("task_plan") or decomposition.get("task_plan") or {},
-                        result=result_dict,
-                        orchestration=orchestration,
-                    ),
-                    "run_id": runtime.run_id,
-                },
-            ).to_dict()
-        trace_event("executor.completion.assessed", result_dict["llm_completion"], run_id=runtime.run_id)
-        if not isinstance(orchestration.get("task_results"), dict):
-            task_id = (
-                str((decomposition.get("tasks") or [{}])[0].get("task_id") or intent)
-                if isinstance(decomposition.get("tasks"), list)
-                else str(intent)
-            )
-            orchestration = {
-                **dict(orchestration or {}),
-                "task_results": {
-                    task_id: {
-                        "task_id": task_id,
-                        "intent": intent,
-                        "success": bool(result_dict.get("success")),
-                        "data": dict(result_dict.get("data") or {}),
-                        "arguments": dict(params or {}),
-                        "errors": list(result_dict.get("errors") or []),
-                    }
-                },
-                "replan_count": int(orchestration.get("replan_count") or 0),
-                "replan_audit": list(orchestration.get("replan_audit") or []),
-            }
-        orchestration, result_dict, completion_replan = _consume_post_execution_replan(
-            source="completion",
-            action=result_dict["llm_completion"].get("next_action"),
-            completion=result_dict["llm_completion"],
-            reflection=None,
-            orchestration=orchestration,
-            result_dict=result_dict,
-            user_goal=semantic_goal_for_completion,
-            user_id=user_id,
-            output_dir=output_dir,
-            db_path=db_path,
-            default_top_k=requested_top_k,
-            session_id=session_id,
-            language=language,
-            context=route_context,
+    # The single-entry collaboration flow already returns a bounded,
+    # standardized result contract. Completion is therefore assessed
+    # deterministically; the legacy LLM Completion Observer is not called with
+    # the full orchestration payload.
+    if initial_integrity.is_logic_error:
+        result_dict["llm_completion"] = terminal_completion_payload(initial_integrity)
+    else:
+        result_dict["llm_completion"] = deterministic_completion_payload(
+            unified_execution=unified_execution,
+            logic_error=False,
         )
-        if completion_replan.get("execution"):
-            result_dict["llm_completion"] = observe_goal_completion(
-                semantic_goal_for_completion,
-                {
-                    "task_plan": phase10_for_completion.get("task_plan") or decomposition.get("task_plan") or {},
-                    "task_results": orchestration.get("task_results") or {},
-                    "result": result_dict,
-                    "orchestration_status": orchestration.get("execution_status") or "",
-                },
-                llm_service=llm_service,
-                context={
-                    "safe_context": build_observer_context(
-                        phase12_context_bundle,
-                        user_goal=semantic_goal_for_completion,
-                        task_plan=phase10_for_completion.get("task_plan") or decomposition.get("task_plan") or {},
-                        result=result_dict,
-                        orchestration=orchestration,
-                    ),
-                    "run_id": runtime.run_id,
-                },
-            ).to_dict()
-            trace_event("executor.completion.reassessed_after_replan", result_dict["llm_completion"], run_id=runtime.run_id)
+    trace_event(
+        "executor.completion.assessed",
+        result_dict["llm_completion"],
+        run_id=runtime.run_id,
+    )
 
     try:
         context_manager.update_from_observation(
@@ -4380,26 +4204,23 @@ def run_agent_request(
                 *list((critic_replan.get("execution") or {}).get("tool_calls") or []),
             ]
             if critic_goal:
-                result_dict["llm_completion"] = observe_goal_completion(
-                    critic_goal,
-                    {
-                        "task_plan": phase10_for_completion.get("task_plan") or decomposition.get("task_plan") or {},
-                        "task_results": orchestration.get("task_results") or {},
-                        "result": result_dict,
-                        "orchestration_status": orchestration.get("execution_status") or "",
+                result_dict["llm_completion"] = deterministic_completion_payload(
+                    unified_execution={
+                        "success": bool(result_dict.get("success")),
+                        "execution_status": str(orchestration.get("execution_status") or ""),
+                        "standardized_agent_results": dict(
+                            orchestration.get("standardized_agent_results") or
+                            (result_dict.get("data") or {}).get("standardized_agent_results") or {}
+                        ),
+                        "need_clarification": bool(
+                            (result_dict.get("data") or {}).get("need_clarification")
+                        ),
+                        "missing_context": list(
+                            (result_dict.get("data") or {}).get("missing_context") or []
+                        ),
                     },
-                    llm_service=llm_service,
-                    context={
-                    "safe_context": build_observer_context(
-                        phase12_context_bundle,
-                        user_goal=semantic_goal_for_completion,
-                        task_plan=phase10_for_completion.get("task_plan") or decomposition.get("task_plan") or {},
-                        result=result_dict,
-                        orchestration=orchestration,
-                    ),
-                    "run_id": runtime.run_id,
-                },
-                ).to_dict()
+                    logic_error=False,
+                )
             answer_text = _sanitize_user_facing_answer(_answer(intent, result_dict, language), language)
         runtime_info["replan_count"] = int(orchestration.get("replan_count") or 0)
         runtime_info["replan_audit"] = list(orchestration.get("replan_audit") or [])
@@ -4430,23 +4251,6 @@ def run_agent_request(
             "deterministic_logic_gate": final_integrity.to_dict(),
         }
     answer_text = _sanitize_user_facing_answer(answer_text, language)
-    # Recompute after a possible read-only replan; persisted tool artifacts are
-    # the authoritative business-result references for the next turn.
-    final_artifact_refs = artifact_refs_from_result(result_dict)
-    conversation_state_after_run = _conversation_state_after_run(
-        resolved_turn=resolved_turn,
-        raw_query=raw_query,
-        planner_query=planner_query,
-        result_dict=result_dict,
-        answer_text=answer_text,
-        artifact_refs=final_artifact_refs,
-        active_goal=(
-            semantic_goal_for_completion
-            if isinstance(semantic_goal_for_completion, dict)
-            else {}
-        ),
-        run_id=runtime.run_id,
-    )
     publish_agent_message(
         output_dir=output_dir,
         user_id=user_id,
@@ -4463,7 +4267,6 @@ def run_agent_request(
             "tool_name": str(result_dict.get("tool_name") or intent),
             "reflection": reflection_payload,
             "llm_semantic_critic": llm_semantic_critic,
-            "conversation_state_after_run": conversation_state_after_run,
         },
         payload_schema="phase13.final_report.v1",
         context_refs=phase13_context_refs,
@@ -4525,13 +4328,6 @@ def run_agent_request(
         "original_query": raw_query,
         "resolved_query": planner_query if planner_query != raw_query else "",
         "conversation_state": resolved_turn.to_dict(),
-        "conversation_state_after_run": conversation_state_after_run,
-        "artifact_refs": list(final_artifact_refs),
-        "context_authority": {
-            "conversation_state": "authoritative",
-            "artifact_store": "business_result_authoritative",
-            "session_memory": "specialist_working_cache",
-        },
         "reply_language": language,
         "decomposition": _public_agent_parameters(decomposition),
         "orchestration": _public_agent_parameters(orchestration),
