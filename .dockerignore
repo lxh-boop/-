@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.git/
+outputs/
+.env
+*.sqlite
+*.db

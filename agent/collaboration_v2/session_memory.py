@@ -213,6 +213,23 @@ class SessionMemoryStore:
 
                 CREATE INDEX IF NOT EXISTS idx_waiting_tasks_session
                 ON session_waiting_tasks(session_id, status, updated_at);
+
+                CREATE TABLE IF NOT EXISTS session_waiting_workflows (
+                    workflow_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    original_run_id TEXT NOT NULL DEFAULT '',
+                    active_run_id TEXT NOT NULL DEFAULT '',
+                    original_query TEXT NOT NULL DEFAULT '',
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'waiting_context',
+                    attempt INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_waiting_workflows_session
+                ON session_waiting_workflows(session_id, status, updated_at);
                 """
             )
 
@@ -253,7 +270,16 @@ class SessionMemoryStore:
                 "WHERE status='waiting_context' AND expires_at <= ?",
                 (now, now),
             ).rowcount
-        return {"memory_items": int(memory_count or 0), "waiting_tasks": int(waiting_count or 0)}
+            workflow_count = connection.execute(
+                "UPDATE session_waiting_workflows SET status='expired', updated_at=? "
+                "WHERE status='waiting_context' AND expires_at <= ?",
+                (now, now),
+            ).rowcount
+        return {
+            "memory_items": int(memory_count or 0),
+            "waiting_tasks": int(waiting_count or 0),
+            "waiting_workflows": int(workflow_count or 0),
+        }
 
     def get(self, session_id: str, key: str, *, include_expired: bool = False) -> SessionMemoryItem | None:
         self.cleanup_expired()
@@ -612,12 +638,153 @@ class SessionMemoryStore:
                 (now_text(), str(new_run_id or ""), str(new_run_id or ""), str(waiting_id or "")),
             )
 
+    def register_waiting_workflow(
+        self,
+        *,
+        session_id: str,
+        original_run_id: str,
+        original_query: str,
+        entry_decision: dict[str, Any],
+        planner_metadata: dict[str, Any],
+        tasks: list[dict[str, Any]],
+        safe_results: dict[str, dict[str, Any]],
+        waiting_task_ids: list[str],
+        missing_items: list[dict[str, Any]],
+        execution_batches: list[dict[str, Any]],
+        ttl_hours: int | None = None,
+    ) -> str:
+        """Persist a resumable Agent DAG without raw Tool payloads."""
+        session = str(session_id or "").strip()
+        if not session:
+            raise ValueError("session_id is required")
+        workflow_id = new_id("waiting_workflow")
+        now = now_text()
+        payload = {
+            "waiting_workflow_id": workflow_id,
+            "session_id": session,
+            "original_run_id": str(original_run_id or ""),
+            "original_query": str(original_query or ""),
+            "entry_decision": _safe_jsonable(entry_decision),
+            "planner_metadata": _safe_jsonable(planner_metadata),
+            "tasks": _safe_jsonable(tasks),
+            "safe_results": _safe_jsonable(safe_results),
+            "waiting_task_ids": list(dict.fromkeys(str(item) for item in waiting_task_ids if str(item).strip())),
+            "missing_items": _safe_jsonable(missing_items),
+            "execution_batches": _safe_jsonable(execution_batches),
+            "status": "waiting_context",
+            "attempt": 1,
+            "created_at": now,
+            "updated_at": now,
+            "expires_at": self._expires_at(ttl_hours),
+        }
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "UPDATE session_waiting_workflows SET status='superseded', updated_at=? "
+                "WHERE session_id=? AND status='waiting_context'",
+                (now, session),
+            )
+            connection.execute(
+                "INSERT INTO session_waiting_workflows (workflow_id, session_id, original_run_id, active_run_id, "
+                "original_query, payload_json, status, attempt, created_at, updated_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'waiting_context', 1, ?, ?, ?)",
+                (
+                    workflow_id,
+                    session,
+                    str(original_run_id or ""),
+                    str(original_run_id or ""),
+                    str(original_query or "")[:20_000],
+                    _dumps(payload),
+                    now,
+                    now,
+                    payload["expires_at"],
+                ),
+            )
+        return workflow_id
+
+    def get_active_waiting_workflow(self, session_id: str) -> dict[str, Any] | None:
+        self.cleanup_expired()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM session_waiting_workflows WHERE session_id=? AND status='waiting_context' "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (str(session_id or ""),),
+            ).fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        payload = _loads(data.pop("payload_json", "{}"), default={})
+        if not isinstance(payload, dict):
+            payload = {}
+        return {**data, **payload}
+
+    def update_waiting_workflow(
+        self,
+        workflow_id: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        status: str | None = None,
+        active_run_id: str = "",
+        increment_attempt: bool = False,
+    ) -> None:
+        workflow = str(workflow_id or "").strip()
+        if not workflow:
+            return
+        now = now_text()
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload_json, attempt FROM session_waiting_workflows WHERE workflow_id=?",
+                (workflow,),
+            ).fetchone()
+            if not row:
+                return
+            current = _loads(row["payload_json"], default={})
+            if not isinstance(current, dict):
+                current = {}
+            if payload:
+                current.update(_safe_jsonable(payload))
+            current["updated_at"] = now
+            next_status = str(status or current.get("status") or "waiting_context")
+            current["status"] = next_status
+            attempt = int(row["attempt"] or 1) + (1 if increment_attempt else 0)
+            current["attempt"] = attempt
+            if active_run_id:
+                current["active_run_id"] = str(active_run_id)
+            connection.execute(
+                "UPDATE session_waiting_workflows SET payload_json=?, status=?, active_run_id=CASE WHEN ?='' THEN active_run_id ELSE ? END, "
+                "attempt=?, updated_at=? WHERE workflow_id=?",
+                (
+                    _dumps(current),
+                    next_status,
+                    str(active_run_id or ""),
+                    str(active_run_id or ""),
+                    attempt,
+                    now,
+                    workflow,
+                ),
+            )
+
+    def complete_waiting_workflow(self, workflow_id: str, *, new_run_id: str = "") -> None:
+        self.update_waiting_workflow(
+            workflow_id,
+            status="completed",
+            active_run_id=new_run_id,
+        )
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "UPDATE session_waiting_tasks SET status='resumed', updated_at=?, "
+                "run_id=CASE WHEN ?='' THEN run_id ELSE ? END "
+                "WHERE session_id=(SELECT session_id FROM session_waiting_workflows WHERE workflow_id=?) "
+                "AND status='waiting_context'",
+                (now_text(), str(new_run_id or ""), str(new_run_id or ""), str(workflow_id or "")),
+            )
+
     def clear_session(self, session_id: str, *, hard: bool = True) -> dict[str, int]:
         session = str(session_id or "")
         with self._lock, self._connect() as connection:
             if hard:
                 access = connection.execute("DELETE FROM session_memory_access_log WHERE session_id=?", (session,)).rowcount
                 waiting = connection.execute("DELETE FROM session_waiting_tasks WHERE session_id=?", (session,)).rowcount
+                workflows = connection.execute("DELETE FROM session_waiting_workflows WHERE session_id=?", (session,)).rowcount
                 memory = connection.execute("DELETE FROM session_memory_items WHERE session_id=?", (session,)).rowcount
             else:
                 now = now_text()
@@ -629,8 +796,17 @@ class SessionMemoryStore:
                     "UPDATE session_waiting_tasks SET status='expired', updated_at=? WHERE session_id=? AND status='waiting_context'",
                     (now, session),
                 ).rowcount
+                workflows = connection.execute(
+                    "UPDATE session_waiting_workflows SET status='expired', updated_at=? WHERE session_id=? AND status='waiting_context'",
+                    (now, session),
+                ).rowcount
                 access = 0
-        return {"memory_items": int(memory or 0), "waiting_tasks": int(waiting or 0), "access_logs": int(access or 0)}
+        return {
+            "memory_items": int(memory or 0),
+            "waiting_tasks": int(waiting or 0),
+            "waiting_workflows": int(workflows or 0),
+            "access_logs": int(access or 0),
+        }
 
     def stats(self, session_id: str) -> dict[str, Any]:
         with self._connect() as connection:
@@ -642,10 +818,15 @@ class SessionMemoryStore:
                 "SELECT COUNT(*) AS count FROM session_waiting_tasks WHERE session_id=? AND status='waiting_context'",
                 (str(session_id or ""),),
             ).fetchone()
+            workflows = connection.execute(
+                "SELECT COUNT(*) AS count FROM session_waiting_workflows WHERE session_id=? AND status='waiting_context'",
+                (str(session_id or ""),),
+            ).fetchone()
         return {
             "session_id": str(session_id or ""),
             "active_memory_count": int(memory["count"] if memory else 0),
             "waiting_task_count": int(waiting["count"] if waiting else 0),
+            "waiting_workflow_count": int(workflows["count"] if workflows else 0),
             "temporary": True,
             "default_ttl_hours": self.default_ttl_hours,
             "store": "outputs/session_memory/session_memory.sqlite",

@@ -252,6 +252,13 @@ class ArtifactStore:
         if not row or str(row.get("user_id") or "") != str(user_id or ""):
             return None
         metadata = row.get("metadata_json") if isinstance(row.get("metadata_json"), dict) else {}
+        expires_at = str(row.get("expires_at") or "")
+        if expires_at:
+            try:
+                if datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S") < datetime.now():
+                    return None
+            except ValueError:
+                return None
         row_conversation = str(metadata.get("conversation_id") or "")
         row_run_id = str(row.get("run_id") or "")
         same_conversation = bool(conversation_id and row_conversation == str(conversation_id))

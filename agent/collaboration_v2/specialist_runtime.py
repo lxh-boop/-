@@ -10,6 +10,7 @@ from core.llm import LLMService
 
 from .agent_directory import REPORT_WRITER, STRATEGY_GUARD
 from .context_service import ContextService
+from .contracts import is_system_queryable_context_key
 from .models import AgentResult, AgentTask, MemoryUpdate, MissingContextItem, ResultStatus, TaskStatus
 from .requirements import ContextRequirement, RequirementEngine
 from .tool_runtime import ScopedBusinessToolRuntime
@@ -119,39 +120,174 @@ def _result_has_material_data(orchestration: dict[str, Any]) -> bool:
     return False
 
 
+def _missing_values(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        return [str(key) for key, present in value.items() if present not in (False, None, "", [], {})]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item or "").strip()]
+    if value not in (None, ""):
+        return [str(value)]
+    return []
+
+
+def _missing_item(
+    *,
+    key: str,
+    category: str,
+    description: str = "",
+    expected_format: str = "",
+    reason: str = "",
+    origin_status: str = "",
+    retryable: bool = True,
+    searched_sources: list[str] | None = None,
+) -> MissingContextItem:
+    normalized_key = str(key or "required_context").strip()
+    normalized_category = str(category or "unknown").strip().lower()
+    if normalized_category == "unknown" and is_system_queryable_context_key(normalized_key):
+        normalized_category = "system_data"
+    if not description:
+        if normalized_key in {"stock_target", "stock_code"}:
+            description = "需要分析的股票"
+        elif normalized_category == "system_data":
+            description = f"系统中的 {normalized_key.replace('_', ' ')} 数据"
+        elif normalized_category == "tool_failure":
+            description = "当前专业能力或数据源"
+        elif normalized_category == "upstream_result":
+            description = "上游专业 Agent 结果"
+        else:
+            description = normalized_key.replace("_", " ")
+    if not expected_format and normalized_category == "user_input":
+        expected_format = "股票名称或股票代码" if normalized_key in {"stock_target", "stock_code", "comparison_targets"} else "可识别的具体值"
+    return MissingContextItem(
+        key=normalized_key,
+        description=description,
+        expected_format=expected_format,
+        reason=reason,
+        searched_sources=list(dict.fromkeys(searched_sources or [])),
+        blocking=True,
+        category=normalized_category,
+        ask_user=normalized_category == "user_input",
+        retryable=bool(retryable),
+        system_queryable=normalized_category == "system_data",
+        origin_status=origin_status,
+    )
+
+
 def _missing_from_orchestration(orchestration: dict[str, Any]) -> list[MissingContextItem]:
-    errors: list[str] = [str(item) for item in orchestration.get("errors") or []]
-    for result in (orchestration.get("task_results") or {}).values():
-        if not isinstance(result, dict):
+    """Preserve business-level missing/failure categories across the Agent boundary."""
+    collected: list[MissingContextItem] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(item: MissingContextItem) -> None:
+        signature = (item.key, item.category)
+        if signature in seen:
+            return
+        seen.add(signature)
+        collected.append(item)
+
+    top_errors = [str(item) for item in orchestration.get("errors") or []]
+    result_rows = orchestration.get("task_results") or {}
+    if not isinstance(result_rows, dict):
+        result_rows = {}
+
+    for task_id, raw_result in result_rows.items():
+        if not isinstance(raw_result, dict):
             continue
-        errors.extend(str(item) for item in result.get("errors") or [])
-        message = str(result.get("message") or "")
+        data = raw_result.get("data") if isinstance(raw_result.get("data"), dict) else {}
+        status = str(raw_result.get("status") or data.get("status") or "").strip().lower()
+        retryable = bool(data.get("retryable", raw_result.get("retryable", True)))
+        searched = ["task_input", "session_memory", "dependency_results", "specialist_business_capabilities"]
+
+        user_missing = _missing_values(data.get("missing_parameters"))
+        if status == "missing_required_parameters" and not user_missing:
+            user_missing = _missing_values(data.get("required_parameters"))
+        for key in user_missing:
+            add(
+                _missing_item(
+                    key=key,
+                    category="user_input",
+                    reason=str(data.get("need_clarification") or raw_result.get("message") or "用户必须明确该业务参数。"),
+                    origin_status=status or "missing_required_parameters",
+                    retryable=retryable,
+                    searched_sources=searched,
+                )
+            )
+
+        system_missing = _missing_values(data.get("missing_system_data"))
+        if status == "system_data_missing" and not system_missing:
+            system_missing = _missing_values(data.get("required_system_data")) or [str(task_id or "system_data")]
+        for key in system_missing:
+            add(
+                _missing_item(
+                    key=key,
+                    category="system_data",
+                    reason=str(raw_result.get("message") or "系统当前没有可用的业务数据。"),
+                    origin_status=status or "system_data_missing",
+                    retryable=retryable,
+                    searched_sources=searched,
+                )
+            )
+
+        row_errors = [str(item) for item in raw_result.get("errors") or []]
+        message = str(raw_result.get("message") or "")
+        combined = " ".join([*row_errors, message]).lower()
+        failure_markers = (
+            "timeout", "timed out", "connection", "provider", "service unavailable",
+            "tool_failure", "tool failed", "execution_failed", "database error",
+            "data source", "rate limit", "circuit_open",
+        )
+        if not user_missing and not system_missing and any(marker in combined for marker in failure_markers):
+            add(
+                _missing_item(
+                    key=f"runtime_{task_id}",
+                    category="tool_failure",
+                    description="当前专业能力或数据源",
+                    reason="专业 Agent 的内部能力调用失败，不能通过要求用户补参来解决。",
+                    origin_status=status or "tool_failure",
+                    retryable=retryable,
+                    searched_sources=["specialist_business_capabilities"],
+                )
+            )
+
+        fallback_errors = [*row_errors]
         if "missing" in message.lower():
-            errors.append(message)
-    keys: list[str] = []
-    for error in errors:
-        lowered = error.lower()
-        if "missing_stock_code" in lowered or "missing_required:stock_code" in lowered:
-            keys.append("stock_target")
-        for match in _MISSING_PATTERN.findall(error):
-            key = match.strip(".:_")
-            if key and key not in {"information", "context"}:
-                keys.append(key)
-    result: list[MissingContextItem] = []
-    for key in list(dict.fromkeys(keys)):
-        description = "需要分析的股票" if key in {"stock_target", "stock_code"} else key.replace("_", " ")
-        expected = "股票名称或股票代码" if key in {"stock_target", "stock_code"} else "可识别的具体值"
-        result.append(
-            MissingContextItem(
-                key=key,
-                description=description,
-                expected_format=expected,
-                reason="专业 Agent 已检查任务输入、会话记忆、上游结果和自身可用能力，但仍无法获得该信息。",
-                searched_sources=["task_input", "session_memory", "dependency_results", "specialist_business_capabilities"],
-                blocking=True,
+            fallback_errors.append(message)
+        for error in fallback_errors:
+            lowered = error.lower()
+            fallback_keys: list[str] = []
+            if "missing_stock_code" in lowered or "missing_required:stock_code" in lowered:
+                fallback_keys.append("stock_target")
+            fallback_keys.extend(match.strip(".:_") for match in _MISSING_PATTERN.findall(error))
+            for key in fallback_keys:
+                if not key or key in {"information", "context"}:
+                    continue
+                category = "system_data" if is_system_queryable_context_key(key) else "user_input"
+                add(
+                    _missing_item(
+                        key=key,
+                        category=category,
+                        reason="专业 Agent 已检查任务输入、会话记忆、上游结果和自身能力，但仍无法获得该信息。",
+                        origin_status=status or "missing_context",
+                        retryable=retryable,
+                        searched_sources=searched,
+                    )
+                )
+
+    top_combined = " ".join(top_errors).lower()
+    if top_errors and any(marker in top_combined for marker in ("execution_failed", "timeout", "connection", "circuit_open")):
+        add(
+            _missing_item(
+                key="specialist_runtime",
+                category="tool_failure",
+                description="专业 Agent 运行时",
+                reason="专业 Agent 运行失败；这不是用户参数缺失。",
+                origin_status=str(orchestration.get("execution_status") or "tool_failure"),
+                retryable=True,
+                searched_sources=["specialist_runtime"],
             )
         )
-    return result
+
+    return collected
 
 
 def _evidence_refs(orchestration: dict[str, Any]) -> list[dict[str, Any]]:
@@ -214,8 +350,8 @@ def _artifact_refs(orchestration: dict[str, Any]) -> list[dict[str, Any]]:
                 if str(key).lower() not in _RAW_KEYS
                 and key in {
                     "artifact_id", "artifact_type", "schema_version",
-                    "producer_type", "producer_id", "tool_name",
                     "stock_code", "stock_name", "created_at", "expires_at",
+                    "content_summary", "summary",
                 }
             }
             ref.setdefault("artifact_id", artifact_id)
@@ -469,13 +605,19 @@ class SpecialistRuntime:
 
         missing = _missing_from_orchestration(orchestration)
         material_data = _result_has_material_data(orchestration)
-        if not material_data:
+        has_runtime_failure = any(item.category == "tool_failure" for item in missing)
+        if not material_data and not has_runtime_failure:
             existing_keys = {item.key for item in missing}
             for requirement in unresolved:
                 if requirement.required and requirement.key not in existing_keys:
                     missing.append(
-                        MissingContextItem(
+                        _missing_item(
                             key=requirement.key,
+                            category=(
+                                "system_data"
+                                if is_system_queryable_context_key(requirement.key)
+                                else "user_input"
+                            ),
                             description=requirement.description,
                             expected_format=requirement.expected_format,
                             reason="专业 Agent 已检查任务输入、会话记忆、上游结果和自身可用能力，但仍无法获得该信息。",
@@ -483,7 +625,7 @@ class SpecialistRuntime:
                                 *searched_sources.get(requirement.key, []),
                                 "specialist_business_capabilities",
                             ])),
-                            blocking=True,
+                            origin_status="missing_context",
                         )
                     )
 
@@ -690,8 +832,9 @@ class SpecialistRuntime:
                     continue
                 key = str(item.get("key") or "proposal_context")
                 missing_items.append(
-                    MissingContextItem(
+                    _missing_item(
                         key=key,
+                        category=("system_data" if is_system_queryable_context_key(key) else "user_input"),
                         description=str(item.get("description") or "生成预案所需的关键上下文"),
                         expected_format=str(item.get("expected_format") or "具体对象、数值或目标"),
                         reason=str(decision.get("reason") or "无法在不猜测的情况下生成 Proposal。"),
@@ -700,7 +843,7 @@ class SpecialistRuntime:
                             "task_input", "session_memory", "dependency_results",
                             "strategy_guard_private_planner",
                         ])),
-                        blocking=True,
+                        origin_status="missing_required_parameters",
                     )
                 )
             return AgentResult(
@@ -881,13 +1024,14 @@ class SpecialistRuntime:
         }
         if not selected:
             missing = [
-                MissingContextItem(
+                _missing_item(
                     key=req.key,
+                    category="upstream_result",
                     description=req.description,
                     expected_format=req.expected_format,
                     reason="没有可供汇总的上游标准 AgentResult。",
                     searched_sources=searched_sources.get(req.key, ["dependency_results"]),
-                    blocking=True,
+                    origin_status="upstream_result_missing",
                 )
                 for req in (unresolved or [ContextRequirement("specialist_results", "需要汇总的专业 Agent 结果")])
             ]

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from core.llm import LLMService
+from agent.artifacts import ArtifactStore
 
 from .agent_directory import (
     AgentDirectory,
@@ -104,6 +105,55 @@ def _clarification_question(missing: list[MissingContextItem], language: str) ->
     return f"还缺少以下信息：{details}。请补充后我会继续原任务。"
 
 
+def _safe_artifact_payload(value: Any, *, depth: int = 0) -> Any:
+    """Remove paths, Tool identities and private runtime details from Artifact reads."""
+    if depth > 6:
+        return "<summarized>"
+    blocked = {
+        "tool_name", "producer_id", "producer_type", "arguments", "raw_payload",
+        "raw_tool_payload", "db_path", "output_dir", "local_path", "path", "sql",
+        "traceback", "stack_trace", "api_key", "password", "secret",
+        "confirmation_token", "confirmation_token_hash", "private_chain_of_thought",
+        "chain_of_thought", "reasoning_content", "user_id", "conversation_id", "run_id",
+        "task_id",
+    }
+    if isinstance(value, dict):
+        return {
+            str(key): _safe_artifact_payload(item, depth=depth + 1)
+            for key, item in value.items()
+            if str(key).lower() not in blocked
+        }
+    if isinstance(value, list):
+        return [_safe_artifact_payload(item, depth=depth + 1) for item in value[:30]]
+    if isinstance(value, str):
+        return value[:4000] + ("…" if len(value) > 4000 else "")
+    return value
+
+
+def _agent_result_from_safe(value: dict[str, Any]) -> AgentResult:
+    payload = dict(value or {})
+    payload.pop("contract_version", None)
+    allowed = {
+        "task_id", "agent_id", "status", "summary", "findings", "recommendations",
+        "confidence", "evidence_refs", "warnings", "missing_items", "artifact_refs", "metadata",
+    }
+    return AgentResult(**{key: item for key, item in payload.items() if key in allowed})
+
+
+def _descendant_task_ids(tasks: list[AgentTask], roots: set[str]) -> set[str]:
+    affected = set(roots)
+    changed = True
+    while changed:
+        changed = False
+        for task in tasks:
+            if task.task_id in affected:
+                continue
+            if any(dep in affected for dep in task.dependency_task_ids):
+                affected.add(task.task_id)
+                changed = True
+    return affected
+
+
 class CoordinatorReporter:
     def __init__(self, *, llm_service: LLMService) -> None:
         self.llm_service = llm_service
@@ -171,6 +221,7 @@ class AgentCollaborationCoordinator:
         self.llm_service = llm_service
         self.directory = AgentDirectory()
         self.memory = SessionMemoryStore(output_dir=self.output_dir)
+        self.artifact_store = ArtifactStore(db_path=self.db_path, output_dir=self.output_dir)
         self.planner = CoordinatorPlanner(self.directory, llm_service=llm_service)
         requirement_engine = RequirementEngine(llm_service=llm_service)
         self.specialist_runtime = SpecialistRuntime(
@@ -201,6 +252,19 @@ class AgentCollaborationCoordinator:
             run_id=run_id,
             execution_context=execution_context,
         )
+        if _relation_type(execution_context) == "clarification_answer":
+            waiting_workflow = self.memory.get_active_waiting_workflow(session)
+            if waiting_workflow:
+                return self._resume_waiting_workflow(
+                    workflow=waiting_workflow,
+                    clarification=query,
+                    user_id=user_id,
+                    default_top_k=default_top_k,
+                    session_id=session,
+                    run_id=run_id,
+                    language=language,
+                    execution_context=execution_context,
+                )
         memory_summary = self.memory.build_summary(session, task_objective=query, max_chars=6000)
         try:
             entry_decision = self.entry_planner.decide(
@@ -231,7 +295,14 @@ class AgentCollaborationCoordinator:
                 "enabled": True,
                 "single_entry": True,
                 "entry_decision": entry_decision.to_dict(),
-                "planner": {"planner": "control_gateway", "fallback_used": False},
+                "planner": {
+                    "planner": "control_gateway",
+                    "entry_decision_source": entry_decision.source,
+                    "agent_plan_source": "control_gateway",
+                    "agent_plan_llm_used": False,
+                    "specialist_internal_plan_source": "not_applicable",
+                    "fallback_used": False,
+                },
                 "agent_capability_catalog": self.directory.safe_catalog(),
                 "session_memory": self.memory.stats(session),
                 "session_memory_summary": self.memory.build_summary(session, task_objective=query, max_chars=3000),
@@ -240,7 +311,7 @@ class AgentCollaborationCoordinator:
                     "main_agent_sees_tools": False,
                     "specialists_share_session_memory": True,
                     "full_memory_auto_injected": False,
-                    "missing_context_classification": "unified",
+                    "missing_context_classification": "structured_v2",
                     "legacy_router_reachable": False,
                     "single_entry_only": True,
                 },
@@ -273,7 +344,10 @@ class AgentCollaborationCoordinator:
                 language=language,
                 entry_decision=entry_decision.to_dict(),
             )
-        planner_metadata["entry_decision"] = entry_decision.to_dict()
+        planner_metadata = self._normalise_planner_metadata(
+            planner_metadata,
+            entry_decision=entry_decision.to_dict(),
+        )
         results, batches, handoffs = self._run_dag(
             tasks,
             query=query,
@@ -292,28 +366,364 @@ class AgentCollaborationCoordinator:
             language=language,
             execution_context=execution_context,
         )
-        missing = [
-            item
-            for result in results.values()
-            if result.status == ResultStatus.NEED_CONTEXT
-            for item in result.missing_items
-            if item.blocking and not is_system_queryable_context_key(item.key)
+        return self._finalize_execution(
+            query=query,
+            session=session,
+            run_id=run_id,
+            user_id=user_id,
+            language=language,
+            tasks=tasks,
+            results=results,
+            batches=batches,
+            handoffs=handoffs,
+            recovery_audit=recovery_audit,
+            planner_metadata=planner_metadata,
+            entry_decision=entry_decision.to_dict(),
+        )
+
+
+    def _normalise_planner_metadata(
+        self,
+        planner_metadata: dict[str, Any] | None,
+        *,
+        entry_decision: dict[str, Any],
+        resumed_workflow_id: str = "",
+    ) -> dict[str, Any]:
+        metadata = dict(planner_metadata or {})
+        plan_source = str(metadata.get("agent_plan_source") or metadata.get("planner") or "unknown")
+        metadata.update(
+            {
+                "entry_decision": dict(entry_decision or {}),
+                "entry_decision_source": str((entry_decision or {}).get("source") or "main_entry_llm"),
+                "agent_plan_source": plan_source,
+                "agent_plan_llm_used": plan_source == "coordinator_llm",
+                "specialist_internal_plan_source": "specialist_private_runtime",
+            }
+        )
+        if resumed_workflow_id:
+            metadata["resumed_waiting_workflow"] = True
+            metadata["waiting_workflow_id"] = resumed_workflow_id
+        return metadata
+
+    def _extract_clarification_values(
+        self,
+        clarification: str,
+        missing_items: list[MissingContextItem],
+        *,
+        language: str,
+    ) -> tuple[dict[str, Any], list[MissingContextItem]]:
+        requested = [item for item in missing_items if item.blocking and item.ask_user]
+        if not requested:
+            return {}, []
+        text = str(clarification or "").strip()
+        codes = list(dict.fromkeys(_STOCK_CODE.findall(text)))
+        values: dict[str, Any] = {}
+
+        if len(requested) == 1:
+            item = requested[0]
+            if item.key == "comparison_targets":
+                if len(codes) >= 2:
+                    values[item.key] = codes
+                else:
+                    parts = [
+                        part.strip()
+                        for part in re.split(r"(?:和|与|、|,|，|\bvs\.?\b|versus|compare)", text, flags=re.IGNORECASE)
+                        if part.strip()
+                    ]
+                    if len(parts) >= 2:
+                        values[item.key] = parts[:10]
+            elif item.key in {"stock_target", "stock_code"}:
+                values[item.key] = codes[0] if codes else text
+            elif text:
+                values[item.key] = text
+        else:
+            allowed_keys = [item.key for item in requested]
+
+            def validate(payload: dict[str, Any]) -> None:
+                raw_values = payload.get("values")
+                if not isinstance(raw_values, dict):
+                    raise RuntimeError("clarification_values_missing")
+                unknown = set(raw_values) - set(allowed_keys)
+                if unknown:
+                    raise RuntimeError("clarification_values_unknown_keys")
+
+            try:
+                payload = self.llm_service.generate_json(
+                    stage="clarification_value_extractor",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "从用户补充内容中提取缺失字段。只提取用户明确表达的事实，不推测。"
+                                "严格输出 JSON：{\"values\":{\"字段名\":值或null}}。"
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": json.dumps(
+                                {
+                                    "clarification": text,
+                                    "missing_items": [item.to_dict() for item in requested],
+                                    "allowed_keys": allowed_keys,
+                                    "reply_language": language,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        },
+                    ],
+                    max_output_tokens=1000,
+                    validator=validate,
+                    operation="extract_clarification_values",
+                )
+                values = {
+                    str(key): value
+                    for key, value in dict(payload.get("values") or {}).items()
+                    if value not in (None, "", [], {})
+                }
+            except Exception:
+                values = {}
+
+        unresolved = [item for item in requested if values.get(item.key) in (None, "", [], {})]
+        return values, unresolved
+
+    def _resume_waiting_workflow(
+        self,
+        *,
+        workflow: dict[str, Any],
+        clarification: str,
+        user_id: str,
+        default_top_k: int,
+        session_id: str,
+        run_id: str,
+        language: str,
+        execution_context: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        workflow_id = str(workflow.get("workflow_id") or workflow.get("waiting_workflow_id") or "")
+        original_query = str(workflow.get("original_query") or clarification)
+        entry_decision = dict(workflow.get("entry_decision") or {})
+        planner_metadata = self._normalise_planner_metadata(
+            dict(workflow.get("planner_metadata") or {}),
+            entry_decision=entry_decision,
+            resumed_workflow_id=workflow_id,
+        )
+        try:
+            tasks = [AgentTask.from_dict(row) for row in workflow.get("tasks") or [] if isinstance(row, dict)]
+            safe_results = {
+                str(task_id): _agent_result_from_safe(result)
+                for task_id, result in dict(workflow.get("safe_results") or {}).items()
+                if isinstance(result, dict)
+            }
+            missing_items = [
+                MissingContextItem.from_dict(item)
+                for item in workflow.get("missing_items") or []
+                if isinstance(item, dict)
+            ]
+        except Exception as exc:
+            self.memory.update_waiting_workflow(workflow_id, status="failed", active_run_id=run_id)
+            return self._entry_failure(
+                query=original_query,
+                session=session_id,
+                error=f"waiting_workflow_invalid:{type(exc).__name__}",
+                language=language,
+                entry_decision=entry_decision,
+            )
+        if not tasks:
+            self.memory.update_waiting_workflow(workflow_id, status="failed", active_run_id=run_id)
+            return self._entry_failure(
+                query=original_query,
+                session=session_id,
+                error="waiting_workflow_missing_tasks",
+                language=language,
+                entry_decision=entry_decision,
+            )
+
+        values, unresolved = self._extract_clarification_values(
+            clarification,
+            missing_items,
+            language=language,
+        )
+        for key, value in values.items():
+            self.memory.put(
+                session_id=session_id,
+                key=key,
+                value=value,
+                value_type="user_clarification",
+                summary=f"用户对缺失项 {key} 的补充：{str(value)[:300]}",
+                source_type="user_clarification",
+                source_ref=run_id,
+                confirmed=True,
+                confidence=1.0,
+            )
+
+        waiting_task_ids = set(str(item) for item in workflow.get("waiting_task_ids") or [])
+        if unresolved:
+            for task_id in waiting_task_ids:
+                result = safe_results.get(task_id)
+                if result is not None:
+                    result.status = ResultStatus.NEED_CONTEXT
+                    result.missing_items = list(unresolved)
+            return self._finalize_execution(
+                query=original_query,
+                session=session_id,
+                run_id=run_id,
+                user_id=user_id,
+                language=language,
+                tasks=tasks,
+                results=safe_results,
+                batches=list(workflow.get("execution_batches") or []),
+                handoffs=[],
+                recovery_audit=[],
+                planner_metadata=planner_metadata,
+                entry_decision=entry_decision,
+                existing_workflow_id=workflow_id,
+                reused_task_ids=sorted(set(safe_results) - waiting_task_ids),
+                rerun_task_ids=[],
+                workflow_attempt_increment=True,
+            )
+
+        affected = _descendant_task_ids(tasks, waiting_task_ids)
+        initial_results = {
+            task_id: result
+            for task_id, result in safe_results.items()
+            if task_id not in affected
+        }
+        for task in tasks:
+            if task.task_id in affected:
+                task.run_id = run_id
+                task.attempt += 1
+                task.status = TaskStatus.READY if all(dep in initial_results for dep in task.dependency_task_ids) else TaskStatus.PENDING
+
+        results, resume_batches, handoffs = self._run_dag(
+            tasks,
+            query=original_query,
+            user_id=user_id,
+            default_top_k=default_top_k,
+            language=language,
+            execution_context=execution_context,
+            initial_results=initial_results,
+            only_task_ids=affected,
+        )
+        results, recovery_audit = self._recover_missing_context(
+            tasks=tasks,
+            results=results,
+            query=original_query,
+            user_id=user_id,
+            default_top_k=default_top_k,
+            language=language,
+            execution_context=execution_context,
+        )
+        return self._finalize_execution(
+            query=original_query,
+            session=session_id,
+            run_id=run_id,
+            user_id=user_id,
+            language=language,
+            tasks=tasks,
+            results=results,
+            batches=[*list(workflow.get("execution_batches") or []), *resume_batches],
+            handoffs=handoffs,
+            recovery_audit=recovery_audit,
+            planner_metadata=planner_metadata,
+            entry_decision=entry_decision,
+            existing_workflow_id=workflow_id,
+            reused_task_ids=sorted(initial_results),
+            rerun_task_ids=sorted(affected),
+            workflow_attempt_increment=True,
+        )
+
+    def _finalize_execution(
+        self,
+        *,
+        query: str,
+        session: str,
+        run_id: str,
+        user_id: str,
+        language: str,
+        tasks: list[AgentTask],
+        results: dict[str, AgentResult],
+        batches: list[dict[str, Any]],
+        handoffs: list[dict[str, Any]],
+        recovery_audit: list[dict[str, Any]],
+        planner_metadata: dict[str, Any],
+        entry_decision: dict[str, Any],
+        existing_workflow_id: str = "",
+        reused_task_ids: list[str] | None = None,
+        rerun_task_ids: list[str] | None = None,
+        workflow_attempt_increment: bool = False,
+    ) -> dict[str, Any]:
+        all_missing: list[MissingContextItem] = []
+        seen_missing: set[tuple[str, str]] = set()
+        for result in results.values():
+            if result.status != ResultStatus.NEED_CONTEXT:
+                continue
+            for item in result.missing_items:
+                if not item.blocking:
+                    continue
+                signature = (item.key, item.category)
+                if signature in seen_missing:
+                    continue
+                seen_missing.add(signature)
+                all_missing.append(item)
+        user_missing = [item for item in all_missing if item.ask_user]
+        need_clarification = bool(user_missing)
+        clarification_question = _clarification_question(user_missing, language) if user_missing else ""
+
+        standardized_by_task = {
+            task_id: result.standardized_for_handoff()
+            for task_id, result in results.items()
+        }
+        waiting_task_ids = [
+            task.task_id
+            for task in tasks
+            if task.task_id in results
+            and results[task.task_id].status == ResultStatus.NEED_CONTEXT
+            and any(item.ask_user for item in results[task.task_id].missing_items)
         ]
-        need_clarification = bool(missing)
-        clarification_question = _clarification_question(missing, language) if missing else ""
+        waiting_workflow_id = existing_workflow_id
         if need_clarification:
             for task in tasks:
-                result = results.get(task.task_id)
-                if result and result.status == ResultStatus.NEED_CONTEXT:
-                    task.status = TaskStatus.WAITING_CONTEXT
-                    self.memory.register_waiting_task(task, [item.key for item in result.missing_items])
+                if task.task_id not in waiting_task_ids:
+                    continue
+                task.status = TaskStatus.WAITING_CONTEXT
+                if not existing_workflow_id:
+                    self.memory.register_waiting_task(
+                        task,
+                        [item.key for item in results[task.task_id].missing_items if item.ask_user],
+                    )
+            workflow_payload = {
+                "original_query": query,
+                "entry_decision": entry_decision,
+                "planner_metadata": planner_metadata,
+                "tasks": [task.safe_for_coordinator() for task in tasks],
+                "safe_results": standardized_by_task,
+                "waiting_task_ids": waiting_task_ids,
+                "missing_items": [item.to_dict() for item in all_missing],
+                "execution_batches": batches,
+            }
+            if existing_workflow_id:
+                self.memory.update_waiting_workflow(
+                    existing_workflow_id,
+                    payload=workflow_payload,
+                    status="waiting_context",
+                    active_run_id=run_id,
+                    increment_attempt=workflow_attempt_increment,
+                )
+            else:
+                waiting_workflow_id = self.memory.register_waiting_workflow(
+                    session_id=session,
+                    original_run_id=run_id,
+                    original_query=query,
+                    entry_decision=entry_decision,
+                    planner_metadata=planner_metadata,
+                    tasks=[task.safe_for_coordinator() for task in tasks],
+                    safe_results=standardized_by_task,
+                    waiting_task_ids=waiting_task_ids,
+                    missing_items=[item.to_dict() for item in all_missing],
+                    execution_batches=batches,
+                )
             answer = clarification_question
             execution_status = "waiting_context"
         else:
-            standardized_by_task = {
-                task_id: result.standardized_for_handoff()
-                for task_id, result in results.items()
-            }
             try:
                 answer = self.reporter.build(query, standardized_by_task, language=language)
             except Exception as exc:
@@ -322,18 +732,27 @@ class AgentCollaborationCoordinator:
                     session=session,
                     error=f"coordinator_report_failed:{type(exc).__name__}:{exc}",
                     language=language,
-                    entry_decision=entry_decision.to_dict(),
+                    entry_decision=entry_decision,
                 )
             success_count = sum(
-                1 for result in results.values() if result.status in {ResultStatus.COMPLETED, ResultStatus.PARTIAL, ResultStatus.PROPOSAL_READY}
+                1
+                for result in results.values()
+                if result.status in {ResultStatus.COMPLETED, ResultStatus.PARTIAL, ResultStatus.PROPOSAL_READY}
             )
-            failed_count = sum(1 for result in results.values() if result.status in {ResultStatus.FAILED, ResultStatus.BLOCKED})
-            execution_status = "completed" if failed_count == 0 else ("partially_completed" if success_count else "failed")
+            failed_count = sum(
+                1 for result in results.values() if result.status in {ResultStatus.FAILED, ResultStatus.BLOCKED}
+            )
+            limitation_count = sum(1 for result in results.values() if result.status == ResultStatus.NEED_CONTEXT)
+            execution_status = (
+                "completed"
+                if failed_count == 0 and limitation_count == 0
+                else "partially_completed"
+                if success_count
+                else "failed"
+            )
+            if existing_workflow_id:
+                self.memory.complete_waiting_workflow(existing_workflow_id, new_run_id=run_id)
 
-        standardized_by_task = {
-            task_id: result.standardized_for_handoff()
-            for task_id, result in results.items()
-        }
         standardized_agent_results = {
             "contract_version": STANDARDIZED_RESULTS_CONTRACT_VERSION,
             "items": [
@@ -348,15 +767,12 @@ class AgentCollaborationCoordinator:
                 if result.status in {ResultStatus.COMPLETED, ResultStatus.PARTIAL, ResultStatus.PROPOSAL_READY}
             ),
             "failed_count": sum(
-                1
-                for result in results.values()
-                if result.status in {ResultStatus.FAILED, ResultStatus.BLOCKED}
+                1 for result in results.values() if result.status in {ResultStatus.FAILED, ResultStatus.BLOCKED}
             ),
             "waiting_context_count": sum(
                 1 for result in results.values() if result.status == ResultStatus.NEED_CONTEXT
             ),
         }
-
         safe_task_results = {
             task.task_id: _safe_result_for_compatibility(task, results[task.task_id])
             for task in tasks
@@ -367,12 +783,21 @@ class AgentCollaborationCoordinator:
             dict.fromkeys(
                 ([str(planner_metadata.get("warning"))] if planner_metadata.get("warning") else [])
                 + [warning for result in results.values() for warning in result.warnings]
+                + [
+                    item.reason or item.description
+                    for item in all_missing
+                    if not item.ask_user and item.category in {"system_data", "upstream_result"}
+                ]
             )
         )
         errors = [
             result.summary
             for result in results.values()
             if result.status in {ResultStatus.FAILED, ResultStatus.BLOCKED}
+        ] + [
+            item.reason or item.description
+            for item in all_missing
+            if item.category == "tool_failure"
         ]
         memory_stats = self.memory.stats(session)
         return {
@@ -380,16 +805,16 @@ class AgentCollaborationCoordinator:
             "answer": answer,
             "task_results": safe_task_results,
             "standardized_agent_results": standardized_agent_results,
-            "tool_calls": [],  # Hard boundary: coordinator never receives specialist Tool details.
+            "tool_calls": [],
             "internal_tool_call_count": sum(int(result.metadata.get("internal_call_count") or 0) for result in results.values()),
             "execution_order": [task.task_id for task in tasks if task.task_id in results],
             "execution_batches": batches,
-            "warnings": warnings,
-            "errors": errors,
+            "warnings": list(dict.fromkeys(str(item) for item in warnings if str(item).strip())),
+            "errors": list(dict.fromkeys(str(item) for item in errors if str(item).strip())),
             "execution_status": execution_status,
             "need_clarification": need_clarification,
             "clarification_question": clarification_question,
-            "missing_context": [item.to_dict() for item in missing],
+            "missing_context": [item.to_dict() for item in all_missing],
             "observations": [
                 {
                     "task_id": task_id,
@@ -412,6 +837,11 @@ class AgentCollaborationCoordinator:
                     "input_summary": task.objective[:300],
                     "output_summary": results[task.task_id].summary[:500] if task.task_id in results else "",
                     "depends_on": list(task.dependency_task_ids),
+                    "execution_mode": (
+                        "rerun" if task.task_id in set(rerun_task_ids or [])
+                        else "reused" if task.task_id in set(reused_task_ids or [])
+                        else "initial"
+                    ),
                 }
                 for task in tasks
             ],
@@ -436,6 +866,13 @@ class AgentCollaborationCoordinator:
                 "agent_capability_catalog": self.directory.safe_catalog(),
                 "session_memory": memory_stats,
                 "session_memory_summary": self.memory.build_summary(session, task_objective=query, max_chars=3000),
+                "waiting_workflow": {
+                    "workflow_id": waiting_workflow_id,
+                    "active": need_clarification,
+                    "resumed": bool(existing_workflow_id),
+                    "reused_task_ids": list(reused_task_ids or []),
+                    "rerun_task_ids": list(rerun_task_ids or []),
+                },
                 "waiting_tasks": [
                     {"task_id": row.get("task_id"), "missing_keys": row.get("missing_keys"), "attempt": row.get("attempt")}
                     for row in self.memory.list_waiting_tasks(session)
@@ -444,12 +881,12 @@ class AgentCollaborationCoordinator:
                     "main_agent_sees_tools": False,
                     "specialists_share_session_memory": True,
                     "full_memory_auto_injected": False,
-                    "missing_context_classification": "unified",
+                    "missing_context_classification": "structured_v2",
                     "legacy_router_reachable": False,
                     "single_entry_only": True,
                 },
                 "single_entry": True,
-                "entry_decision": entry_decision.to_dict(),
+                "entry_decision": entry_decision,
             },
         }
 
@@ -597,26 +1034,9 @@ class AgentCollaborationCoordinator:
                 confidence=1.0,
             )
 
-        if _relation_type(execution_context) == "clarification_answer":
-            for waiting in self.memory.list_waiting_tasks(session_id):
-                for key in waiting.get("missing_keys") or []:
-                    value: Any = str(query or "")
-                    if key == "comparison_targets" and len(codes) >= 2:
-                        value = codes
-                    elif key in {"stock_target", "stock_code"} and codes:
-                        value = codes[0]
-                    self.memory.put(
-                        session_id=session_id,
-                        key=str(key),
-                        value=value,
-                        value_type="user_clarification",
-                        summary=f"用户对缺失项 {key} 的补充：{str(query or '')[:300]}",
-                        source_type="user_clarification",
-                        source_ref=run_id,
-                        confirmed=True,
-                        confidence=1.0,
-                    )
-                self.memory.mark_waiting_resumed(str(waiting.get("waiting_id") or ""), new_run_id=run_id)
+        # Clarification values are bound by _resume_waiting_workflow only after
+        # they are matched to explicit missing keys. Never copy one raw answer
+        # into every waiting field or mark a task resumed before it succeeds.
 
     def _run_dag(
         self,
@@ -627,9 +1047,12 @@ class AgentCollaborationCoordinator:
         default_top_k: int,
         language: str,
         execution_context: dict[str, Any] | None,
+        initial_results: dict[str, AgentResult] | None = None,
+        only_task_ids: set[str] | None = None,
     ) -> tuple[dict[str, AgentResult], list[dict[str, Any]], list[dict[str, Any]]]:
-        results: dict[str, AgentResult] = {}
-        pending = {task.task_id: task for task in tasks}
+        results: dict[str, AgentResult] = dict(initial_results or {})
+        selected = set(only_task_ids) if only_task_ids is not None else {task.task_id for task in tasks}
+        pending = {task.task_id: task for task in tasks if task.task_id in selected}
         batches: list[dict[str, Any]] = []
         handoffs: list[dict[str, Any]] = []
         while pending:
@@ -707,7 +1130,36 @@ class AgentCollaborationCoordinator:
         dependency_results: dict[str, dict[str, Any]],
         execution_context: dict[str, Any] | None,
     ) -> tuple[AgentResult, dict[str, Any]]:
-        context_service = ContextService(self.memory, dependency_results=dependency_results)
+        def artifact_loader(reference: str) -> dict[str, Any] | None:
+            artifact_id = str(reference or "").split(":", 1)[-1].strip()
+            if not artifact_id.startswith("artifact_"):
+                return None
+            payload = self.artifact_store.read(
+                artifact_id,
+                user_id=user_id,
+                conversation_id=task.session_id,
+                run_id=task.run_id,
+            )
+            if not isinstance(payload, dict):
+                return None
+            return _safe_artifact_payload(
+                {
+                    "artifact_id": payload.get("artifact_id"),
+                    "artifact_type": payload.get("artifact_type"),
+                    "schema_version": payload.get("schema_version"),
+                    "created_at": payload.get("created_at"),
+                    "expires_at": payload.get("expires_at"),
+                    "content_summary": payload.get("content_summary") or {},
+                    "sources": payload.get("sources") or [],
+                    "content": payload.get("content") or {},
+                }
+            )
+
+        context_service = ContextService(
+            self.memory,
+            dependency_results=dependency_results,
+            artifact_loader=artifact_loader,
+        )
         handoff_ref = {
             "task_id": task.task_id,
             "target_role": task.assigned_agent,
@@ -907,6 +1359,8 @@ class AgentCollaborationCoordinator:
                 if original is None:
                     continue
                 for missing in waiting_result.missing_items:
+                    if not (missing.system_queryable or missing.category == "system_data"):
+                        continue
                     role = self._select_recovery_role(missing, original.assigned_agent)
                     if not role:
                         continue

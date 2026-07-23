@@ -506,6 +506,27 @@ def deterministic_completion_payload(
             "assessment_source": "single_entry_deterministic_completion",
         }
 
+    if missing_context:
+        categories = {str(item.get("category") or "unknown") for item in missing_context}
+        retryable = any(bool(item.get("retryable")) for item in missing_context)
+        next_action = "retry" if retryable and categories <= {"tool_failure", "upstream_result"} else "report_limitation"
+        return {
+            "status": "partial" if produced else "missing",
+            "produced_outputs": produced,
+            "missing_outputs": list(
+                dict.fromkeys(str(item.get("key") or "required_context") for item in missing_context)
+            ),
+            "conflict_outputs": [],
+            "invalid_reasons": [],
+            "next_action": next_action,
+            "reason_summary": (
+                "System data or an internal dependency is unavailable; user input is not required."
+            ),
+            "confidence": 1.0,
+            "llm_used": False,
+            "assessment_source": "single_entry_deterministic_completion",
+        }
+
     failed = sum(status in {"failed", "blocked"} for status in statuses)
     completed = sum(status in {"completed", "partial", "proposal_ready"} for status in statuses)
     if has_proposal and control_action not in {"confirm", "reject"}:

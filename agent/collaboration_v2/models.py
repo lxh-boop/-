@@ -95,6 +95,28 @@ def _compact_contract_value(
     return str(value)[:max_chars]
 
 
+def _safe_artifact_ref(value: Any) -> dict[str, Any]:
+    """Return the only Artifact metadata allowed across Agent boundaries."""
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "artifact_id",
+        "artifact_type",
+        "schema_version",
+        "created_at",
+        "expires_at",
+        "stock_code",
+        "stock_name",
+        "content_summary",
+        "summary",
+    }
+    return {
+        str(key): _compact_contract_value(item, max_depth=2, max_items=6, max_chars=240)
+        for key, item in value.items()
+        if str(key) in allowed and item not in (None, "", [], {})
+    }
+
+
 class TaskStatus(str, Enum):
     CREATED = "created"
     PENDING = "pending"
@@ -163,6 +185,11 @@ class MissingContextItem:
     reason: str = ""
     searched_sources: list[str] = field(default_factory=list)
     blocking: bool = True
+    category: str = "unknown"
+    ask_user: bool = True
+    retryable: bool = True
+    system_queryable: bool = False
+    origin_status: str = ""
 
     def __post_init__(self) -> None:
         self.key = str(self.key or "").strip()
@@ -171,6 +198,28 @@ class MissingContextItem:
         self.reason = str(self.reason or "").strip()
         self.searched_sources = _str_list(self.searched_sources, limit=20)
         self.blocking = bool(self.blocking)
+        category = str(self.category or "unknown").strip().lower()
+        if category not in {
+            "user_input",
+            "system_data",
+            "tool_failure",
+            "upstream_result",
+            "unknown",
+        }:
+            category = "unknown"
+        self.category = category
+        self.ask_user = bool(self.ask_user)
+        self.retryable = bool(self.retryable)
+        self.system_queryable = bool(self.system_queryable)
+        self.origin_status = str(self.origin_status or "").strip()[:160]
+        if self.category == "user_input":
+            self.ask_user = True
+            self.system_queryable = False
+        elif self.category == "system_data":
+            self.ask_user = False
+            self.system_queryable = True
+        elif self.category in {"tool_failure", "upstream_result"}:
+            self.ask_user = False
 
     def to_dict(self) -> dict[str, Any]:
         return _plain(self)
@@ -356,10 +405,7 @@ class AgentResult:
             ],
             "warnings": list(self.warnings[:8]),
             "missing_items": [item.to_dict() for item in self.missing_items[:8]],
-            "artifact_refs": [
-                _compact_contract_value(item, max_depth=3, max_items=8, max_chars=300)
-                for item in self.artifact_refs[:12]
-            ],
+            "artifact_refs": [_safe_artifact_ref(item) for item in self.artifact_refs[:12]],
             "metadata": _compact_contract_value(
                 safe_metadata,
                 max_depth=3,
@@ -398,7 +444,7 @@ class AgentResult:
             "warnings": list(self.warnings),
             "missing_items": [item.to_dict() for item in self.missing_items],
             "suggested_next_agents": list(self.suggested_next_agents),
-            "artifact_refs": list(self.artifact_refs),
+            "artifact_refs": [_safe_artifact_ref(item) for item in self.artifact_refs],
             "metadata": safe_metadata,
         }
 

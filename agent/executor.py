@@ -3781,6 +3781,14 @@ def run_agent_request(
     intent = "agent_collaboration_v2"
     params: dict[str, Any] = {}
     task_results = dict(unified_execution.get("task_results") or {})
+    collaboration_metadata = dict(unified_execution.get("agent_collaboration_v2") or {})
+    planner_metadata = dict(collaboration_metadata.get("planner") or {})
+    entry_decision_source = str(planner_metadata.get("entry_decision_source") or "main_entry_llm")
+    agent_plan_source = str(planner_metadata.get("agent_plan_source") or planner_metadata.get("planner") or "unknown")
+    agent_plan_llm_used = bool(planner_metadata.get("agent_plan_llm_used"))
+    specialist_internal_plan_source = str(
+        planner_metadata.get("specialist_internal_plan_source") or "specialist_private_runtime"
+    )
     agent_tasks = []
     for task_id, task_result in task_results.items():
         if not isinstance(task_result, dict):
@@ -3824,8 +3832,12 @@ def run_agent_request(
             "old_router_used": False,
         },
         "diagnostics": {
-            "llm_used": True,
-            "decision_source": "single_main_agent_entry",
+            "llm_used": bool("llm" in entry_decision_source or agent_plan_llm_used),
+            "decision_source": agent_plan_source,
+            "entry_decision_source": entry_decision_source,
+            "agent_plan_source": agent_plan_source,
+            "agent_plan_llm_used": agent_plan_llm_used,
+            "specialist_internal_plan_source": specialist_internal_plan_source,
             "fallback_used": False,
             "legacy_router_called": False,
             "keyword_business_fallback_used": False,
@@ -3834,7 +3846,11 @@ def run_agent_request(
             "llm_config_hash": llm_service.config_hash,
         },
         "supervisor_decision": {
-            "decision_source": "main_coordinator_llm",
+            "decision_source": agent_plan_source,
+            "entry_decision_source": entry_decision_source,
+            "agent_plan_source": agent_plan_source,
+            "agent_plan_llm_used": agent_plan_llm_used,
+            "specialist_internal_plan_source": specialist_internal_plan_source,
             "intent": "agent_collaboration_v2",
             "tasks": agent_tasks,
             "agent_sequence": [str(item.get("assigned_agent") or "") for item in agent_tasks],
