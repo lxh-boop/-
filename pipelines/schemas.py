@@ -126,6 +126,8 @@ class PaperTradingPipelineResult(BasePipelineResult):
     account: Any | None = None
     positions: list[Any] = field(default_factory=list)
     orders: list[Any] = field(default_factory=list)
+    graph_refs: list[dict[str, Any]] = field(default_factory=list)
+    graph_sync: dict[str, Any] = field(default_factory=dict)
     is_paper_trading: bool = True
 
 

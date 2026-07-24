@@ -97,6 +97,16 @@ class Reranker:
                 RetrievalResult(
                     **{
                         **item.to_dict(),
+                        "metadata": {
+                            **metadata,
+                            "graph_evidence_key": str(
+                                metadata.get("graph_evidence_key")
+                                or metadata.get("event_id")
+                                or metadata.get("document_id")
+                                or item.news_id
+                                or item.chunk_id
+                            ),
+                        },
                         "final_rank": len(ranked) + 1,
                     }
                 )

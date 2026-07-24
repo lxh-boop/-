@@ -89,6 +89,19 @@ COLD_START_NEWS_RELIABILITY_WEIGHT = 1.0
 ENABLE_RAG = True
 ENABLE_LLM_EXPLAINER = True
 
+# ============================================================
+# Neo4j 金融事实图
+# ============================================================
+# Agent 公共实体协议只使用 GraphRef。证券代码、名称和供应商标识只能在
+# Worker 私有 Provider Adapter 内部使用。Neo4j 未配置时不回退旧实体解析器。
+NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://127.0.0.1:7687")
+NEO4J_USERNAME = os.environ.get("NEO4J_USERNAME", os.environ.get("NEO4J_USER", "neo4j"))
+NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "")
+NEO4J_DATABASE = os.environ.get("NEO4J_DATABASE", "neo4j")
+FINANCIAL_GRAPH_ID = os.environ.get("FINANCIAL_GRAPH_ID", "financial_graph")
+NEO4J_CONNECTION_TIMEOUT_SECONDS = float(os.environ.get("NEO4J_CONNECTION_TIMEOUT_SECONDS", "10"))
+NEO4J_MAX_CONNECTION_POOL_SIZE = int(os.environ.get("NEO4J_MAX_CONNECTION_POOL_SIZE", "20"))
+
 
 # ============================================================
 # 大模型接口设置

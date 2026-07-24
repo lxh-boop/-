@@ -73,7 +73,7 @@ from agent.tools.portfolio_state_tool import query_portfolio_state
 from agent.tools.scheduler_tool import query_scheduler_status
 from agent.tools.tool_registry import list_tools
 from agent.tools.tool_schemas import PAPER_AGENT_DISCLAIMER
-from agent.collaboration_v2 import execute_control_action
+from agent.collaboration import execute_control_action
 from agent.services.strategy_proposal_service import StrategyProposalService
 from app.reflection_ui import build_reflection_safe_summary, format_reflection_caption
 from app.handoff_ui import build_handoff_safe_summary, format_handoff_caption
@@ -93,7 +93,7 @@ WELCOME_MESSAGE = (
 QUICK_QUESTIONS = [
     "查看当前模拟盘账户和持仓",
     "查看当前预测排名前十的股票",
-    "分析 600519",
+    "分析贵州茅台（由金融图解析实体）",
     "查看每日自动更新和调度状态",
 ]
 
@@ -105,11 +105,8 @@ def _legacy_direct_commit_disabled(*args: Any, **kwargs: Any) -> None:
 def answer_classic_ai_agent_question(
     question: str,
     user_id: str = "default",
-    trade_date: str | None = None,
-    stock_code: str | None = None,
     output_dir: str = "outputs",
 ) -> dict[str, Any]:
-    del trade_date, stock_code
     if not str(question or "").strip():
         return {
             "success": False,
@@ -1487,6 +1484,10 @@ def _phase51_render_developer_details(
         st.json(_redact_ui_payload_for_display(summarize_mcp_usage(last_result)))
         st.markdown("#### Last agent result")
         st.json(_redact_ui_payload_for_display(last_result))
+        st.markdown("#### Financial graph refs")
+        graph_runtime = last_result.get("graph_runtime") if isinstance(last_result.get("graph_runtime"), dict) else {}
+        graph_refs = graph_runtime.get("focus_refs") or ((last_result.get("result") or {}).get("data") or {}).get("graph_refs") or []
+        st.json(_redact_ui_payload_for_display(graph_refs))
         _phase8_record_metric(user_id, "memory_lazy_load_ms", started_at)
         st.divider()
         st.json(_redact_ui_payload_for_display(tools or _safe_tools()))
@@ -1529,8 +1530,8 @@ def _normalise_answer(result: dict[str, Any], language: str | None = None) -> st
         "Missing or invalid stock code",
         "Agent request failed",
         "Please enter a question or command",
-        "invalid_stock_code",
-        "missing_stock_code",
+        "financial_graph_runtime",
+        "neo4j_connectivity_failed",
     ]
 
     if _is_explainable_business_failure(result):

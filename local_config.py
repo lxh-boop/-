@@ -41,6 +41,14 @@ DEFAULT_LOCAL_CONFIG = {
     "mcp_example_allowed_tools": ["market_risk_summary"],
     "mcp_example_timeout_seconds": 5.0,
     "mcp_discovery_ttl_seconds": 300,
+    "neo4j_uri": "bolt://127.0.0.1:7687",
+    "neo4j_username": "neo4j",
+    "neo4j_password": "",
+    "neo4j_database": "neo4j",
+    "financial_graph_id": "financial_graph",
+    "neo4j_encrypted": "",
+    "neo4j_connection_timeout_seconds": 10.0,
+    "neo4j_max_connection_pool_size": 20,
 }
 
 

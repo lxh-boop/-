@@ -1,4 +1,4 @@
-"""Compatibility façade for the retired keyword Agent registry."""
+"""Single Main-Agent registry for the Neo4j financial-graph runtime."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,41 +6,45 @@ from typing import Any
 
 
 def get_agent_registry() -> dict[str, Any]:
-    # Kept only for callers that inspect the historical public symbol.
-    return {"main_coordinator": "agent.executor.run_agent_request"}
+    return {
+        "financial_graph_agent": {
+            "entry": "agent.executor.run_agent_request",
+            "public_identity_contract": "GraphRef",
+            "worker_task_contract": "graph_agent_task.v1",
+            "worker_result_contract": "graph_worker_result.v1",
+        }
+    }
 
 
 def route_agent(query: str) -> str:
     del query
-    return "main_coordinator"
+    return "financial_graph_agent"
 
 
 def answer_with_registry(
     query: str,
     user_id: str = "default",
-    trade_date: str | None = None,
-    stock_code: str | None = None,
+    graph_refs: list[dict[str, Any]] | None = None,
+    as_of_time: str | None = None,
     output_dir: str | Path = "outputs",
     db_path: str | Path | None = None,
     top_k: int = 5,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    # trade_date/stock_code are retained in the signature only. They are passed
-    # as explicit context rather than used for keyword routing.
     from agent.executor import run_agent_request
 
-    decomposition_context = dict(kwargs.pop("decomposition_context", {}) or {})
-    if trade_date:
-        decomposition_context["trade_date"] = trade_date
-    if stock_code:
-        decomposition_context["stock_code"] = stock_code
+    context = dict(kwargs.pop("decomposition_context", {}) or {})
+    if graph_refs:
+        context["graph_refs"] = [dict(item) for item in graph_refs if isinstance(item, dict)]
+    if as_of_time:
+        context["as_of_time"] = str(as_of_time)
     return run_agent_request(
         query,
         user_id=user_id,
         output_dir=output_dir,
         db_path=db_path,
         top_k=top_k,
-        decomposition_context=decomposition_context,
+        decomposition_context=context,
         **kwargs,
     )
 

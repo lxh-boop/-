@@ -22,3 +22,4 @@ pytest-mock
 pytest-playwright
 playwright
 requests
+neo4j>=6,<7

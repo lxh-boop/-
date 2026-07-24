@@ -8,6 +8,7 @@ from .models import AgentCapabilityCard
 COORDINATOR = "COORDINATOR"
 EVIDENCE_RETRIEVER = "EVIDENCE_RETRIEVER"
 PORTFOLIO_ANALYST = "PORTFOLIO_ANALYST"
+GRAPH_IMPACT_ANALYST = "GRAPH_IMPACT_ANALYST"
 RISK_ANALYST = "RISK_ANALYST"
 STRATEGY_GUARD = "STRATEGY_GUARD"
 REPORT_WRITER = "REPORT_WRITER"
@@ -15,10 +16,10 @@ SYSTEM_DIAGNOSTIC = "SYSTEM_DIAGNOSTIC"
 
 
 class AgentDirectory:
-    """Coordinator-facing directory.
+    """Coordinator-facing Worker capability cards only.
 
-    Cards describe business capabilities only. They deliberately omit tool names,
-    schemas, API endpoints, database tables and implementation paths.
+    The Main Agent never receives private tools, provider identifiers, Cypher,
+    database schemas or internal prompts.
     """
 
     def __init__(self) -> None:
@@ -26,55 +27,67 @@ class AgentDirectory:
             AgentCapabilityCard(
                 agent_id=EVIDENCE_RETRIEVER,
                 role=EVIDENCE_RETRIEVER,
-                description="检索并整理股票、市场、新闻、公告、RAG 与模型证据。",
+                description="读取新闻、公告、研报、RAG 与市场证据，并把结构化证据写入金融事实图。",
                 accepted_task_types=[
                     "retrieve_evidence",
-                    "analyze_stock_evidence",
-                    "compare_stock_evidence",
+                    "analyze_entity_evidence",
+                    "compare_entity_evidence",
+                    "ingest_evidence",
                     "resolve_context",
                 ],
-                input_description="证据目标、对象范围、时间范围以及会话上下文引用。",
-                output_types=["evidence_analysis", "context_resolution"],
+                input_description="GraphRef 目标、查询目标、时间边界和任务图视图引用。",
+                output_types=["evidence_result", "graph_patch", "context_resolution"],
                 supports_parallel=True,
             ),
             AgentCapabilityCard(
                 agent_id=PORTFOLIO_ANALYST,
                 role=PORTFOLIO_ANALYST,
-                description="分析模拟盘账户、持仓、现金、组合结构和目标组合适配性。",
+                description="读取模拟盘账户与持仓，生成权威 PortfolioSnapshot GraphRef，并分析组合结构。",
                 accepted_task_types=[
+                    "load_portfolio_snapshot",
                     "analyze_portfolio",
                     "analyze_portfolio_fit",
                     "compare_portfolios",
                     "resolve_context",
                 ],
-                input_description="组合分析目标、候选对象以及会话上下文引用。",
-                output_types=["portfolio_analysis", "portfolio_comparison", "context_resolution"],
+                input_description="运行时 user_id、GraphRef 上下文、时间边界和依赖结果引用。",
+                output_types=["portfolio_snapshot", "portfolio_analysis", "context_resolution"],
+                supports_parallel=True,
+            ),
+            AgentCapabilityCard(
+                agent_id=GRAPH_IMPACT_ANALYST,
+                role=GRAPH_IMPACT_ANALYST,
+                description="基于 Neo4j 金融事实图查找新闻、事件或声明到用户持仓的可追踪影响路径。",
+                accepted_task_types=[
+                    "analyze_graph_impact",
+                    "map_evidence_to_holdings",
+                    "trace_financial_relation",
+                    "resolve_context",
+                ],
+                input_description="原因 GraphRef、PortfolioSnapshot GraphRef、时间边界和依赖结果引用。",
+                output_types=["impact_paths", "impacted_holdings", "context_resolution"],
                 supports_parallel=True,
             ),
             AgentCapabilityCard(
                 agent_id=RISK_ANALYST,
                 role=RISK_ANALYST,
-                description="分析风险画像、集中度、波动、权限约束和方案前后风险变化。",
+                description="分析用户风险画像、组合集中度、权限约束和方案前后风险。",
                 accepted_task_types=[
                     "analyze_risk",
                     "compare_risk",
                     "review_risk_constraints",
                     "resolve_context",
                 ],
-                input_description="风险问题、组合或候选方案，以及会话上下文引用。",
+                input_description="PortfolioSnapshot GraphRef、候选方案引用和任务图视图。",
                 output_types=["risk_analysis", "risk_comparison", "context_resolution"],
                 supports_parallel=True,
             ),
             AgentCapabilityCard(
                 agent_id=STRATEGY_GUARD,
                 role=STRATEGY_GUARD,
-                description="生成或审查模拟盘调整预案，确保建议与审批、重新校验和提交边界一致。",
-                accepted_task_types=[
-                    "review_strategy",
-                    "build_proposal",
-                    "review_proposal",
-                ],
-                input_description="策略目标、组合与风险结果引用；只能生成或审查预案。",
+                description="生成或审查模拟盘调整 Proposal，并保持 Approval→Revalidate→Commit 边界。",
+                accepted_task_types=["review_strategy", "build_proposal", "review_proposal"],
+                input_description="GraphRef 目标、组合与风险结果引用；只能生成或审查 Proposal。",
                 output_types=["strategy_review", "proposal"],
                 supports_parallel=False,
                 can_generate_proposal=True,
@@ -82,18 +95,18 @@ class AgentDirectory:
             AgentCapabilityCard(
                 agent_id=REPORT_WRITER,
                 role=REPORT_WRITER,
-                description="将多个专业 Agent 的标准结果整理成结构化报告草稿。",
+                description="只依据 GraphWorkerResult 汇总最终报告，不重新解析原始证券代码或新闻正文。",
                 accepted_task_types=["write_report", "summarize_results"],
-                input_description="上游专业 Agent 的标准结果引用。",
+                input_description="上游 GraphWorkerResult 引用。",
                 output_types=["report_draft"],
                 supports_parallel=False,
             ),
             AgentCapabilityCard(
                 agent_id=SYSTEM_DIAGNOSTIC,
                 role=SYSTEM_DIAGNOSTIC,
-                description="诊断 Agent、RAG、模型、调度、数据库与运行链路状态。",
+                description="诊断 Agent、Neo4j、RAG、模型、数据库和运行链路状态。",
                 accepted_task_types=["diagnose_system", "inspect_runtime", "resolve_context"],
-                input_description="故障现象、运行引用和会话上下文引用。",
+                input_description="故障现象、运行引用和图运行时状态。",
                 output_types=["diagnostic_analysis", "context_resolution"],
                 supports_parallel=True,
             ),
@@ -103,7 +116,7 @@ class AgentDirectory:
     def get(self, agent_id: str) -> AgentCapabilityCard:
         key = str(agent_id or "").upper()
         if key not in self._cards:
-            raise KeyError(f"unknown specialist agent: {key}")
+            raise KeyError(f"unknown_worker_agent:{key}")
         return self._cards[key]
 
     def list_cards(self) -> list[AgentCapabilityCard]:

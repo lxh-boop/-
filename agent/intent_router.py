@@ -1,12 +1,10 @@
-"""Removed keyword intent router compatibility façade."""
 from __future__ import annotations
 
-SUPPORTED_INTENTS = {"agent_collaboration_v2"}
+from agent.collaboration.integration import route_unified_agent_request
 
 
-def route_intent(query: str) -> str:
-    del query
-    return "agent_collaboration_v2"
+def route_intent(query: str, **kwargs):
+    return route_unified_agent_request(query, **kwargs)
 
 
-__all__ = ["SUPPORTED_INTENTS", "route_intent"]
+__all__ = ["route_intent", "route_unified_agent_request"]

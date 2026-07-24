@@ -6,28 +6,26 @@ from typing import Any
 from core.llm import LLMService
 
 from .control_gateway import ControlGateway
-from .contracts import STANDARDIZED_RESULTS_CONTRACT_VERSION
 from .coordinator import AgentCollaborationCoordinator
 from .entry_decision import EntryDecision, RequestMode
 from .llm_runtime import require_run_llm_service
 from .session_memory import SessionMemoryStore
 
 
-class UnifiedAgentRequest:
-    """Compatibility object that always names the one Main Coordinator entry."""
+class UnifiedGraphAgentRequest:
+    """The sole public Agent entry after the Neo4j hard cut."""
 
     def __init__(self, query: str) -> None:
-        self.intent = "agent_collaboration_v2"
+        self.intent = "financial_graph_agent"
         self.parameters: dict[str, Any] = {}
-        self.execution_route = "single_main_agent_entry"
-        self.decomposition: dict[str, Any] = {
+        self.execution_route = "single_main_agent_graph_entry"
+        self.decomposition = {
             "query": str(query or ""),
-            "route_layer": "single_main_agent_entry",
+            "route_layer": "single_main_agent_graph_entry",
             "tasks": [],
             "is_multi_intent": False,
             "need_clarification": False,
             "clarification_question": "",
-            "unsupported_reason": "",
             "confidence": 1.0,
             "warnings": [],
             "user_goal": {
@@ -36,35 +34,29 @@ class UnifiedAgentRequest:
                 "action": "main_agent_decides",
                 "objects": [],
                 "constraints": [],
-                "expected_outputs": ["standardized_agent_results_or_control_result"],
+                "expected_outputs": ["graph_worker_results_or_control_result"],
             },
             "task_plan": {
                 "tasks": [],
-                "planning_level": "agent",
+                "planning_level": "worker_agent",
                 "tool_visibility": "none",
-                "old_router_used": False,
+                "legacy_entity_protocol": False,
             },
             "supervisor_decision": {
-                "decision_source": "single_main_agent_entry",
-                "intent": "agent_collaboration_v2",
+                "decision_source": "single_main_agent_graph_entry",
+                "intent": "financial_graph_agent",
                 "tasks": [],
                 "agent_sequence": [],
                 "dependencies": {},
                 "requires_write": False,
                 "confidence": 1.0,
-                "reason": "all_requests_enter_main_coordinator",
+                "reason": "all_requests_enter_existing_main_coordinator_with_graph_contracts",
                 "safety_flags": [
                     "coordinator_tool_visibility_none",
-                    "legacy_router_disabled",
-                    "single_entry_only",
+                    "worker_private_tools",
+                    "neo4j_entity_authority",
+                    "legacy_public_entity_protocol_disabled",
                 ],
-            },
-            "diagnostics": {
-                "llm_used": False,
-                "decision_source": "single_main_agent_entry",
-                "llm_planner_called": False,
-                "fallback_used": False,
-                "legacy_router_called": False,
             },
         }
 
@@ -78,9 +70,8 @@ class UnifiedAgentRequest:
         }
 
 
-def route_unified_agent_request(query: str, **_: Any) -> UnifiedAgentRequest:
-    """Non-semantic compatibility façade; semantic planning occurs once later."""
-    return UnifiedAgentRequest(str(query or ""))
+def route_unified_agent_request(query: str, **_: Any) -> UnifiedGraphAgentRequest:
+    return UnifiedGraphAgentRequest(str(query or ""))
 
 
 def execute_unified_agent_request(
@@ -103,30 +94,22 @@ def execute_unified_agent_request(
         db_path=db_path,
         llm_service=binding.service,
     )
-    result = coordinator.execute(
-        query=str(query or ""),
-        decomposition=dict(decomposition or {}),
-        user_id=str(user_id or "default"),
-        default_top_k=max(1, min(int(default_top_k or 50), 100)),
-        session_id=str(session_id or f"session_{user_id}"),
-        run_id=str(run_id or ""),
-        language=str(language or "zh"),
-        execution_context=dict(context or {}),
-    )
-    result.setdefault(
-        "standardized_agent_results",
-        {
-            "contract_version": STANDARDIZED_RESULTS_CONTRACT_VERSION,
-            "items": [],
-            "task_count": 0,
-            "completed_count": 0,
-            "failed_count": 0,
-            "waiting_context_count": 0,
-        },
-    )
-    collab = result.setdefault("agent_collaboration_v2", {})
-    collab["llm_binding"] = binding.public_dict()
-    collab["llm_binding"]["single_service_identity"] = True
+    try:
+        result = coordinator.execute(
+            query=str(query or ""),
+            decomposition=dict(decomposition or {}),
+            user_id=str(user_id or "default"),
+            default_top_k=max(1, min(int(default_top_k or 50), 100)),
+            session_id=str(session_id or f"session_{user_id}"),
+            run_id=str(run_id or ""),
+            language=str(language or "zh"),
+            execution_context=dict(context or {}),
+        )
+    finally:
+        coordinator.close()
+    runtime = result.setdefault("graph_runtime", {})
+    runtime["llm_binding"] = binding.public_dict()
+    runtime["llm_binding"]["single_service_identity"] = True
     return result
 
 
@@ -144,7 +127,6 @@ def execute_control_action(
     db_path: str | Path | None = None,
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Explicit UI-card control path inside the same ControlGateway boundary."""
     normalized = str(action or "").strip().lower()
     mode = {
         "confirm": RequestMode.CONFIRM,
@@ -176,26 +158,12 @@ def execute_control_action(
     )
 
 
-# Compatibility names all delegate to the exact same implementation.
-def execute_agent_collaboration_v2(**kwargs: Any) -> dict[str, Any]:
-    return execute_unified_agent_request(**kwargs)
-
-
-def route_agent_query_v2_compat(*args: Any, **kwargs: Any) -> UnifiedAgentRequest:
-    query = ""
-    if args:
-        query = str(args[1] if callable(args[0]) and len(args) > 1 else args[0])
-    else:
-        query = str(kwargs.get("query") or "")
-    return route_unified_agent_request(query)
-
-
-def should_use_agent_collaboration_v2(intent: str, decomposition: dict[str, Any] | None = None) -> bool:
+def should_use_financial_graph_agent(intent: str, decomposition: dict[str, Any] | None = None) -> bool:
     del decomposition
-    return str(intent or "") == "agent_collaboration_v2"
+    return str(intent or "") == "financial_graph_agent"
 
 
-def clear_agent_collaboration_session(
+def clear_financial_graph_agent_session(
     session_id: str,
     *,
     output_dir: str | Path = "outputs",

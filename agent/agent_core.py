@@ -34,7 +34,7 @@ def run_agent(
     )
     return AgentResponse(
         answer=str(result.get("answer") or ""),
-        intent="agent_collaboration_v2",
+        intent="financial_graph_agent",
         tool_calls=[],
         data=dict(result or {}),
     )

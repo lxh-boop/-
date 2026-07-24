@@ -586,9 +586,50 @@ def run_paper_trading_pipeline(
         decisions = _build_paper_decisions(record_context, plan, orders, context.decision_time or now_text())
         message = "Paper trading disabled or dry_run enabled; generated plan only."
 
+    graph_sync: dict[str, Any] = {}
+    graph_refs: list[dict[str, Any]] = []
+    try:
+        from agent.graph.integration import sync_portfolio_payload
+
+        graph_sync = sync_portfolio_payload(
+            user_id=context.user_id,
+            portfolio_payload={
+                "data": {
+                    "account": account.to_dict() if hasattr(account, "to_dict") else dict(account or {}),
+                    "positions": [
+                        item.to_dict() if hasattr(item, "to_dict") else dict(item)
+                        for item in positions
+                    ],
+                    "as_of_time": decision_time or trade_date,
+                }
+            },
+            as_of_time=decision_time or trade_date,
+            source_task_id=context.run_id or context.job_id or f"paper_pipeline:{context.user_id}:{trade_date}",
+            source_agent_id="PAPER_TRADING_PIPELINE",
+        )
+        if isinstance(graph_sync.get("portfolio_ref"), dict):
+            graph_refs.append(dict(graph_sync["portfolio_ref"]))
+        graph_refs.extend(
+            dict(item) for item in graph_sync.get("holding_refs") or [] if isinstance(item, dict)
+        )
+    except Exception as exc:
+        # The hard-cut architecture does not silently fall back to the old entity
+        # protocol. Business execution data remains persisted for audit, while the
+        # pipeline is marked partial until the authoritative graph is synchronized.
+        cash_flow_warnings = list(cash_flow_warnings) + [
+            f"financial_graph_sync_failed:{type(exc).__name__}:{exc}"
+        ]
+        graph_sync = {
+            "success": False,
+            "status": "graph_sync_failed",
+            "error": f"{type(exc).__name__}:{exc}",
+        }
+
+    result_status = PipelineStatus.SUCCESS if graph_sync.get("success") else PipelineStatus.PARTIAL
+    result_message = message if graph_sync.get("success") else f"{message} Neo4j financial graph synchronization failed."
     return PaperTradingPipelineResult(
-        status=PipelineStatus.SUCCESS,
-        message=message,
+        status=result_status,
+        message=result_message,
         input_count=len(final_recommendations),
         output_count=len(orders) if orders else len(plan.decisions),
         output_paths=output_paths,
@@ -596,6 +637,8 @@ def run_paper_trading_pipeline(
         account=account,
         positions=positions,
         orders=orders,
+        graph_refs=graph_refs,
+        graph_sync=graph_sync,
         warnings=cash_flow_warnings,
         is_paper_trading=True,
     )

@@ -1417,6 +1417,76 @@ llm_available = active_llm_settings.is_configured
 
 
 # ============================================================
+# 侧边栏：Neo4j 金融事实图
+# ============================================================
+st.sidebar.divider()
+st.sidebar.header("Neo4j 金融事实图")
+st.sidebar.caption("GraphRef、实体标识、新闻证据、事实声明和持仓影响路径的唯一权威层。")
+neo4j_uri_input = st.sidebar.text_input(
+    "Neo4j URI",
+    value=str(local_cfg.get("neo4j_uri") or "bolt://127.0.0.1:7687"),
+    key="neo4j_uri_input",
+)
+neo4j_username_input = st.sidebar.text_input(
+    "Neo4j Username",
+    value=str(local_cfg.get("neo4j_username") or "neo4j"),
+    key="neo4j_username_input",
+)
+neo4j_password_input = st.sidebar.text_input(
+    "Neo4j Password",
+    value="",
+    type="password",
+    placeholder="已配置时可留空；输入新密码才会覆盖",
+    key="neo4j_password_input",
+)
+neo4j_database_input = st.sidebar.text_input(
+    "Neo4j Database",
+    value=str(local_cfg.get("neo4j_database") or "neo4j"),
+    key="neo4j_database_input",
+)
+neo4j_cols = st.sidebar.columns(2)
+check_neo4j_button = neo4j_cols[0].button("检查图数据库", key="check_neo4j")
+save_neo4j_button = neo4j_cols[1].button("保存图配置", key="save_neo4j")
+
+if save_neo4j_button:
+    local_cfg.update({
+        "neo4j_uri": neo4j_uri_input.strip(),
+        "neo4j_username": neo4j_username_input.strip(),
+        "neo4j_database": neo4j_database_input.strip() or "neo4j",
+    })
+    if neo4j_password_input.strip():
+        local_cfg["neo4j_password"] = neo4j_password_input.strip()
+    save_local_config(local_cfg)
+    st.sidebar.success("Neo4j 配置已保存。")
+    st.rerun()
+
+if check_neo4j_button:
+    check_local_cfg = dict(local_cfg)
+    check_local_cfg.update({
+        "neo4j_uri": neo4j_uri_input.strip(),
+        "neo4j_username": neo4j_username_input.strip(),
+        "neo4j_database": neo4j_database_input.strip() or "neo4j",
+    })
+    if neo4j_password_input.strip():
+        check_local_cfg["neo4j_password"] = neo4j_password_input.strip()
+    try:
+        from agent.graph.settings import Neo4jSettings
+        from agent.graph.store import Neo4jFinancialGraphStore
+        graph_settings = Neo4jSettings.from_env(local_config=check_local_cfg)
+        graph_store = Neo4jFinancialGraphStore(graph_settings)
+        try:
+            graph_store.verify_connectivity()
+            graph_store.ensure_schema()
+            count_rows = graph_store.execute_read("MATCH (n) RETURN count(n) AS node_count")
+            node_count = int((count_rows[0] if count_rows else {}).get("node_count") or 0)
+            st.sidebar.success(f"Neo4j 连接正常，当前节点数：{node_count}")
+        finally:
+            graph_store.close()
+    except Exception as exc:
+        st.sidebar.error(f"Neo4j 不可用：{type(exc).__name__}: {exc}")
+
+
+# ============================================================
 # Sidebar: MCP read-only evidence tools
 # ============================================================
 
