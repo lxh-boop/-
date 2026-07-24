@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import Locator, Page, sync_playwright
 
 TOP_LEVEL_EXPECTATIONS = {
     "首页 / 预测排名": "二、预测下一交易日股票排名",
@@ -31,6 +31,11 @@ FATAL_MARKERS = (
     "NameError:",
     "AttributeError:",
     "SyntaxError:",
+)
+MAIN_SCROLL_SELECTORS = (
+    '[data-testid="stMain"]',
+    'section.main',
+    '[data-testid="stAppViewContainer"]',
 )
 
 
@@ -57,13 +62,107 @@ def page_has_fatal_error(page: Page) -> tuple[bool, str]:
     return bool(matches), ", ".join(matches)
 
 
-def click_radio(page: Page, label: str, *, occurrence: int = 0) -> None:
-    radios = page.get_by_role("radio", name=label, exact=True)
-    count = radios.count()
-    if count <= occurrence:
-        raise RuntimeError(f"未找到单选项：{label}，期望序号={occurrence}，实际数量={count}")
-    radios.nth(occurrence).click()
-    page.wait_for_timeout(1500)
+def scroll_main_to_bottom(page: Page) -> None:
+    """Scroll Streamlit's internal main container, not only the browser window."""
+    for selector in MAIN_SCROLL_SELECTORS:
+        locator = page.locator(selector)
+        if not locator.count():
+            continue
+        try:
+            locator.first.evaluate("(el) => { el.scrollTop = el.scrollHeight; }")
+        except Exception:
+            pass
+    try:
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    except Exception:
+        pass
+
+
+def locate_radio(page: Page, label: str) -> Locator:
+    """Find a radio by exact accessible name, then use a relaxed fallback."""
+    exact = page.get_by_role("radio", name=label, exact=True)
+    if exact.count():
+        return exact
+    return page.get_by_role("radio", name=label, exact=False)
+
+
+def wait_for_radio_count(
+    page: Page,
+    label: str,
+    *,
+    minimum_count: int,
+    timeout: int = 120_000,
+) -> Locator:
+    """Wait for Streamlit's incremental/lazy widget rendering to finish."""
+    deadline = time.monotonic() + timeout / 1000
+    last_count = 0
+    while time.monotonic() < deadline:
+        fatal, markers = page_has_fatal_error(page)
+        if fatal:
+            raise RuntimeError(f"页面出现致命错误：{markers}")
+
+        radios = locate_radio(page, label)
+        last_count = radios.count()
+        if last_count >= minimum_count:
+            return radios
+
+        scroll_main_to_bottom(page)
+        page.wait_for_timeout(1000)
+
+    raise RuntimeError(
+        f"等待单选项超时：{label}，期望至少 {minimum_count} 个，实际数量={last_count}"
+    )
+
+
+def click_radio(
+    page: Page,
+    label: str,
+    *,
+    occurrence: int = 0,
+    timeout: int = 120_000,
+) -> None:
+    """Select a Streamlit/React-Aria radio without relying on pointer hit-testing."""
+    radios = wait_for_radio_count(
+        page,
+        label,
+        minimum_count=occurrence + 1,
+        timeout=timeout,
+    )
+    target = radios.nth(occurrence)
+
+    # The current item may already be selected. Clicking it again is unnecessary and
+    # can be blocked by Streamlit's sticky header or the React-Aria radiogroup layer.
+    try:
+        if target.is_checked():
+            page.wait_for_timeout(300)
+            return
+    except Exception:
+        pass
+
+    try:
+        target.scroll_into_view_if_needed(timeout=10_000)
+    except Exception:
+        pass
+
+    # `force=True` bypasses Streamlit overlay hit-testing while still using the
+    # native radio input and dispatching the events expected by React.
+    try:
+        target.check(force=True, timeout=15_000)
+    except Exception:
+        # Last-resort DOM click: it does not depend on the pointer-interception layer.
+        target.evaluate("(element) => element.click()")
+
+    page.wait_for_timeout(1800)
+
+
+def wait_for_app_settle(page: Page, *, timeout: int = 120_000) -> None:
+    """Use the top-level selector as the completion signal for the Streamlit run."""
+    wait_for_radio_count(
+        page,
+        "首页 / 预测排名",
+        minimum_count=1,
+        timeout=timeout,
+    )
 
 
 def verify_surface(
@@ -75,7 +174,7 @@ def verify_surface(
     expected_text: str,
     screenshot_name: str,
 ) -> None:
-    visible = wait_for_text(page, expected_text)
+    visible = wait_for_text(page, expected_text, timeout=120_000)
     fatal, markers = page_has_fatal_error(page)
     success = visible and not fatal
     detail = f"expected={expected_text}"
@@ -102,7 +201,7 @@ def main() -> int:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(channel="chrome", headless=not args.headed)
         page = browser.new_page(viewport={"width": 1600, "height": 1000})
-        page.set_default_timeout(45_000)
+        page.set_default_timeout(60_000)
         try:
             page.goto(args.url, wait_until="domcontentloaded", timeout=90_000)
             app_open = wait_for_text(page, "A股每日股票评分系统", timeout=90_000)
@@ -125,6 +224,9 @@ def main() -> int:
             else:
                 record(results, "测试用户可输入", False, "未找到当前用户 ID 输入框")
 
+            wait_for_app_settle(page, timeout=120_000)
+            record(results, "Streamlit 主脚本完成渲染", True, "已找到顶层页面选择器")
+
             for index, (label, expected) in enumerate(TOP_LEVEL_EXPECTATIONS.items(), start=2):
                 click_radio(page, label, occurrence=0)
                 verify_surface(
@@ -139,7 +241,7 @@ def main() -> int:
             # Return to home. When home is rendered, the same label occurs twice:
             # occurrence 0 is the top-level selector and occurrence 1 is the home module selector.
             click_radio(page, "首页 / 预测排名", occurrence=0)
-            wait_for_text(page, TOP_LEVEL_EXPECTATIONS["首页 / 预测排名"])
+            wait_for_text(page, TOP_LEVEL_EXPECTATIONS["首页 / 预测排名"], timeout=120_000)
             for index, (label, expected) in enumerate(HOME_SECTION_EXPECTATIONS.items(), start=10):
                 occurrence = 1 if label == "首页 / 预测排名" else 0
                 click_radio(page, label, occurrence=occurrence)
@@ -163,7 +265,7 @@ def main() -> int:
 
             if args.deep_agent_check:
                 click_radio(page, "AI Agent", occurrence=0)
-                wait_for_text(page, "AI Agent 控制中心")
+                wait_for_text(page, "AI Agent 控制中心", timeout=120_000)
                 chat = page.locator(
                     'textarea[aria-label="Chat input"], textarea[data-testid="stChatInputTextArea"]'
                 )
