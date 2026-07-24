@@ -15,17 +15,17 @@ except ImportError:
             return _noop
     st = _StreamlitStub()
 
-from evaluation.system_monitor import (
+from application.system_monitor_service import (
+    build_handoff_health_summary,
+    build_memory_store_health_summary,
+    build_message_bus_health_summary,
+    build_react_health_summary,
+    build_reflection_health_summary,
     build_system_monitor_snapshot,
     collect_and_store_system_monitor_snapshot,
     list_system_monitor_alerts,
     list_system_monitor_history,
 )
-from agent.communication import MessageStore
-from agent.memory.memory_context_bridge import build_memory_store_health_summary
-from agent.react.react_context_bridge import build_react_health_summary
-from app.handoff_ui import build_handoff_health_summary
-from app.reflection_ui import build_reflection_health_summary
 
 
 SYSTEM_MONITOR_PAGE_TITLE = "系统监控"
@@ -88,33 +88,7 @@ def _runtime_health_rows(snapshot: dict[str, Any]) -> pd.DataFrame:
 
 
 def _build_message_bus_health_summary(*, user_id: str = "default", output_dir: str | Path = "outputs") -> dict[str, Any]:
-    try:
-        root = Path(output_dir) / "message_logs" / str(user_id or "default")
-        files = sorted(root.glob("*.jsonl"), key=lambda item: item.stat().st_mtime, reverse=True) if root.exists() else []
-        latest_run_id = files[0].stem if files else ""
-        store = MessageStore(output_dir=output_dir)
-        messages = store.list_messages_by_run(latest_run_id, user_id=user_id) if latest_run_id else []
-        type_values = [str(getattr(message.message_type, "value", message.message_type)) for message in messages]
-        return {
-            "status": "ok",
-            "latest_run_id": latest_run_id,
-            "latest_run_message_count": len(messages),
-            "message_store_summary": f"message_logs/{str(user_id or 'default')}/files={len(files)}",
-            "error_message_count": sum(1 for item in type_values if item == "ERROR_RAISED"),
-            "pending_approval_message_count": sum(1 for item in type_values if item == "APPROVAL_REQUESTED"),
-            "artifact_message_count": sum(1 for item in type_values if item == "ARTIFACT_CREATED"),
-        }
-    except Exception as exc:
-        return {
-            "status": "unavailable",
-            "latest_run_id": "",
-            "latest_run_message_count": 0,
-            "message_store_summary": "message_logs/unavailable",
-            "error": type(exc).__name__,
-            "error_message_count": 0,
-            "pending_approval_message_count": 0,
-            "artifact_message_count": 0,
-        }
+    return build_message_bus_health_summary(user_id=user_id, output_dir=output_dir)
 
 
 def _message_bus_health_rows(summary: dict[str, Any]) -> pd.DataFrame:

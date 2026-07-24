@@ -6,9 +6,25 @@ import time
 import uuid
 from datetime import datetime
 from typing import Any
-from core.llm.runtime_settings import LLMRuntimeSettings
+from application.agent_service import (
+    AgentApplicationService,
+    LLMRuntimeSettings,
+    PAPER_AGENT_DISCLAIMER,
+    StrategyProposalService,
+    build_handoff_safe_summary,
+    build_memory_safe_summary,
+    build_react_safe_summary,
+    build_reflection_safe_summary,
+    format_handoff_caption,
+    format_reflection_caption,
+    list_memory_records_safe_page,
+    list_safe_observation_summaries,
+    load_run_snapshot,
+    summarize_mcp_usage,
+    trace_event,
+    trace_exception,
+)
 
-import pandas as pd
 
 try:
     import streamlit as st
@@ -54,31 +70,6 @@ except ImportError:
             return _noop
 
     st = _StreamlitStub()
-
-from agent.communication import MessageStore
-from agent.console_trace import trace_event, trace_exception
-from agent.executor import run_agent_request
-from agent.mcp.registry_bridge import summarize_mcp_usage
-from agent.memory.memory_context_bridge import (
-    build_memory_safe_summary,
-    list_memory_records_safe_page,
-)
-from agent.react.react_context_bridge import (
-    build_react_safe_summary,
-    list_safe_observation_summaries,
-)
-from agent.runtime import load_run_snapshot
-from agent.session.pending_action_store import load_pending_actions
-from agent.tools.portfolio_state_tool import query_portfolio_state
-from agent.tools.scheduler_tool import query_scheduler_status
-from agent.tools.tool_registry import list_tools
-from agent.tools.tool_schemas import PAPER_AGENT_DISCLAIMER
-from agent.collaboration import execute_control_action
-from agent.services.strategy_proposal_service import StrategyProposalService
-from app.reflection_ui import build_reflection_safe_summary, format_reflection_caption
-from app.handoff_ui import build_handoff_safe_summary, format_handoff_caption
-from database.repositories.agent_repository import AgentRepository
-
 
 COMPLIANCE_NOTE = "本项目仅用于机器学习、金融数据分析和项目展示，不构成投资建议，不用于实盘交易。"
 UNAVAILABLE_MESSAGE = "目前不能回答，相关功能仍在后续开发中。"
@@ -220,13 +211,13 @@ def _phase8_cache_data(**cache_kwargs):
 
 
 @_phase8_cache_resource
-def _get_agent_repository(db_path: str | None) -> AgentRepository:
-    return AgentRepository(db_path or None)
+def _get_agent_application_service(db_path: str | None) -> AgentApplicationService:
+    return AgentApplicationService(db_path or None)
 
 
 @_phase8_cache_data(ttl=AGENT_PAGE_CACHE_TTL_SECONDS)
 def _cached_tool_list() -> list[Any]:
-    return list(list_tools() or [])
+    return _get_agent_application_service(None).list_registered_tools()
 
 
 def _phase8_db_key(db_path: str | None) -> str:
@@ -384,19 +375,19 @@ def _phase8_rerun(user_id: str, reason: str) -> None:
 @_phase8_cache_data(ttl=AGENT_PAGE_CACHE_TTL_SECONDS)
 def _cached_active_conversations(user_id: str, db_path_key: str, limit: int, offset: int, version: int) -> list[dict[str, Any]]:
     del version
-    return _get_agent_repository(db_path_key or None).list_active_conversations(user_id, limit=limit, offset=offset)
+    return _get_agent_application_service(db_path_key or None).list_active_conversations(user_id, limit=limit, offset=offset)
 
 
 @_phase8_cache_data(ttl=AGENT_PAGE_CACHE_TTL_SECONDS)
 def _cached_recent_messages(user_id: str, db_path_key: str, conversation_id: str, limit: int, offset: int, version: int) -> list[dict[str, Any]]:
     del version
-    return _get_agent_repository(db_path_key or None).list_recent_messages(conversation_id, user_id=user_id, limit=limit, offset=offset)
+    return _get_agent_application_service(db_path_key or None).list_recent_messages(conversation_id, user_id=user_id, limit=limit, offset=offset)
 
 
 @_phase8_cache_data(ttl=AGENT_PAGE_CACHE_TTL_SECONDS)
 def _cached_current_conversation(user_id: str, db_path_key: str, conversation_id: str, version: int) -> dict[str, Any]:
     del version
-    row = _get_agent_repository(db_path_key or None).get_conversation(conversation_id) or {}
+    row = _get_agent_application_service(db_path_key or None).get_conversation(conversation_id) or {}
     return row if str(row.get("user_id") or "") == str(user_id) else {}
 
 
@@ -678,9 +669,11 @@ def _build_message_trace_safe_summary(
             },
         }
     try:
-        store = MessageStore(output_dir=output_dir)
-        messages = store.list_messages_by_run(run_id, user_id=user_id)
-        trace = store.build_trace(run_id, user_id=user_id)
+        messages, trace = _get_agent_application_service(None).build_message_trace_summary(
+            run_id=run_id,
+            user_id=user_id,
+            output_dir=output_dir,
+        )
     except Exception as exc:
         return {
             "message_trace_available": False,
@@ -749,7 +742,7 @@ def _conversation_title_from_message(message: str) -> str:
 def _create_conversation(user_id: str, db_path: str | None, *, title: str = "", language: str = "zh") -> str:
     conversation_id = f"conv_{uuid.uuid4().hex[:12]}"
     now = _now_text()
-    _get_agent_repository(db_path).upsert_conversation(
+    _get_agent_application_service(db_path).upsert_conversation(
         {
             "conversation_id": conversation_id,
             "user_id": user_id,
@@ -781,18 +774,19 @@ def _list_active_conversations(user_id: str, db_path: str | None, *, limit: int 
 def _conversation_exists(user_id: str, conversation_id: str, db_path: str | None) -> bool:
     if not conversation_id:
         return False
-    row = _get_agent_repository(db_path).get_conversation(conversation_id)
+    row = _get_agent_application_service(db_path).get_conversation(conversation_id)
     return bool(row and str(row.get("user_id") or "") == str(user_id) and str(row.get("status") or "active") == "active")
 
 
 def _rename_conversation(user_id: str, conversation_id: str, title: str, db_path: str | None) -> bool:
     if not _conversation_exists(user_id, conversation_id, db_path):
         return False
-    ok = _get_agent_repository(db_path).store.update(
-        "conversations",
-        {"conversation_id": conversation_id},
-        {"title": str(title or "New conversation")[:80], "updated_at": _now_text()},
-    ) > 0
+    ok = _get_agent_application_service(db_path).rename_conversation(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        title=title,
+        updated_at=_now_text(),
+    )
     if ok:
         _phase8_bump_cache(user_id, "conversations", f"current:{conversation_id}")
     return ok
@@ -801,23 +795,14 @@ def _rename_conversation(user_id: str, conversation_id: str, title: str, db_path
 def _delete_conversation(user_id: str, conversation_id: str, db_path: str | None) -> bool:
     if not _conversation_exists(user_id, conversation_id, db_path):
         return False
-    repo = _get_agent_repository(db_path)
-    row = repo.get_conversation(conversation_id) or {}
-    repo.upsert_conversation(
-        {
-            "conversation_id": conversation_id,
-            "user_id": user_id,
-            "title": row.get("title") or "New conversation",
-            "status": "deleted",
-            "language": row.get("language") or "zh",
-            "created_at": row.get("created_at") or _now_text(),
-            "updated_at": _now_text(),
-            "last_message_at": row.get("last_message_at") or "",
-            "metadata": {"deleted_from": "ai_agent_page"},
-        }
+    ok = _get_agent_application_service(db_path).soft_delete_conversation(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        updated_at=_now_text(),
     )
-    _phase8_bump_cache(user_id, "conversations", f"current:{conversation_id}", f"messages:{conversation_id}")
-    return True
+    if ok:
+        _phase8_bump_cache(user_id, "conversations", f"current:{conversation_id}", f"messages:{conversation_id}")
+    return ok
 
 
 def _message_from_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -879,7 +864,7 @@ def _persist_conversation_message(
     language: str,
     agent_result: dict[str, Any] | None = None,
 ) -> str:
-    repo = _get_agent_repository(db_path)
+    repo = _get_agent_application_service(db_path)
     now = _now_text()
     message_id = f"msg_{uuid.uuid4().hex[:12]}"
     run_id = str((agent_result or {}).get("run_id") or "")
@@ -977,7 +962,7 @@ def _phase8_run_conversation_map(plans: list[dict[str, Any]], db_path: str | Non
     run_ids = sorted({str(plan.get("run_id") or "") for plan in plans if str(plan.get("run_id") or "").strip()})
     if not run_ids:
         return {}
-    rows = _get_agent_repository(db_path).list_agent_runs_by_ids(run_ids)
+    rows = _get_agent_application_service(db_path).list_agent_runs_by_ids(run_ids)
     return {str(row.get("run_id") or ""): str(row.get("conversation_id") or "") for row in rows}
 
 
@@ -1561,11 +1546,10 @@ def _run_agent(
 ) -> dict[str, Any]:
     trace_event("ui.agent.submit", {"query": query, "user_id": user_id, "session_id": session_id})
     try:
-        result = run_agent_request(
+        result = _get_agent_application_service(db_path).run(
             query,
             user_id=user_id,
             output_dir=output_dir,
-            db_path=db_path,
             top_k=int(default_topk),
             session_id=session_id,
             llm_settings=llm_settings,
@@ -1915,7 +1899,7 @@ def _render_pending_plan(
             if not token:
                 st.error("确认凭证已失效，请重新生成计划。")
                 return
-            result = execute_control_action(
+            result = _get_agent_application_service(db_path).control_action(
                 action="confirm",
                 plan_id=plan_id,
                 confirmation_token=token,
@@ -1939,7 +1923,7 @@ def _render_pending_plan(
             "拒绝",
             key=f"agent_reject_button::{user_id}::{session_id}::{widget_scope}",
         ):
-            result = execute_control_action(
+            result = _get_agent_application_service(db_path).control_action(
                 action="reject",
                 plan_id=plan_id,
                 user_id=user_id,
@@ -1963,7 +1947,7 @@ def _safe_portfolio_state(
     db_path: str | None,
 ) -> dict[str, Any]:
     try:
-        return query_portfolio_state(
+        return _get_agent_application_service(db_path).query_portfolio(
             user_id,
             output_dir=output_dir,
             db_path=db_path,
@@ -1978,7 +1962,7 @@ def _safe_portfolio_state(
 
 def _safe_scheduler_status() -> dict[str, Any]:
     try:
-        return query_scheduler_status(".")
+        return _get_agent_application_service(None).query_scheduler(".")
     except Exception as exc:
         return {
             "status": "unavailable",
@@ -2001,7 +1985,7 @@ def _safe_pending(
     output_dir: str,
 ) -> dict[str, dict[str, Any]]:
     try:
-        return dict(load_pending_actions(user_id, output_dir) or {})
+        return _get_agent_application_service(None).list_pending_actions(user_id, output_dir)
     except Exception:
         return {}
 

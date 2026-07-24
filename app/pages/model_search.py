@@ -4,15 +4,15 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from app.services.model_search_results import (
+from application.model_search_service import (
     BACKTEST_DISCLAIMER,
     BACKTEST_MASTER_TABLE_PATH,
     MODEL_CANDIDATES_PATH,
-    MODEL_DISCOVERY_REPORT_PATH,
     MODEL_SEARCH_ERRORS_PATH,
     MODEL_SEARCH_RESULTS_PATH,
     format_strategy_option,
     load_daily_returns_for_strategy,
+    load_model_discovery_report,
     load_selected_strategy,
     load_table_file,
     make_strategy_from_row,
@@ -79,8 +79,9 @@ def render_model_search_page() -> None:
         st.dataframe(candidate_show[candidate_cols].head(200), width="stretch")
 
     with st.expander("查看模型搜索报告"):
-        if MODEL_DISCOVERY_REPORT_PATH.exists():
-            st.markdown(MODEL_DISCOVERY_REPORT_PATH.read_text(encoding="utf-8", errors="ignore"))
+        discovery_report = load_model_discovery_report()
+        if discovery_report:
+            st.markdown(discovery_report)
         else:
             st.info("暂无模型搜索报告。")
 

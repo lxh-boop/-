@@ -1,6 +1,5 @@
 import os
 
-import joblib
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -9,18 +8,87 @@ from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 
 import json
-import subprocess
-import sys
 import time
 from pathlib import Path
 
-from runtime_paths import (
+from application.dashboard_service import (
+    ANNOUNCEMENT_CACHE_PATH,
+    AGENT_QUANT_DB_PATH,
+    A_SHARE_DAILY_DATA_READY_TIME,
+    BACKTEST_DAILY_PREDICTIONS_PATH,
+    BACKTEST_DISCLAIMER,
+    BACKTEST_MASTER_TABLE_PATH,
+    BACKTEST_METRICS_PATH,
+    BACKTEST_NAV_PATH,
+    BACKTEST_TRADES_PATH,
+    BASE_DIR,
+    DEFAULT_DFT_UNET_CHECKPOINT_PATH,
+    DEFAULT_LLM_BASE_URL,
+    DEFAULT_LLM_MODEL,
+    ENABLE_LLM_EXPLAINER,
+    ENABLE_NEWS_FEATURES,
+    ENABLE_RAG,
+    LATEST_FEATURE_DATA_PATH,
+    LATEST_RAW_DATA_PATH,
+    LLM_API_KEY_ENV,
+    LLM_BASE_URL_ENV,
+    LLM_MODEL_ENV,
+    LOG_DIR,
+    LLMService,
+    MARKET_CONTEXT_FEATURE_CACHE_PATH,
+    MARKET_CONTEXT_INDEX_DAILY_CACHE_PATH,
+    METRICS_PATH,
+    MODEL_CANDIDATES_PATH,
+    MODEL_SEARCH_RESULTS_PATH,
+    NEWS_CACHE_PATH,
+    OLLAMA_PROJECT_MODEL,
+    OLLAMA_PROJECT_MODELFILE_NAME,
+    OUTPUT_DIR,
+    PROGRESS_HISTORY_PATH,
+    RAG_DOCUMENTS_PATH,
+    RAG_INDEX_PATH,
+    RANKING_LATEST_PATH,
+    RECOMMENDED_BASE_MODEL,
+    ROLLING_UPDATE_LOG_PATH,
+    ROLLING_UPDATE_SCRIPT,
+    RUN_CWD,
+    SELECTED_STRATEGY_PATH,
+    UNIVERSE,
+    build_display_date_options,
+    classify_event_title,
+    build_mcp_context_from_local_config,
+    calculate_topk_rebalance,
+    build_stock_explanation_prompt,
+    create_project_model,
+    create_scheduler,
+    dashboard_service,
+    discover_mcp_tools,
+    downloaded_zoo_backends,
     ensure_runtime_directories,
-    get_logs_dir,
-    get_resource_root,
-    get_runtime_dir,
-    get_user_data_root,
+    explain_prompt_with_llm,
+    get_ollama_version,
+    get_scheduler_jobs,
     is_frozen_app,
+    is_prediction_only_date,
+    is_zoo_backend,
+    list_local_models,
+    list_model_names,
+    load_cached_ai_explanation,
+    load_daily_returns_for_strategy,
+    load_local_config,
+    load_selected_strategy,
+    mcp_sdk_version,
+    pull_model,
+    read_auto_retrain_log,
+    registered_zoo_backends,
+    reset_discovery_cache,
+    resolve_active_llm_settings,
+    run_latest_t1_backtest,
+    save_local_config,
+    set_daily_retrain_job,
+    validate_local_model,
+    validate_tushare_token,
+    zoo_model_name_from_backend,
 )
 
 APP_TOP_LEVEL_PAGES = ["首页 / 预测排名", "AI 模拟盘", "AI Agent", "系统监控"]
@@ -35,84 +103,6 @@ if get_script_run_ctx(suppress_warning=True) is None and __name__ == "__main__":
     raise SystemExit(0)
 
 ensure_runtime_directories()
-BASE_DIR = get_resource_root()
-RUN_CWD = get_user_data_root() if is_frozen_app() else BASE_DIR
-ROLLING_UPDATE_SCRIPT = BASE_DIR / "daily_incremental_update.py"
-PROGRESS_HISTORY_PATH = (
-    get_runtime_dir() / "rolling_update_time_history.json"
-    if is_frozen_app()
-    else BASE_DIR / "rolling_update_time_history.json"
-)
-
-LOG_DIR = get_logs_dir()
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-ROLLING_UPDATE_LOG_PATH = LOG_DIR / "rolling_update_app.log"
-
-from app.services.model_search_results import (
-    BACKTEST_DISCLAIMER,
-    BACKTEST_MASTER_TABLE_PATH,
-    MODEL_CANDIDATES_PATH,
-    MODEL_SEARCH_RESULTS_PATH,
-    SELECTED_STRATEGY_PATH,
-    load_daily_returns_for_strategy,
-    load_selected_strategy,
-)
-
-try:
-    from app.services.backtest_display import build_display_date_options, is_prediction_only_date
-except ImportError:
-    def is_prediction_only_date(selected_date, backtest_trades=None):
-        return True
-    from app.services.backtest_display import build_display_date_options
-from config import (
-    ANNOUNCEMENT_CACHE_PATH,
-    AGENT_QUANT_DB_PATH,
-    BACKTEST_DAILY_PREDICTIONS_PATH,
-    BACKTEST_METRICS_PATH,
-    BACKTEST_NAV_PATH,
-    BACKTEST_TRADES_PATH,
-    DEFAULT_DFT_UNET_CHECKPOINT_PATH,
-    DEFAULT_LLM_BASE_URL,
-    DEFAULT_LLM_MODEL,
-    LATEST_FEATURE_DATA_PATH,
-    LATEST_RAW_DATA_PATH,
-    LLM_API_KEY_ENV,
-    LLM_BASE_URL_ENV,
-    LLM_MODEL_ENV,
-    MARKET_CONTEXT_FEATURE_CACHE_PATH,
-    MARKET_CONTEXT_INDEX_DAILY_CACHE_PATH,
-    METRICS_PATH,
-    NEWS_CACHE_PATH,
-    OUTPUT_DIR,
-    RANKING_LATEST_PATH,
-    RAG_DOCUMENTS_PATH,
-    RAG_INDEX_PATH,
-    UNIVERSE,
-)
-import config as app_config
-from backtest import run_latest_t1_backtest
-from data_tushare import A_SHARE_DAILY_DATA_READY_TIME, validate_tushare_token
-from core.llm import LLMService
-from llm_explainer import (
-    build_stock_explanation_prompt,
-    explain_prompt_with_llm,
-    load_cached_ai_explanation,
-)
-from market_context import MARKET_CONTEXT_COLUMNS, ensure_market_context_for_feature_data
-from model_zoo_backend import (
-    downloaded_zoo_backends,
-    is_zoo_backend,
-    make_zoo_latest_ranking,
-    registered_zoo_backends,
-    zoo_model_name_from_backend,
-)
-from model_zoo.metadata import bootstrap_registered_metadata, load_metadata
-from model_zoo.registry import list_model_names
-from backtest_rebalance import calculate_topk_rebalance
-
-ENABLE_NEWS_FEATURES = getattr(app_config, "ENABLE_NEWS_FEATURES", True)
-ENABLE_RAG = getattr(app_config, "ENABLE_RAG", True)
-ENABLE_LLM_EXPLAINER = getattr(app_config, "ENABLE_LLM_EXPLAINER", True)
 
 DATA_CACHE_TTL_SECONDS = 300
 NEWS_CACHE_TTL_SECONDS = 600
@@ -121,63 +111,39 @@ MODEL_METADATA_CACHE_TTL_SECONDS = 600
 
 
 def _path_cache_version(path: str | Path) -> tuple[str, int, int]:
-    resolved = Path(path)
-    try:
-        stat = resolved.stat()
-        size = stat.st_size if resolved.is_file() else 0
-        return str(resolved), int(stat.st_mtime_ns), int(size)
-    except OSError:
-        return str(resolved), 0, 0
-
-
-@st.cache_resource
-def _get_news_event_cache_loader():
-    from news_data import load_event_cache as loaded_load_event_cache
-
-    return loaded_load_event_cache
-
-
-@st.cache_resource
-def _get_rag_context_retriever():
-    from rag_retriever import retrieve_stock_context as loaded_retrieve_stock_context
-
-    return loaded_retrieve_stock_context
+    return dashboard_service.path_cache_version(path)
 
 
 @st.cache_resource
 def _get_ai_agent_page_renderer():
     from app.pages.ai_agent import render_ai_agent_page
-
     return render_ai_agent_page
 
 
 @st.cache_resource
 def _get_ai_paper_trading_page_renderer():
     from app.pages.ai_paper_trading import render_ai_paper_trading_page
-
     return render_ai_paper_trading_page
 
 
 @st.cache_resource
 def _get_model_search_page_renderer():
     from app.pages.model_search import render_model_search_page
-
     return render_model_search_page
 
 
 @st.cache_resource
 def _get_system_monitor_page_renderer():
     from app.pages.system_monitor import render_system_monitor_page
-
     return render_system_monitor_page
 
 
 def load_event_cache():
-    return _get_news_event_cache_loader()()
+    return dashboard_service.load_event_cache()
 
 
 def retrieve_stock_context(*args, **kwargs):
-    return _get_rag_context_retriever()(*args, **kwargs)
+    return dashboard_service.retrieve_stock_context(*args, **kwargs)
 
 
 @st.cache_data(ttl=RAG_CACHE_TTL_SECONDS)
@@ -192,12 +158,7 @@ def _cached_retrieve_stock_context(
     return retrieve_stock_context(code=code, query=query, top_k=int(top_k))
 
 
-def cached_retrieve_stock_context(
-    *,
-    code: str,
-    query: str,
-    top_k: int,
-) -> pd.DataFrame:
+def cached_retrieve_stock_context(*, code: str, query: str, top_k: int) -> pd.DataFrame:
     return _cached_retrieve_stock_context(
         str(code).zfill(6),
         str(query or ""),
@@ -209,26 +170,6 @@ def cached_retrieve_stock_context(
 
 from datetime import datetime, time as datetime_time
 
-from local_config import load_local_config, save_local_config
-from core.llm.ollama_manager import (
-    PROJECT_MODEL as OLLAMA_PROJECT_MODEL,
-    PROJECT_MODELFILE_NAME as OLLAMA_PROJECT_MODELFILE_NAME,
-    RECOMMENDED_BASE_MODEL,
-    create_project_model,
-    get_ollama_version,
-    list_local_models,
-    pull_model,
-    validate_local_model,
-)
-from core.llm.runtime_settings import resolve_active_llm_settings
-from agent.mcp.config import build_mcp_context_from_local_config, mcp_sdk_version
-from agent.mcp.discovery import discover_mcp_tools, reset_discovery_cache
-from scheduler_manager import (
-    create_scheduler,
-    set_daily_retrain_job,
-    get_scheduler_jobs,
-    read_auto_retrain_log,
-)
 st.set_page_config(
     page_title="A股每日股票评分系统",
     page_icon="📈",
@@ -275,57 +216,10 @@ page_zoom_percent = normalize_page_zoom(
 apply_page_zoom(page_zoom_percent)
 
 def load_time_estimate(default_seconds: int = 300) -> int:
-    """
-    读取上一次滚动更新耗时，作为本次预计耗时。
-    如果没有历史记录，默认 300 秒。
-    """
-    if not PROGRESS_HISTORY_PATH.exists():
-        return default_seconds
-
-    try:
-        with open(PROGRESS_HISTORY_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        durations = data.get("durations", [])
-
-        if not durations:
-            return default_seconds
-
-        # 用最近 3 次平均值作为预计耗时
-        recent = durations[-3:]
-        estimate = int(sum(recent) / len(recent))
-
-        # 防止估计太小
-        return max(estimate, 60)
-
-    except Exception:
-        return default_seconds
-
+    return dashboard_service.load_time_estimate(default_seconds)
 
 def save_time_cost(seconds: float):
-    """
-    保存本次真实耗时，用于下次估计。
-    """
-    data = {"durations": []}
-
-    if PROGRESS_HISTORY_PATH.exists():
-        try:
-            with open(PROGRESS_HISTORY_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            data = {"durations": []}
-
-    durations = data.get("durations", [])
-    durations.append(float(seconds))
-
-    # 只保留最近 10 次
-    durations = durations[-10:]
-
-    data["durations"] = durations
-
-    with open(PROGRESS_HISTORY_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
+    dashboard_service.save_time_cost(seconds)
 
 def format_seconds(seconds: float) -> str:
     seconds = max(0, int(seconds))
@@ -362,73 +256,10 @@ def get_stage_by_progress(
 
 
 def read_log_tail(path: Path, max_chars: int = 2000) -> str:
-    if not path.exists():
-        return ""
-
-    try:
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        lines = text.splitlines()
-        keywords = [
-            "Traceback",
-            "RuntimeError",
-            "ImportError",
-            "Error",
-            "Failed",
-            "失败",
-            "错误",
-            "pip install",
-            "Preflight",
-            "Return Code",
-        ]
-        hit_indexes = [
-            idx
-            for idx, line in enumerate(lines)
-            if any(keyword in line for keyword in keywords)
-        ]
-        if hit_indexes:
-            start = max(hit_indexes[-1] - 20, 0)
-            summary = "\n".join(lines[start:])
-            return summary[-max_chars:]
-        return text[-max_chars:]
-    except Exception:
-        return ""
-
+    return dashboard_service.read_log_tail(path, max_chars=max_chars)
 
 def get_ranking_file_snapshot(path: str | Path = RANKING_LATEST_PATH) -> dict:
-    ranking_path = Path(path)
-    if not ranking_path.exists():
-        return {
-            "exists": False,
-            "path": str(ranking_path),
-            "mtime": 0.0,
-            "mtime_text": "不存在",
-            "rows": 0,
-            "signal_date": "",
-            "prediction_date": "",
-        }
-
-    stat = ranking_path.stat()
-    snapshot = {
-        "exists": True,
-        "path": str(ranking_path),
-        "mtime": float(stat.st_mtime),
-        "mtime_text": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-        "rows": 0,
-        "signal_date": "",
-        "prediction_date": "",
-    }
-    try:
-        ranking = pd.read_csv(ranking_path, dtype={"code": str}, encoding="utf-8-sig")
-        snapshot["rows"] = int(len(ranking))
-        if not ranking.empty:
-            if "date" in ranking.columns:
-                snapshot["signal_date"] = str(ranking["date"].iloc[0])
-            if "prediction_date" in ranking.columns:
-                snapshot["prediction_date"] = str(ranking["prediction_date"].iloc[0])
-    except Exception as exc:
-        snapshot["read_error"] = str(exc)
-    return snapshot
-
+    return dashboard_service.get_ranking_file_snapshot(path)
 
 def format_ranking_file_snapshot(snapshot: dict) -> str:
     if not snapshot.get("exists"):
@@ -473,53 +304,21 @@ def run_rolling_update_with_time_progress(
     start_time = time.time()
     ranking_before = get_ranking_file_snapshot()
 
-    cmd = [sys.executable]
-    if is_frozen_app():
-        cmd.append("--daily-update-child")
-    else:
-        cmd.append(str(ROLLING_UPDATE_SCRIPT))
-    cmd.extend([
-        "--token",
-        token,
-        "--base-version",
-        base_version,
-        "--model-backend",
-        model_backend,
-    ])
-    if model_backend == "dft_unet_external" and checkpoint_path:
-        cmd.extend(["--checkpoint-path", checkpoint_path])
-    masked_cmd = [
-        "***" if i > 0 and cmd[i - 1] == "--token" else part
-        for i, part in enumerate(cmd)
-    ]
-    child_env = os.environ.copy()
-    child_env["PYTHONIOENCODING"] = "utf-8"
+    job = dashboard_service.start_rolling_update_job(
+        token=token,
+        base_version=base_version,
+        model_backend=model_backend,
+        checkpoint_path=checkpoint_path,
+    )
 
-    with open(ROLLING_UPDATE_LOG_PATH, "w", encoding="utf-8", errors="ignore") as log_file:
-        log_file.write("=" * 100 + "\n")
-        log_file.write(f"[APP Rolling Update Start] {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        log_file.write(f"[Command] {' '.join(masked_cmd)}\n")
-        log_file.write("=" * 100 + "\n")
-        log_file.flush()
-
-        process = subprocess.Popen(
-            cmd,
-            cwd=str(RUN_CWD),
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            env=child_env,
-        )
-
+    try:
         last_progress = 0.0
 
-        while process.poll() is None:
+        while job.poll() is None:
             elapsed = time.time() - start_time
 
             if elapsed > timeout_seconds:
-                process.kill()
+                job.kill()
                 progress_bar.progress(min(int(last_progress * 100), 95))
                 status_box.error("滚动更新超时，已自动终止。")
                 time_box.caption(
@@ -527,8 +326,7 @@ def run_rolling_update_with_time_progress(
                     f"超时时间：{format_seconds(timeout_seconds)}"
                 )
 
-                log_file.write("\n[APP Error] rolling update timeout, process killed.\n")
-                log_file.flush()
+                job.write_log("\n[APP Error] rolling update timeout, process killed.\n")
 
                 return False, read_log_tail(ROLLING_UPDATE_LOG_PATH)
 
@@ -555,15 +353,16 @@ def run_rolling_update_with_time_progress(
 
             time.sleep(1)
 
-        return_code = process.returncode
+        return_code = job.returncode
         elapsed = time.time() - start_time
 
-        log_file.write("\n" + "=" * 100 + "\n")
-        log_file.write(f"[APP Rolling Update Finished] {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        log_file.write(f"[Return Code] {return_code}\n")
-        log_file.write(f"[Elapsed Seconds] {elapsed:.2f}\n")
-        log_file.write("=" * 100 + "\n")
-        log_file.flush()
+        job.write_log("\n" + "=" * 100 + "\n")
+        job.write_log(f"[APP Rolling Update Finished] {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        job.write_log(f"[Return Code] {return_code}\n")
+        job.write_log(f"[Elapsed Seconds] {elapsed:.2f}\n")
+        job.write_log("=" * 100 + "\n")
+    finally:
+        job.close()
 
     if return_code == 0:
         save_time_cost(elapsed)
@@ -614,13 +413,8 @@ def render_top_level_page_selector() -> str | None:
 @st.cache_data(ttl=DATA_CACHE_TTL_SECONDS)
 def _load_ranking_cached(path: str, mtime_ns: int, size: int) -> pd.DataFrame:
     del mtime_ns, size
-    df = pd.read_csv(path, dtype={"code": str})
-    df["code"] = df["code"].astype(str).str.zfill(6)
-    if "prediction_date" not in df.columns and "date" in df.columns:
-        dates = pd.to_datetime(df["date"], errors="coerce")
-        df["prediction_date"] = (dates + pd.offsets.BDay(1)).dt.strftime("%Y-%m-%d")
-    return df
-
+    frame = dashboard_service.load_ranking(path)
+    return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
 
 def load_ranking():
     path, mtime_ns, size = _path_cache_version(RANKING_LATEST_PATH)
@@ -633,11 +427,7 @@ def load_ranking():
 @st.cache_data(ttl=MODEL_METADATA_CACHE_TTL_SECONDS)
 def _load_metrics_cached(path: str, mtime_ns: int, size: int):
     del mtime_ns, size
-    try:
-        return joblib.load(path)
-    except Exception:
-        return None
-
+    return dashboard_service.load_metrics(path)
 
 def load_metrics():
     path, mtime_ns, size = _path_cache_version(METRICS_PATH)
@@ -650,11 +440,7 @@ def load_metrics():
 @st.cache_data(ttl=DATA_CACHE_TTL_SECONDS)
 def _load_json_file_cached(path: str, mtime_ns: int, size: int) -> dict | None:
     del mtime_ns, size
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
+    return dashboard_service.load_json_file(path)
 
 def load_json_file(path: str | Path) -> dict | None:
     path_text, mtime_ns, size = _path_cache_version(path)
@@ -711,35 +497,8 @@ def _load_backtest_outputs_cached(
     metrics_version: tuple[str, int, int],
     predictions_version: tuple[str, int, int],
 ):
-    nav_df = None
-    trades_df = None
-    metrics_data = None
-    predictions_df = None
-
-    if nav_version[1]:
-        nav_df = pd.read_csv(nav_version[0])
-        if "date" in nav_df.columns:
-            nav_df["date"] = pd.to_datetime(nav_df["date"])
-
-    if trades_version[1]:
-        trades_df = pd.read_csv(trades_version[0], dtype={"code": str})
-        trades_df["code"] = trades_df["code"].astype(str).str.zfill(6)
-
-    if metrics_version[1]:
-        try:
-            with open(metrics_version[0], "r", encoding="utf-8") as f:
-                metrics_data = json.load(f)
-        except Exception:
-            metrics_data = None
-
-    if predictions_version[1]:
-        predictions_df = pd.read_csv(predictions_version[0], dtype={"code": str})
-        predictions_df["code"] = predictions_df["code"].astype(str).str.zfill(6)
-        if "date" in predictions_df.columns:
-            predictions_df["date"] = pd.to_datetime(predictions_df["date"])
-
-    return nav_df, metrics_data, trades_df, predictions_df
-
+    del nav_version, trades_version, metrics_version, predictions_version
+    return dashboard_service.load_backtest_outputs()
 
 def load_backtest_outputs():
     return _load_backtest_outputs_cached(
@@ -752,53 +511,23 @@ def load_backtest_outputs():
 
 @st.cache_data(ttl=MODEL_METADATA_CACHE_TTL_SECONDS)
 def load_model_zoo_table() -> pd.DataFrame:
-    try:
-        bootstrap_registered_metadata()
-        metadata = load_metadata()
-        rows = metadata.get("models", [])
-        if not rows:
-            return pd.DataFrame()
-        return pd.DataFrame(rows)
-    except Exception:
-        return pd.DataFrame()
+    return dashboard_service.load_model_zoo_table()
 
-
-@st.cache_data(ttl=DATA_CACHE_TTL_SECONDS)
 def _load_external_backtest_summary_cached(path: str, mtime_ns: int, size: int) -> pd.DataFrame:
-    del mtime_ns, size
-    try:
-        return pd.read_csv(path, encoding="utf-8-sig")
-    except Exception:
-        return pd.DataFrame()
-
+    del path, mtime_ns, size
+    return dashboard_service.load_external_backtest_summary()
 
 def load_external_backtest_summary() -> pd.DataFrame:
-    path = Path(OUTPUT_DIR) / "backtests" / "backtest_summary.csv"
-    path_text, mtime_ns, size = _path_cache_version(path)
-    if not mtime_ns:
-        return pd.DataFrame()
-    return _load_external_backtest_summary_cached(path_text, mtime_ns, size)
+    return dashboard_service.load_external_backtest_summary()
 
 
 @st.cache_data(ttl=DATA_CACHE_TTL_SECONDS)
 def _load_external_daily_returns_cached(path: str, mtime_ns: int, size: int) -> pd.DataFrame:
-    del mtime_ns, size
-    try:
-        df = pd.read_csv(path, encoding="utf-8-sig")
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"])
-        return df
-    except Exception:
-        return pd.DataFrame()
-
+    del path, mtime_ns, size
+    return pd.DataFrame()
 
 def load_external_daily_returns(model_name: str, topk: int) -> pd.DataFrame:
-    path = Path(OUTPUT_DIR) / "backtests" / f"{model_name}_top{int(topk)}_daily_returns.csv"
-    path_text, mtime_ns, size = _path_cache_version(path)
-    if not mtime_ns:
-        return pd.DataFrame()
-    return _load_external_daily_returns_cached(path_text, mtime_ns, size)
-
+    return dashboard_service.load_external_daily_returns(model_name, topk)
 
 def calc_drawdown_series(nav_series: pd.Series) -> pd.Series:
     nav = pd.to_numeric(nav_series, errors="coerce")
@@ -893,19 +622,7 @@ def build_topk_comparison(
 
 @st.cache_data(ttl=300)
 def load_news_events_for_app():
-    if not ENABLE_NEWS_FEATURES:
-        return pd.DataFrame()
-
-    try:
-        events = load_event_cache()
-        if not events.empty:
-            events["code"] = events["code"].astype(str).str.zfill(6)
-            events["date"] = pd.to_datetime(events["date"])
-            events["publish_time"] = pd.to_datetime(events["publish_time"], errors="coerce")
-        return events
-    except Exception:
-        return pd.DataFrame()
-
+    return dashboard_service.load_news_events_for_app()
 
 def format_percent_columns(df, cols):
     out = df.copy()
@@ -1000,104 +717,7 @@ def build_prediction_scope_text(ranking_df: pd.DataFrame) -> tuple[str, str, str
 
 
 def load_external_model_status(checkpoint_path: str, ranking_df: pd.DataFrame | None = None) -> dict:
-    path = Path(checkpoint_path)
-    summary_path = path.parent / "summary.json"
-    summary = {}
-
-    if summary_path.exists():
-        try:
-            with open(summary_path, "r", encoding="utf-8") as f:
-                summary = json.load(f)
-        except Exception as exc:
-            summary = {"summary_error": f"{type(exc).__name__}: {exc}"}
-
-    args = summary.get("args") or {}
-    seq_len = int(args.get("seq_len", 8))
-    d_feat = int(args.get("d_feat", 158))
-    gate_start = int(args.get("gate_input_start_index", 158))
-    gate_end = int(args.get("gate_input_end_index", 221))
-    market_context_count = max(0, gate_end - gate_start)
-
-    ranking_date = "未知"
-    ranking_rows = 0
-    ranking_model_name = ""
-
-    if ranking_df is not None and not ranking_df.empty:
-        ranking_rows = len(ranking_df)
-        if "date" in ranking_df.columns:
-            ranking_date = str(ranking_df["date"].iloc[0])[:10]
-        if "model_name" in ranking_df.columns:
-            model_names = ranking_df["model_name"].dropna().astype(str).unique().tolist()
-            ranking_model_name = ", ".join(model_names[:3])
-
-    context_status = {
-        "exists": Path(MARKET_CONTEXT_FEATURE_CACHE_PATH).exists(),
-        "path": MARKET_CONTEXT_FEATURE_CACHE_PATH,
-        "rows": 0,
-        "date_min": "",
-        "date_max": "",
-        "columns": len(MARKET_CONTEXT_COLUMNS),
-    }
-    if context_status["exists"]:
-        try:
-            context_dates = pd.read_csv(MARKET_CONTEXT_FEATURE_CACHE_PATH, usecols=["date"])
-            context_dates["date"] = pd.to_datetime(context_dates["date"], errors="coerce")
-            context_dates = context_dates.dropna(subset=["date"])
-            context_status.update({
-                "rows": int(len(context_dates)),
-                "date_min": str(context_dates["date"].min().date()) if not context_dates.empty else "",
-                "date_max": str(context_dates["date"].max().date()) if not context_dates.empty else "",
-            })
-        except Exception as exc:
-            context_status["error"] = f"{type(exc).__name__}: {exc}"
-
-    index_status = {
-        "exists": Path(MARKET_CONTEXT_INDEX_DAILY_CACHE_PATH).exists(),
-        "path": MARKET_CONTEXT_INDEX_DAILY_CACHE_PATH,
-        "rows": 0,
-        "date_min": "",
-        "date_max": "",
-        "index_count": 0,
-    }
-    if index_status["exists"]:
-        try:
-            index_daily = pd.read_csv(
-                MARKET_CONTEXT_INDEX_DAILY_CACHE_PATH,
-                usecols=["date", "index_code"],
-            )
-            index_daily["date"] = pd.to_datetime(index_daily["date"], errors="coerce")
-            index_daily = index_daily.dropna(subset=["date"])
-            index_status.update({
-                "rows": int(len(index_daily)),
-                "date_min": str(index_daily["date"].min().date()) if not index_daily.empty else "",
-                "date_max": str(index_daily["date"].max().date()) if not index_daily.empty else "",
-                "index_count": int(index_daily["index_code"].nunique()) if "index_code" in index_daily.columns else 0,
-            })
-        except Exception as exc:
-            index_status["error"] = f"{type(exc).__name__}: {exc}"
-
-    return {
-        "backend": "External DFT_UNET",
-        "checkpoint_path": str(path),
-        "checkpoint_exists": path.exists(),
-        "checkpoint_size_mb": round(path.stat().st_size / 1024 / 1024, 2) if path.exists() else None,
-        "summary_json_found": summary_path.exists(),
-        "model_name": summary.get("model_name", "DFT_UNET"),
-        "run_name": summary.get("run_name", ""),
-        "best_epoch": summary.get("best_epoch"),
-        "best_score": summary.get("best_score"),
-        "prediction_sign": summary.get("prediction_sign", 1.0),
-        "input_shape": f"[N, {seq_len}, {gate_end}]",
-        "seq_len": seq_len,
-        "stock_feature_count": d_feat,
-        "market_context_count": market_context_count,
-        "ranking_date": ranking_date,
-        "ranking_rows": ranking_rows,
-        "ranking_model_name": ranking_model_name,
-        "market_context_cache": context_status,
-        "market_index_cache": index_status,
-        "summary_error": summary.get("summary_error", ""),
-    }
+    return dashboard_service.load_external_model_status(checkpoint_path, ranking_df)
 
 
 RANKING_TABLE_COLUMNS = [
@@ -1130,59 +750,11 @@ def run_external_backend_ranking(
     checkpoint_path: str,
     token: str | None = None,
 ):
-    if not os.path.exists(LATEST_FEATURE_DATA_PATH):
-        raise RuntimeError("缺少最新特征文件，请先运行所选模型的每日更新生成特征缓存。")
-
-    feature_data = pd.read_csv(LATEST_FEATURE_DATA_PATH, dtype={"code": str})
-    feature_data["code"] = feature_data["code"].astype(str).str.zfill(6)
-
-    if os.path.exists(LATEST_RAW_DATA_PATH):
-        raw_data = pd.read_csv(LATEST_RAW_DATA_PATH, dtype={"code": str})
-        raw_data["code"] = raw_data["code"].astype(str).str.zfill(6)
-    else:
-        raw_data = pd.DataFrame()
-
-    if model_backend == "dft_unet_external":
-        feature_data, market_context_report = ensure_market_context_for_feature_data(
-            feature_data=feature_data,
-            token=token,
-        )
-        from external_models.dft_unet_adapter import DFTUNetAdapter
-
-        adapter = DFTUNetAdapter(checkpoint_path=checkpoint_path, device="cpu").load()
-        ranking_df = adapter.predict(raw_data=raw_data, feature_data=feature_data)
-        backend_report = dict(adapter.load_report)
-        backend_report["market_context"] = market_context_report
-        snapshot_suffix = "dft_unet_external"
-    elif is_zoo_backend(model_backend):
-        if raw_data.empty:
-            raise RuntimeError("缺少 latest_raw_stock_data.csv，模型库时序模型需要原始行情序列。")
-        zoo_model_name = zoo_model_name_from_backend(model_backend)
-        ranking_df = make_zoo_latest_ranking(
-            model_name=zoo_model_name,
-            raw_data=raw_data,
-            feature_data=feature_data,
-            device="cpu",
-        )
-        backend_report = {
-            "model_backend": model_backend,
-            "model_name": zoo_model_name,
-            "mode": "rolling_window_prediction",
-        }
-        snapshot_suffix = zoo_model_name
-    else:
-        raise RuntimeError(f"不支持的模型：{model_backend}")
-
-    Path(RANKING_LATEST_PATH).parent.mkdir(exist_ok=True)
-    ranking_df.to_csv(RANKING_LATEST_PATH, index=False, encoding="utf-8-sig")
-
-    if "date" in ranking_df.columns and not ranking_df.empty:
-        date_text = str(ranking_df["date"].iloc[0]).replace("-", "")[:8]
-        snapshot_path = Path(RANKING_LATEST_PATH).parent / f"ranking_{date_text}_{snapshot_suffix}.csv"
-        ranking_df.to_csv(snapshot_path, index=False, encoding="utf-8-sig")
-
-    return ranking_df, backend_report
-
+    return dashboard_service.run_external_backend_ranking(
+        model_backend=model_backend,
+        checkpoint_path=checkpoint_path,
+        token=token,
+    )
 
 def run_external_dft_unet_ranking(checkpoint_path: str, token: str | None = None):
     return run_external_backend_ranking(
@@ -1470,18 +1042,10 @@ if check_neo4j_button:
     if neo4j_password_input.strip():
         check_local_cfg["neo4j_password"] = neo4j_password_input.strip()
     try:
-        from agent.graph.settings import Neo4jSettings
-        from agent.graph.store import Neo4jFinancialGraphStore
-        graph_settings = Neo4jSettings.from_env(local_config=check_local_cfg)
-        graph_store = Neo4jFinancialGraphStore(graph_settings)
-        try:
-            graph_store.verify_connectivity()
-            graph_store.ensure_schema()
-            count_rows = graph_store.execute_read("MATCH (n) RETURN count(n) AS node_count")
-            node_count = int((count_rows[0] if count_rows else {}).get("node_count") or 0)
-            st.sidebar.success(f"Neo4j 连接正常，当前节点数：{node_count}")
-        finally:
-            graph_store.close()
+        graph_result = dashboard_service.test_neo4j_connection(check_local_cfg)
+        st.sidebar.success(
+            f"Neo4j 连接正常，当前节点数：{int(graph_result.get('node_count') or 0)}"
+        )
     except Exception as exc:
         st.sidebar.error(f"Neo4j 不可用：{type(exc).__name__}: {exc}")
 
@@ -1603,12 +1167,13 @@ if save_model_settings_button:
 
 if check_model_button:
     try:
-        if selected_backend == "dft_unet_external":
-            from external_models.dft_unet_adapter import DFTUNetAdapter
-
-            adapter = DFTUNetAdapter(checkpoint_path=dft_checkpoint_path, device="cpu")
-            report = adapter.inspect()
-            adapter.load()
+        inspection = dashboard_service.inspect_model(
+            selected_backend,
+            dft_checkpoint_path,
+            zoo_table,
+        )
+        if inspection.get("kind") == "dft_unet_external":
+            report = inspection.get("report") or {}
             st.sidebar.success("DFT_UNET checkpoint 可读取，模型结构已识别并加载。")
             with st.sidebar.expander("模型检查结果", expanded=True):
                 st.json({
@@ -1620,19 +1185,14 @@ if check_model_button:
                     "best_epoch": report.get("best_epoch"),
                     "best_score": report.get("best_score"),
                     "input_spec": report.get("input_spec"),
-                    "load_report": adapter.load_report,
+                    "load_report": inspection.get("load_report") or {},
                 })
+        elif inspection.get("metadata") is None:
+            st.sidebar.warning("没有找到该模型的 metadata。")
         else:
-            selected_model_name = zoo_model_name_from_backend(selected_backend)
-            selected_row = pd.DataFrame()
-            if not zoo_table.empty and "name" in zoo_table.columns:
-                selected_row = zoo_table[zoo_table["name"].astype(str) == selected_model_name].tail(1)
-            if selected_row.empty:
-                st.sidebar.warning("没有找到该模型的 metadata。")
-            else:
-                st.sidebar.success("模型 metadata 可读取。")
-                with st.sidebar.expander("模型检查结果", expanded=True):
-                    st.json(selected_row.iloc[0].to_dict())
+            st.sidebar.success("模型 metadata 可读取。")
+            with st.sidebar.expander("模型检查结果", expanded=True):
+                st.json(inspection.get("metadata"))
     except Exception as exc:
         st.sidebar.error(f"模型检查失败：{exc}")
 
@@ -2225,10 +1785,8 @@ if selected_home_section == "\u9996\u9875 / \u9884\u6d4b\u6392\u540d":
 if selected_home_section == "\u4e2a\u80a1\u8be6\u60c5":
     st.subheader("五、个股走势查看")
 
-    if os.path.exists(LATEST_RAW_DATA_PATH):
-        raw_data = pd.read_csv(LATEST_RAW_DATA_PATH, dtype={"code": str})
-        raw_data["code"] = raw_data["code"].astype(str).str.zfill(6)
-        raw_data["date"] = pd.to_datetime(raw_data["date"])
+    raw_data = dashboard_service.load_latest_raw_data()
+    if not raw_data.empty:
 
         selected_name = st.selectbox("选择股票", ranking["name"].tolist())
 
@@ -2860,8 +2418,6 @@ if selected_home_section == "\u65b0\u95fb\u4e8b\u4ef6":
         show_events_all = show_events_all.loc[date_mask].copy()
 
         if news_event_type != "\u5168\u90e8":
-            from event_rules import classify_event_title
-
             flag_map = {
                 "\u6b63\u9762": "is_positive_event",
                 "\u8d1f\u9762": "is_negative_event",
@@ -2910,167 +2466,10 @@ if selected_home_section == "\u65b0\u95fb\u4e8b\u4ef6":
             st.dataframe(show_events_all, width="stretch")
 
 
-if selected_home_section == "RAG \u68c0\u7d22":
-    st.subheader("RAG \u68c0\u7d22")
-    st.caption("\u4ece\u672c\u5730\u65b0\u95fb/\u516c\u544a\u7f13\u5b58\u4e2d\u68c0\u7d22\u8d44\u6599\uff0c\u53ea\u8fd4\u56de\u4f9d\u636e\uff0c\u4e0d\u53c2\u4e0e\u6a21\u578b\u9884\u6d4b\u3002")
-
-    rag_page_col1, rag_page_col2, rag_page_col3 = st.columns([2, 3, 1])
-
-    with rag_page_col1:
-        rag_page_stock = st.selectbox(
-            "\u9009\u62e9\u80a1\u7968",
-            options=ranking["name"].astype(str).tolist(),
-            key="rag_page_stock",
-        )
-
-    with rag_page_col2:
-        rag_page_query = st.text_input(
-            "\u8f93\u5165\u95ee\u9898",
-            value="\u8fd9\u53ea\u80a1\u7968\u8fd1\u671f\u6709\u4ec0\u4e48\u98ce\u9669\uff1f",
-            key="rag_page_query",
-        )
-
-    with rag_page_col3:
-        rag_page_topk = st.selectbox(
-            "\u6761\u6570",
-            options=[3, 5, 10],
-            index=1,
-            key="rag_page_topk",
-        )
-
-    if st.button("\u68c0\u7d22", key="rag_page_search"):
-        try:
-            rag_page_code = ranking.loc[ranking["name"].astype(str) == rag_page_stock, "code"].iloc[0]
-            rag_page_results = cached_retrieve_stock_context(
-                code=str(rag_page_code).zfill(6),
-                query=rag_page_query,
-                top_k=int(rag_page_topk),
-            )
-
-            if rag_page_results.empty:
-                st.info("\u6ca1\u6709\u68c0\u7d22\u5230\u76f8\u5173\u8d44\u6599\u3002")
-            else:
-                show_rag_page = rag_page_results.copy()
-                show_rag_page["score"] = show_rag_page["score"].map(lambda x: f"{x:.3f}")
-                show_rag_page = show_rag_page.rename(
-                    columns={
-                        "date": "\u65e5\u671f",
-                        "title": "\u6807\u9898",
-                        "source": "\u6765\u6e90",
-                        "url": "\u94fe\u63a5",
-                        "score": "\u5339\u914d\u5ea6",
-                        "content": "\u5185\u5bb9",
-                    }
-                )
-                st.dataframe(show_rag_page, width="stretch")
-        except Exception as e:
-            st.error(f"RAG \u68c0\u7d22\u5931\u8d25\uff1a{e}")
-
-
-if selected_home_section == "AI \u89e3\u91ca":
-    st.subheader("AI \u89e3\u91ca")
-    st.warning("\u8c03\u7528\u5df2\u914d\u7f6e\u7684 AI \u63a5\u53e3\u751f\u6210\u89e3\u91ca\uff0c\u4ec5\u7528\u4e8e\u673a\u5668\u5b66\u4e60\u548c\u6570\u636e\u5206\u6790\u5c55\u793a\uff0c\u4e0d\u6784\u6210\u6295\u8d44\u5efa\u8bae\u3002")
-
-    ai_col1, ai_col2, ai_col3 = st.columns([2, 3, 1])
-
-    with ai_col1:
-        ai_stock = st.selectbox(
-            "\u9009\u62e9\u80a1\u7968",
-            options=ranking["name"].astype(str).tolist(),
-            key="ai_stock_select",
-        )
-
-    with ai_col2:
-        ai_query = st.text_input(
-            "\u89e3\u91ca\u91cd\u70b9",
-            value="\u8bf7\u7ed3\u5408\u6a21\u578b\u5206\u6570\u3001\u98ce\u9669\u7b49\u7ea7\u548c\u8fd1\u671f\u516c\u544a\u89e3\u91ca\u3002",
-            key="ai_query_input",
-        )
-
-    with ai_col3:
-        ai_topk = st.selectbox(
-            "\u8d44\u6599\u6761\u6570",
-            options=[3, 5, 10],
-            index=1,
-            key="ai_topk_select",
-        )
-
-    try:
-        ai_row = ranking[ranking["name"].astype(str) == ai_stock].iloc[0]
-        ai_code = str(ai_row["code"]).zfill(6)
-    except Exception:
-        ai_row = None
-        ai_code = ""
-
-    ai_rag_results = st.session_state.get("ai_page_rag_results")
-    if ai_rag_results is None:
-        ai_rag_results = pd.DataFrame()
-
-    if ai_row is not None:
-        cached_ai_text = load_cached_ai_explanation(ai_row)
-
-        if cached_ai_text:
-            with st.expander("\u67e5\u770b\u4e0a\u6b21 AI \u89e3\u91ca\u7f13\u5b58"):
-                st.markdown(cached_ai_text)
-
-        ai_risk_detail = {
-            "risk_detail": parse_detail_json(ai_row.get("risk_detail")),
-            "confidence_detail": parse_detail_json(ai_row.get("confidence_detail")),
-        }
-
-        if st.button("\u751f\u6210 Prompt", key="ai_page_generate_prompt"):
-            ai_rag_results = pd.DataFrame()
-            if ENABLE_RAG:
-                try:
-                    ai_rag_results = cached_retrieve_stock_context(
-                        code=ai_code,
-                        query=ai_query,
-                        top_k=int(ai_topk),
-                    )
-                    st.session_state["ai_page_rag_results"] = ai_rag_results
-                except Exception as e:
-                    st.warning(f"RAG data is unavailable in this runtime: {e}")
-
-            st.session_state["ai_page_prompt_text"] = build_stock_explanation_prompt(
-                ranking_row=ai_row,
-                rag_results=ai_rag_results,
-                model_metrics=metrics,
-                risk_detail=ai_risk_detail,
-            )
-
-        if "ai_page_prompt_text" not in st.session_state:
-            st.session_state["ai_page_prompt_text"] = ""
-
-        st.text_area(
-            "\u53ef\u7f16\u8f91 Prompt",
-            height=520,
-            key="ai_page_prompt_text",
-            placeholder="\u8bf7\u5148\u70b9\u51fb\u201c\u751f\u6210 Prompt\u201d\uff0c\u4e5f\u53ef\u4ee5\u76f4\u63a5\u5728\u8fd9\u91cc\u586b\u5199\u6216\u4fee\u6539 Prompt\u3002",
-        )
-
-        if st.button("AI \u89e3\u91ca", key="ai_page_explain"):
-            if not llm_available:
-                st.error("\u8bf7\u5148\u5728\u5de6\u4fa7 AI \u63a5\u53e3\u8bbe\u7f6e\u4e2d\u914d\u7f6e\u5e76\u9a8c\u8bc1\u6a21\u578b\u3002")
-            elif not str(st.session_state.get("ai_page_prompt_text", "")).strip():
-                st.error("\u8bf7\u5148\u70b9\u51fb\u201c\u751f\u6210 Prompt\u201d\uff0c\u6216\u5728 Prompt \u6587\u672c\u6846\u4e2d\u586b\u5199\u5185\u5bb9\u3002")
-            else:
-                ai_text = explain_prompt_with_llm(
-                    stock_row=ai_row.to_dict(),
-                    prompt_text=st.session_state.get("ai_page_prompt_text", ""),
-                    llm_settings=active_llm_settings,
-                )
-
-                if ai_text.startswith("AI \u89e3\u91ca\u751f\u6210\u5931\u8d25"):
-                    st.error(ai_text)
-                else:
-                    st.success("AI \u89e3\u91ca\u5df2\u751f\u6210\u5e76\u7f13\u5b58\u5230\u672c\u5730\u3002")
-                    st.markdown(ai_text)
-
-
 if selected_home_section == "\u7cfb\u7edf\u8bbe\u7f6e":
     st.subheader("\u7cfb\u7edf\u8bbe\u7f6e")
 
-    rag_ready = os.path.exists(RAG_DOCUMENTS_PATH) and os.path.exists(RAG_INDEX_PATH)
+    rag_ready = dashboard_service.rag_ready()
 
     setting_cols = st.columns(6)
     setting_cols[0].metric("Universe", UNIVERSE.upper())
@@ -3095,28 +2494,18 @@ if selected_home_section == "\u7cfb\u7edf\u8bbe\u7f6e":
         st.caption("AI \u63a5\u53e3\u5728\u5de6\u4fa7\u8fb9\u680f\u914d\u7f6e\u548c\u9a8c\u8bc1\u3002")
 
     st.markdown("#### \u672c\u5730\u6570\u636e\u72b6\u6001")
-    status_rows = []
-
-    for label, path in [
-        ("\u65b0\u95fb\u7f13\u5b58", NEWS_CACHE_PATH),
-        ("\u516c\u544a\u7f13\u5b58", ANNOUNCEMENT_CACHE_PATH),
-        ("RAG \u6587\u6863", RAG_DOCUMENTS_PATH),
-        ("RAG \u7d22\u5f15", RAG_INDEX_PATH),
-        ("\u6700\u65b0\u6392\u540d", RANKING_LATEST_PATH),
-        ("\u56de\u6d4b\u9884\u6d4b", BACKTEST_DAILY_PREDICTIONS_PATH),
-        ("\u6a21\u578b\u5019\u9009\u8868", MODEL_CANDIDATES_PATH),
-        ("\u7edf\u4e00\u56de\u6d4b\u6c47\u603b", BACKTEST_MASTER_TABLE_PATH),
-        ("\u76ee\u6807\u641c\u7d22\u7ed3\u679c", MODEL_SEARCH_RESULTS_PATH),
-        ("\u9ed8\u8ba4\u56de\u6d4b\u65b9\u6848", SELECTED_STRATEGY_PATH),
-    ]:
-        file_path = Path(path)
-        status_rows.append(
-            {
-                "\u9879\u76ee": label,
-                "\u72b6\u6001": "\u5df2\u751f\u6210" if file_path.exists() else "\u672a\u751f\u6210",
-                "\u8def\u5f84": str(file_path),
-            }
-        )
+    status_rows = dashboard_service.file_status_rows([
+        ("新闻缓存", NEWS_CACHE_PATH),
+        ("公告缓存", ANNOUNCEMENT_CACHE_PATH),
+        ("RAG 文档", RAG_DOCUMENTS_PATH),
+        ("RAG 索引", RAG_INDEX_PATH),
+        ("最新排名", RANKING_LATEST_PATH),
+        ("回测预测", BACKTEST_DAILY_PREDICTIONS_PATH),
+        ("模型候选表", MODEL_CANDIDATES_PATH),
+        ("统一回测汇总", BACKTEST_MASTER_TABLE_PATH),
+        ("目标搜索结果", MODEL_SEARCH_RESULTS_PATH),
+        ("默认回测方案", SELECTED_STRATEGY_PATH),
+    ])
 
     st.dataframe(pd.DataFrame(status_rows), width="stretch")
 
@@ -3127,31 +2516,3 @@ if selected_home_section == "\u7cfb\u7edf\u8bbe\u7f6e":
     with st.expander("\u81ea\u52a8\u66f4\u65b0\u65e5\u5fd7"):
         log_text = read_auto_retrain_log()
         st.code(log_text if log_text else "\u6682\u65e0\u65e5\u5fd7\u3002")
-
-# st.subheader("六、训练阶段测试集评估")
-#
-# if os.path.exists(EVAL_METRICS_PATH):
-#     eval_df = pd.read_csv(EVAL_METRICS_PATH)
-#
-#     if not eval_df.empty:
-#         eval_df["date"] = pd.to_datetime(eval_df["date"])
-#
-#         fig_ic = px.line(
-#             eval_df,
-#             x="date",
-#             y=["ic", "rankic"],
-#             title="测试集每日 IC / RankIC"
-#         )
-#         st.plotly_chart(fig_ic, width="stretch")
-#
-#         fig_topk = px.line(
-#             eval_df,
-#             x="date",
-#             y=["top5_ret", "top10_ret"],
-#             title="测试集每日 TopK 平均未来5日收益"
-#         )
-#         st.plotly_chart(fig_topk, width="stretch")
-#     else:
-#         st.info("评估文件为空。")
-# else:
-#     st.info("暂无训练阶段评估文件。")

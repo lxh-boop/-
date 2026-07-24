@@ -10,26 +10,48 @@ import pandas as pd
 
 from app.components.compact_metric import render_compact_metric
 from app.display_labels import action_label, display_label, risk_level_label
-from config import DEFAULT_INITIAL_CASH, DEFAULT_PAPER_TRADING_START_DATE
-from evaluation.evaluation_store import load_ai_reliability_state
-from portfolio.trading_permissions import (
+from application.paper_trading_service import (
+    AGENT_MAIN,
+    DEFAULT_INITIAL_CASH,
+    DEFAULT_PAPER_TRADING_START_DATE,
     DEFAULT_TRADING_PERMISSIONS,
+    PipelineStatus,
     TRADING_PERMISSION_LABELS,
+    ai_reliability_cache_version,
+    cancel_pending_paper_cash_flow,
+    cash_flow_cache_versions,
+    daily_order_cache_versions,
+    daily_position_cache_versions,
+    execute_confirmed_plan_v2,
+    execute_tool,
+    explain_stock_decision_attribution,
     format_permission_summary,
-    normalize_trading_permissions,
-)
-from pipelines.schemas import PipelineStatus
-from news_db_sync import sync_event_cache_to_agent_db
-from pipelines.replay_audit_ledger import (
+    get_classic_user_profile_form_options,
+    has_required_paper_trading_profile,
+    list_daily_order_snapshot_dates,
+    list_daily_position_snapshot_dates,
     list_replay_audit_dates,
     list_replay_audit_runs,
+    load_ai_reliability_state,
+    load_classic_user_context,
+    load_daily_order_snapshot,
+    load_daily_position_snapshot,
+    load_paper_backfill_status,
+    load_paper_cash_flows,
+    load_paper_trading_snapshot,
     load_replay_audit_day,
     load_replay_audit_markdown,
-)
-from portfolio.decision_attribution import (
-    explain_stock_decision_attribution,
+    normalize_trading_permissions,
+    paper_cache_versions,
+    path_cache_version,
+    ranking_exists,
+    read_csv as read_application_csv,
     render_decision_attribution_markdown,
+    run_paper_trading_from_latest,
+    save_classic_user_context,
+    sync_event_cache_to_agent_db,
 )
+
 
 try:
     import streamlit as st
@@ -88,44 +110,6 @@ except ImportError:
             return _noop
 
     st = _StreamlitStub()
-
-from app.classic_services import (
-    cancel_pending_paper_cash_flow,
-    get_classic_user_profile_form_options,
-    list_daily_order_snapshot_dates,
-    list_daily_position_snapshot_dates,
-    load_classic_user_context,
-    load_daily_order_snapshot,
-    load_daily_position_snapshot,
-    load_paper_backfill_status,
-    load_paper_cash_flows,
-    load_paper_trading_snapshot,
-    run_paper_trading_from_latest,
-    save_classic_user_context,
-)
-from agent.tool_engine import AGENT_MAIN, execute_tool
-from agent.write_gateway import execute_confirmed_plan_v2
-
-try:
-    from app.classic_services import has_required_paper_trading_profile
-except ImportError:
-    def has_required_paper_trading_profile(user_context: dict[str, Any] | None) -> bool:
-        data = user_context or {}
-        try:
-            capital = float(data.get("available_capital") or data.get("initial_capital") or 0.0)
-        except Exception:
-            capital = 0.0
-        return all(
-            [
-                data.get("user_id"),
-                capital > 0,
-                data.get("risk_level"),
-                data.get("goal_type") or data.get("investment_goal"),
-                data.get("liquidity_need"),
-                data.get("trading_style"),
-            ]
-        )
-
 
 AI_PAPER_TRADING_PAGE_TITLE = "AI 模拟盘"
 AI_PAPER_TRADING_TOP_LEVEL_PAGE = "AI 模拟盘"
@@ -209,13 +193,7 @@ def _legacy_direct_write_disabled(*args: Any, **kwargs: Any) -> None:
 
 
 def _path_cache_version(path: str | Path) -> tuple[str, int, int]:
-    resolved = Path(path)
-    try:
-        stat = resolved.stat()
-        size = stat.st_size if resolved.is_file() else 0
-        return str(resolved), int(stat.st_mtime_ns), int(size)
-    except OSError:
-        return str(resolved), 0, 0
+    return path_cache_version(path)
 
 
 def _paper_cache_versions(
@@ -223,26 +201,7 @@ def _paper_cache_versions(
     output_dir: str | Path,
     db_path: str | Path | None = None,
 ) -> tuple[tuple[str, int, int], ...]:
-    root = Path(output_dir) / "portfolio" / str(user_id)
-    paths = [
-        root / "paper_account_latest.json",
-        root / "paper_account.json",
-        root / "paper_positions_latest.csv",
-        root / "paper_positions.csv",
-        root / "paper_orders_latest.csv",
-        root / "paper_orders.csv",
-        root / "paper_nav_latest.csv",
-        root / "portfolio_risk_report_latest.json",
-        root / "portfolio_risk_report.json",
-        root / "ai_paper_decisions_latest.json",
-        root / "paper_execution_diagnostics_latest.json",
-        root / "paper_trading_settings.json",
-        root / "history" / "orders",
-        root / "history" / "positions",
-    ]
-    if db_path:
-        paths.append(Path(db_path))
-    return tuple(_path_cache_version(path) for path in paths)
+    return paper_cache_versions(user_id, output_dir, db_path)
 
 
 @st.cache_data(ttl=PAPER_PAGE_CACHE_TTL_SECONDS)
@@ -287,11 +246,10 @@ def load_cached_ai_reliability_state(
     user_id: str,
     output_dir: str | Path,
 ) -> dict[str, Any]:
-    state_path = Path(output_dir) / "portfolio" / str(user_id) / "ai_reliability_state.json"
     return _cached_ai_reliability_state(
         str(user_id),
         str(output_dir),
-        _path_cache_version(state_path),
+        ai_reliability_cache_version(user_id, output_dir),
     )
 
 
@@ -315,12 +273,7 @@ def load_cached_paper_cash_flows(
     output_dir: str | Path,
     db_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
-    root = Path(output_dir) / "portfolio" / str(user_id)
-    versions = (
-        _path_cache_version(root / "cash_flows.json"),
-        _path_cache_version(root / "paper_cash_flows.json"),
-        _path_cache_version(db_path) if db_path else ("", 0, 0),
-    )
+    versions = cash_flow_cache_versions(user_id, output_dir, db_path)
     return _cached_paper_cash_flows(
         str(user_id),
         str(output_dir),
@@ -345,17 +298,11 @@ def load_cached_daily_order_snapshot(
     trade_date: str,
     output_dir: str | Path,
 ) -> pd.DataFrame:
-    root = Path(output_dir) / "portfolio" / str(user_id)
-    token = "".join(ch for ch in str(trade_date) if ch.isdigit())[:8]
     return _cached_daily_order_snapshot(
         str(user_id),
         str(trade_date),
         str(output_dir),
-        (
-            _path_cache_version(root / "history" / "orders"),
-            _path_cache_version(root / "history" / "orders" / f"orders_{token}.csv"),
-            _path_cache_version(root / "paper_orders_latest.csv"),
-        ),
+        daily_order_cache_versions(user_id, trade_date, output_dir),
     )
 
 
@@ -375,17 +322,11 @@ def load_cached_daily_position_snapshot(
     trade_date: str,
     output_dir: str | Path,
 ) -> pd.DataFrame:
-    root = Path(output_dir) / "portfolio" / str(user_id)
-    token = "".join(ch for ch in str(trade_date) if ch.isdigit())[:8]
     return _cached_daily_position_snapshot(
         str(user_id),
         str(trade_date),
         str(output_dir),
-        (
-            _path_cache_version(root / "history" / "positions"),
-            _path_cache_version(root / "history" / "positions" / f"positions_{token}.csv"),
-            _path_cache_version(root / "paper_positions_latest.csv"),
-        ),
+        daily_position_cache_versions(user_id, trade_date, output_dir),
     )
 
 
@@ -425,14 +366,7 @@ def get_ai_paper_trading_page_sections() -> list[str]:
 
 
 def _read_csv(path: Path) -> pd.DataFrame:
-    if not path.exists():
-        return pd.DataFrame()
-    try:
-        if path.stat().st_size == 0:
-            return pd.DataFrame()
-        return pd.read_csv(path, dtype={"stock_code": str, "code": str}, encoding="utf-8-sig")
-    except (pd.errors.EmptyDataError, OSError):
-        return pd.DataFrame()
+    return read_application_csv(path)
 
 
 def _format_weight(value: Any) -> str:
@@ -1236,8 +1170,7 @@ def render(
                 db_path=db_path,
                 output_dir=output_dir,
             )
-            ranking_path = Path(output_dir) / "ranking_latest.csv"
-            if not ranking_path.exists():
+            if not ranking_exists(output_dir):
                 st.error("缺少 outputs/ranking_latest.csv，请先执行“每日更新并生成预测排名”。")
             else:
                 result = run_paper_trading_from_latest(
