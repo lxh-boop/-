@@ -8,11 +8,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY requirements*.txt ./
-RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi \
+RUN pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir -r requirements-agent-api.txt
 
 COPY . .
-RUN mkdir -p /app/outputs
+RUN mkdir -p /app/outputs /app/logs /app/runtime
 
 EXPOSE 8010
-CMD ["python", "-m", "agent.api"]
+CMD ["python", "-u", "run_agent_api.py"]

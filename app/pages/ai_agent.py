@@ -6,7 +6,7 @@ import time
 import uuid
 from datetime import datetime
 from typing import Any
-from application.agent_service import (
+from client.api.agent import (
     AgentApplicationService,
     LLMRuntimeSettings,
     PAPER_AGENT_DISCLAIMER,

@@ -15,7 +15,7 @@ except ImportError:
             return _noop
     st = _StreamlitStub()
 
-from application.system_monitor_service import (
+from client.api.system_monitor import (
     build_handoff_health_summary,
     build_memory_store_health_summary,
     build_message_bus_health_summary,

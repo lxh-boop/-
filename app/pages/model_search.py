@@ -4,7 +4,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from application.model_search_service import (
+from client.api.model_search import (
     BACKTEST_DISCLAIMER,
     BACKTEST_MASTER_TABLE_PATH,
     MODEL_CANDIDATES_PATH,

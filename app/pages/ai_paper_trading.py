@@ -10,7 +10,7 @@ import pandas as pd
 
 from app.components.compact_metric import render_compact_metric
 from app.display_labels import action_label, display_label, risk_level_label
-from application.paper_trading_service import (
+from client.api.paper_trading import (
     AGENT_MAIN,
     DEFAULT_INITIAL_CASH,
     DEFAULT_PAPER_TRADING_START_DATE,

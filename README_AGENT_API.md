@@ -1,78 +1,70 @@
-# Agent API 工程化入口
+# Stock Daily App FastAPI 服务端
 
-该目录为现有单 Main Coordinator Agent 增加独立服务层，不替换 Streamlit，也不改变业务 Tool、RAG、模拟盘和 Proposal 安全边界。
+阶段 3 将整个 Streamlit 应用的业务调用统一迁移到 FastAPI。Streamlit 只负责页面交互和展示，Agent、RAG、模拟盘、回测、模型搜索、配置和系统监控均由服务端执行。
+
+## 架构
+
+```text
+Streamlit / future React
+        ↓ HTTP JSON
+FastAPI server/api
+        ↓
+Application Service
+        ↓
+Agent / RAG / Portfolio / Pipeline / Repository
+```
+
+客户端不得直接导入 `application`、`agent`、`database`、`pipelines`、`portfolio` 或 RAG 模块。
 
 ## 启动
 
-```powershell
-python -m pip install -r requirements-agent-api.txt
-copy .env.agent-api.example .env
-python run_agent_api.py
-```
-
-环境变量由操作系统或启动脚本注入；当前代码不会主动读取 `.env` 文件。默认地址：`http://127.0.0.1:8010`。
-
-## 接口
-
-- `GET /health/live`：进程存活检查。
-- `GET /health/ready`：输出目录、入口模式和限流配置检查。
-- `GET /metrics`：Prometheus 文本指标。
-- `POST /v1/agent/chat`：普通 JSON 请求。
-- `POST /v1/agent/chat/stream`：SSE 阶段进度流。当前是任务阶段流，不是模型 Token 流。
-- `WS /v1/agent/ws`：多轮 WebSocket 请求。
-
-请求示例：
-
-```json
-{
-  "query": "分析股票 600519",
-  "user_id": "demo_user",
-  "session_id": "demo_session",
-  "reply_language": "zh",
-  "top_k": 20
-}
-```
-
-生产环境建议设置：
-
-```text
-AGENT_API_KEY=<随机高强度密钥>
-AGENT_REDIS_URL=redis://redis:6379/0
-AGENT_API_MAX_CONCURRENCY=4
-AGENT_API_TIMEOUT_SECONDS=180
-```
-
-启用 `AGENT_API_KEY` 后，`/v1/*` HTTP 与 WebSocket 请求必须携带 `X-API-Key`。这只是服务级共享密钥，不等于完整用户认证；公网部署仍应放在 API Gateway、反向代理或 OAuth/JWT 身份层之后。
-
-## Docker
+安装增量依赖：
 
 ```powershell
-docker build -f Dockerfile.agent-api -t stock-agent-api .
-docker run --rm -p 8010:8010 --env-file .env.agent-api stock-agent-api
+.\.venv\Scripts\python.exe -m pip install -r requirements-agent-api.txt
 ```
 
-`Dockerfile.agent-api` 会优先安装项目现有的 `requirements.txt`，再安装 API 增量依赖。当前上传包不包含主项目依赖文件，因此只能验证 Dockerfile 语法和服务层代码，无法在本环境构建完整业务镜像。
-
-## RAG 检索评估
-
-准备 JSON：
-
-```json
-[
-  {
-    "case_id": "case_1",
-    "query": "贵州茅台近期公告",
-    "relevant_ids": ["chunk_1", "chunk_2"],
-    "retrieved_ids": ["chunk_2", "chunk_7"],
-    "latency_ms": 45.2
-  }
-]
-```
-
-执行：
+启动 FastAPI：
 
 ```powershell
-python -m agent.evaluation cases.json
+$env:AGENT_API_HOST = "127.0.0.1"
+$env:AGENT_API_PORT = "8010"
+.\.venv\Scripts\python.exe -u run_agent_api.py
 ```
 
-输出 Hit Rate、MRR、Recall、Precision 和平均延迟，便于比较 chunk、embedding、混合召回和 reranker 配置。
+另一个终端启动 Streamlit：
+
+```powershell
+$env:STOCK_AGENT_API_URL = "http://127.0.0.1:8010"
+.\.venv\Scripts\python.exe -u -m streamlit run .\app.py
+```
+
+正式交付提供 `D:\google\D_google_run_stock_daily_app.bat`，无需手动打开两个终端。
+
+## 核心接口
+
+- `GET /api/v1/health`
+- `GET /openapi.json`
+- `GET /api/v1/dashboard/bootstrap`
+- `POST /api/v1/dashboard/operations/{operation}`
+- `POST /api/v1/agent/operations/{operation}`
+- `POST /api/v1/paper-trading/operations/{operation}`
+- `POST /api/v1/paper-profile/operations/{operation}`
+- `POST /api/v1/model-search/operations/{operation}`
+- `POST /api/v1/system-monitor/operations/{operation}`
+
+每个 operation 都由服务端白名单控制，不能通过接口执行任意 Python 函数。
+
+## 数据合同
+
+请求和响应只使用 JSON。DataFrame、Series、Path、日期、元组和业务结果对象通过显式类型标记传输，不使用 pickle。
+
+LLM API Key 不会从服务端返回到 Streamlit。服务端生成短期 `settings_token`，连接验证和 Agent 执行时再由服务端恢复对应配置。
+
+## React 兼容
+
+FastAPI 不返回 Streamlit 对象或页面 HTML。后续 React 只需替换客户端，不需要重构 Agent、RAG、数据库和 Application Service。
+
+## 当前阶段边界
+
+阶段 3 仍采用同步 HTTP 请求。长任务持久化、SSE 流式状态、取消和服务重启恢复在阶段 4 完成。

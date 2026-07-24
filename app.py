@@ -11,7 +11,7 @@ import json
 import time
 from pathlib import Path
 
-from application.dashboard_service import (
+from client.api.dashboard import (
     ANNOUNCEMENT_CACHE_PATH,
     AGENT_QUANT_DB_PATH,
     A_SHARE_DAILY_DATA_READY_TIME,
