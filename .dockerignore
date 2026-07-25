@@ -1,7 +1,57 @@
-__pycache__/
-*.py[cod]
+# Version-control and Python caches
 .git/
+.gitignore
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environment and dependency caches
+.venv/
+venv/
+node_modules/
+.cache/
+
+# Persistent host data must be bind-mounted, never copied into an image
+data/
+models/
 outputs/
+logs/
+runtime/
+external_repos/
+
+# Secrets and machine-local configuration
 .env
+.env.*
+!.env.example
+local_app_config.json
+.streamlit/secrets.toml
+**/secrets.toml
+
+# Generated packages, reports, and historical audit copies
+*.zip
+*.7z
+*.rar
 *.sqlite
+*.sqlite3
 *.db
+*.pkl
+*.pickle
+*.pt
+*.pth
+*.onnx
+*.parquet
+*.feather
+context_audit_bundle_*/
+stage_*/
+work/
+test_results/
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

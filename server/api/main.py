@@ -48,6 +48,7 @@ def create_app() -> FastAPI:
                 "status": "ok",
                 "service": "stock-daily-app-api",
                 "version": "4.0.0",
+                "deployment_mode": os.environ.get("STOCK_APP_DEPLOYMENT_MODE", "local"),
                 "project_root": str(Path.cwd()),
             },
         )

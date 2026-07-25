@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import asdict, dataclass
 from typing import Any, Literal, Mapping
@@ -136,9 +137,9 @@ def build_model_profile(
         model_name = _text(config.get("llm_local_model")) or DEFAULT_LOCAL_LLM_MODEL
         if not _OLLAMA_MODEL.fullmatch(model_name):
             raise ValueError("本地模型名称不合法。")
+        deployment_override = _safe_base_url(os.environ.get("STOCK_LOCAL_LLM_BASE_URL")).rstrip("/")
         configured_base = _safe_base_url(config.get("llm_local_base_url")).rstrip("/")
-        fixed_base = DEFAULT_LOCAL_LLM_BASE_URL.rstrip("/")
-        base_url = DEFAULT_LOCAL_LLM_BASE_URL if configured_base.lower() != fixed_base.lower() else configured_base
+        base_url = deployment_override or configured_base or DEFAULT_LOCAL_LLM_BASE_URL
         provider_id = DEFAULT_LOCAL_LLM_PROVIDER
         return ModelProfile(
             profile_id=_profile_id(

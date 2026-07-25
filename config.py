@@ -27,7 +27,7 @@ def _mode_path(path, dev_value: str) -> str:
 UNIVERSE = "csi300"
 
 # Qlib 数据目录
-QLIB_PROVIDER_URI = r"D:\qlib_data\cn_data"
+QLIB_PROVIDER_URI = os.environ.get("QLIB_PROVIDER_URI", r"D:\qlib_data\cn_data")
 
 # CSI300 股票池缓存文件
 CSI300_POOL_CACHE_PATH = r"data\csi300_stock_pool.csv"
@@ -128,9 +128,12 @@ DEFAULT_LOCAL_LLM_CONTEXT_WINDOW = 32768
 # External model settings
 # ============================================================
 
-DEFAULT_DFT_UNET_CHECKPOINT_PATH = (
-    r"D:\paper_work\Unet_DFT\experiments\search_pure_unet_l3_seed0"
-    r"\DFT_UNET_dft_unet_l3_d64_ic_seed0_20260529_020115\best_model.pth"
+DEFAULT_DFT_UNET_CHECKPOINT_PATH = os.environ.get(
+    "DFT_UNET_CHECKPOINT_PATH",
+    (
+        r"D:\paper_work\Unet_DFT\experiments\search_pure_unet_l3_seed0"
+        r"\DFT_UNET_dft_unet_l3_d64_ic_seed0_20260529_020115\best_model.pth"
+    ),
 )
 DFT_UNET_MODEL_NAME = "dft_unet"
 DFT_UNET_DEFAULT_TRAIN_MODE = "predict_only"
@@ -216,7 +219,7 @@ def ensure_dirs():
 LOCAL_TRAIN_SOURCE = "qlib"
 
 # 改成你自己的 Qlib 数据路径
-QLIB_PROVIDER_URI = r"D:\qlib_data\cn_data"
+QLIB_PROVIDER_URI = os.environ.get("QLIB_PROVIDER_URI", r"D:\qlib_data\cn_data")
 
 # 如果你不用 Qlib，也可以准备一个本地 CSV
 LOCAL_TRAIN_CSV_PATH = r"data\local_train_stock_data.csv"
