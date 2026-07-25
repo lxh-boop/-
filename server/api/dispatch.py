@@ -37,7 +37,6 @@ DASHBOARD_FUNCTIONS = {
     "registered_zoo_backends",
     "reset_discovery_cache",
     "resolve_active_llm_settings",
-    "run_latest_t1_backtest",
     "save_local_config",
     "validate_local_model",
     "validate_tushare_token",
@@ -187,7 +186,6 @@ PAPER_FUNCTIONS = {
     "ranking_exists",
     "read_csv",
     "render_decision_attribution_markdown",
-    "run_paper_trading_from_latest",
     "save_classic_user_context",
     "sync_event_cache_to_agent_db",
 }
@@ -200,8 +198,6 @@ PAPER_PROFILE_FUNCTIONS = {
     "build_ai_adjustment_detail",
     "load_current_ai_reliability_state",
     "load_scheduler_status_summary",
-    "run_ai_news_adjustment_from_latest",
-    "start_scheduler_manual_run",
     "read_scheduler_log_tail",
     "has_required_paper_trading_profile",
     "save_classic_user_context",
@@ -262,62 +258,6 @@ REFLECTION_FUNCTIONS = {
     "format_reflection_caption",
     "build_reflection_health_summary",
 }
-
-
-class RollingJobRegistry:
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self._jobs: dict[str, Any] = {}
-
-    def start(self, **kwargs: Any) -> dict[str, Any]:
-        from application.dashboard_service import dashboard_service
-
-        job = dashboard_service.start_rolling_update_job(**kwargs)
-        job_id = uuid.uuid4().hex
-        with self._lock:
-            self._jobs[job_id] = job
-        return {
-            "job_id": job_id,
-            "log_path": job.log_path,
-            "masked_command": list(job.masked_command or []),
-        }
-
-    def _get(self, job_id: str) -> Any:
-        with self._lock:
-            job = self._jobs.get(str(job_id))
-        if job is None:
-            raise KeyError(f"Unknown rolling update job: {job_id}")
-        return job
-
-    def status(self, job_id: str) -> dict[str, Any]:
-        job = self._get(job_id)
-        return {
-            "job_id": str(job_id),
-            "poll": job.poll(),
-            "returncode": job.returncode,
-            "log_path": job.log_path,
-            "masked_command": list(job.masked_command or []),
-        }
-
-    def kill(self, job_id: str) -> dict[str, Any]:
-        job = self._get(job_id)
-        job.kill()
-        return self.status(job_id)
-
-    def write_log(self, job_id: str, text: str) -> dict[str, Any]:
-        job = self._get(job_id)
-        job.write_log(text)
-        return {"job_id": str(job_id), "written": True}
-
-    def close(self, job_id: str) -> dict[str, Any]:
-        job = self._get(job_id)
-        job.close()
-        with self._lock:
-            self._jobs.pop(str(job_id), None)
-        return {"job_id": str(job_id), "closed": True}
-
-
-rolling_jobs = RollingJobRegistry()
 
 
 class LLMSettingsRegistry:
@@ -442,18 +382,6 @@ def invoke_dashboard(operation: str, args: list[Any], kwargs: dict[str, Any]) ->
         kwargs = dict(kwargs)
         kwargs.pop("scheduler", None)
         return module.set_daily_retrain_job(scheduler=_scheduler_instance(), **kwargs)
-    if operation == "start_rolling_update_job":
-        return rolling_jobs.start(**kwargs)
-    if operation == "rolling_update_job_status":
-        return rolling_jobs.status(str(kwargs.get("job_id") or args[0]))
-    if operation == "rolling_update_job_kill":
-        return rolling_jobs.kill(str(kwargs.get("job_id") or args[0]))
-    if operation == "rolling_update_job_write_log":
-        job_id = str(kwargs.get("job_id") or args[0])
-        text = str(kwargs.get("text") if "text" in kwargs else args[1])
-        return rolling_jobs.write_log(job_id, text)
-    if operation == "rolling_update_job_close":
-        return rolling_jobs.close(str(kwargs.get("job_id") or args[0]))
     raise KeyError(f"Dashboard operation is not allowed: {operation}")
 
 

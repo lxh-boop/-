@@ -22,12 +22,13 @@ from server.api.dispatch import (
     paper_bootstrap,
 )
 from server.api.router_factory import build_operation_router
+from server.api.tasks import router as tasks_router
 
 
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Stock Daily App API",
-        version="3.0.0",
+        version="4.0.0",
         description="Frontend-independent HTTP boundary for Streamlit and future React clients.",
     )
     origins = [item.strip() for item in os.environ.get("STOCK_AGENT_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",") if item.strip()]
@@ -46,7 +47,7 @@ def create_app() -> FastAPI:
             data={
                 "status": "ok",
                 "service": "stock-daily-app-api",
-                "version": "3.0.0",
+                "version": "4.0.0",
                 "project_root": str(Path.cwd()),
             },
         )
@@ -59,6 +60,7 @@ def create_app() -> FastAPI:
     app.include_router(build_operation_router(prefix="/api/v1/system-monitor", tag="system-monitor", invoker=invoke_monitor))
     app.include_router(build_operation_router(prefix="/api/v1/handoff", tag="handoff", invoker=invoke_handoff))
     app.include_router(build_operation_router(prefix="/api/v1/reflection", tag="reflection", invoker=invoke_reflection))
+    app.include_router(tasks_router)
     return app
 
 

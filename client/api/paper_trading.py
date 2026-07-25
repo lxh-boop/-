@@ -4,6 +4,7 @@ from typing import Any
 
 from client.api.base import call_operation, load_bootstrap
 from client.api.types import PipelineStatus
+from client.api.tasks import TaskHandle, submit_task
 
 _BOOTSTRAP = load_bootstrap("paper-trading")
 for _key, _value in _BOOTSTRAP.items():
@@ -51,7 +52,6 @@ for _name in [
     "ranking_exists",
     "read_csv",
     "render_decision_attribution_markdown",
-    "run_paper_trading_from_latest",
     "save_classic_user_context",
     "sync_event_cache_to_agent_db",
 ]:
@@ -59,3 +59,17 @@ for _name in [
 
 
 __all__ = [name for name in globals() if not name.startswith("_")]
+
+
+def submit_paper_trading_update(*args: Any, sync_kwargs: dict[str, Any] | None = None, **kwargs: Any) -> TaskHandle:
+    timeout_seconds = int(kwargs.pop("task_timeout_seconds", 1800))
+    user_id = str(kwargs.get("user_id") or "")
+    return submit_task(
+        "paper-trading.update",
+        args=list(args),
+        kwargs={**kwargs, "sync_kwargs": dict(sync_kwargs or {})},
+        owner_id=user_id,
+        session_id="paper-trading-update",
+        metadata={"surface": "ai-paper-trading"},
+        timeout_seconds=timeout_seconds,
+    )

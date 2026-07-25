@@ -6,6 +6,7 @@ from typing import Any
 
 from client.api.base import call_operation, load_bootstrap
 from client.api.types import LLMRuntimeSettings
+from client.api.tasks import TaskHandle, find_latest_task, submit_task
 
 _BOOTSTRAP = load_bootstrap("dashboard")
 globals().update(_BOOTSTRAP)
@@ -18,32 +19,42 @@ class RemoteSchedulerHandle:
 
 
 class RemoteRollingUpdateJob:
-    def __init__(self, payload: dict[str, Any]) -> None:
-        self.job_id = str(payload.get("job_id") or "")
-        self.log_path = payload.get("log_path")
-        self.masked_command = list(payload.get("masked_command") or [])
+    def __init__(self, handle: TaskHandle | dict[str, Any]) -> None:
+        self.handle = handle if isinstance(handle, TaskHandle) else TaskHandle(str(handle.get("task_id") or ""))
+        self.job_id = self.handle.task_id
+        self.log_path = None
+        self.masked_command: list[str] = []
         self._returncode: int | None = None
 
     def poll(self) -> int | None:
-        payload = call_operation("dashboard", "rolling_update_job_status", job_id=self.job_id)
-        self._returncode = payload.get("returncode")
-        return payload.get("poll")
+        task = self.handle.status()
+        status = str(task.get("status") or "")
+        if status in {"queued", "running", "cancelling"}:
+            return None
+        self._returncode = 0 if status == "succeeded" else 1
+        result = task.get("result") or {}
+        if isinstance(result, dict):
+            self.log_path = result.get("log_path")
+            self.masked_command = list(result.get("masked_command") or [])
+        return self._returncode
 
     def kill(self) -> None:
-        payload = call_operation("dashboard", "rolling_update_job_kill", job_id=self.job_id)
-        self._returncode = payload.get("returncode")
+        self.handle.cancel()
+        self._returncode = 1
 
     @property
     def returncode(self) -> int | None:
-        payload = call_operation("dashboard", "rolling_update_job_status", job_id=self.job_id)
-        self._returncode = payload.get("returncode")
+        self.poll()
         return self._returncode
 
     def write_log(self, text: str) -> None:
-        call_operation("dashboard", "rolling_update_job_write_log", job_id=self.job_id, text=str(text))
+        del text
 
     def close(self) -> None:
-        call_operation("dashboard", "rolling_update_job_close", job_id=self.job_id)
+        return None
+
+    def status(self) -> dict[str, Any]:
+        return self.handle.status()
 
 
 class DashboardRemoteService:
@@ -58,8 +69,22 @@ class DashboardRemoteService:
 
     @staticmethod
     def start_rolling_update_job(**kwargs: Any) -> RemoteRollingUpdateJob:
-        payload = call_operation("dashboard", "start_rolling_update_job", **kwargs)
-        return RemoteRollingUpdateJob(dict(payload or {}))
+        estimated_seconds = int(kwargs.pop("estimated_seconds", 300))
+        timeout_seconds = int(kwargs.pop("timeout_seconds", 3600))
+        handle = submit_task(
+            "dashboard.rolling_update",
+            kwargs={**kwargs, "estimated_seconds": estimated_seconds},
+            owner_id="dashboard",
+            session_id="rolling-update",
+            metadata={"surface": "dashboard"},
+            timeout_seconds=timeout_seconds,
+        )
+        return RemoteRollingUpdateJob(handle)
+
+    @staticmethod
+    def find_active_rolling_update() -> RemoteRollingUpdateJob | None:
+        task = find_latest_task(owner_id="dashboard", session_id="rolling-update", task_type="dashboard.rolling_update", active_only=True)
+        return RemoteRollingUpdateJob(task) if task else None
 
 
 dashboard_service = DashboardRemoteService()
@@ -133,7 +158,6 @@ for _name in [
     "read_auto_retrain_log",
     "registered_zoo_backends",
     "reset_discovery_cache",
-    "run_latest_t1_backtest",
     "save_local_config",
     "validate_local_model",
     "validate_tushare_token",
@@ -143,3 +167,21 @@ for _name in [
 
 
 __all__ = [name for name in globals() if not name.startswith("_")]
+
+
+def submit_latest_t1_backtest(*args: Any, **kwargs: Any) -> TaskHandle:
+    timeout_seconds = int(kwargs.pop("task_timeout_seconds", 3600))
+    return submit_task(
+        "dashboard.backtest",
+        args=list(args),
+        kwargs=kwargs,
+        owner_id="dashboard",
+        session_id="backtest",
+        metadata={"surface": "backtest"},
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def find_active_backtest() -> TaskHandle | None:
+    task = find_latest_task(owner_id="dashboard", session_id="backtest", task_type="dashboard.backtest", active_only=True)
+    return TaskHandle(str(task.get("task_id") or "")) if task else None

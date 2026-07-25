@@ -24,6 +24,14 @@ from client.api.agent import (
     trace_event,
     trace_exception,
 )
+from client.api.tasks import (
+    TERMINAL_STATUSES as TASK_TERMINAL_STATUSES,
+    TaskHandle,
+    acknowledge_task,
+    cancel_task,
+    find_latest_task,
+    get_task,
+)
 
 
 try:
@@ -863,10 +871,11 @@ def _persist_conversation_message(
     db_path: str | None,
     language: str,
     agent_result: dict[str, Any] | None = None,
+    message_id: str | None = None,
 ) -> str:
     repo = _get_agent_application_service(db_path)
     now = _now_text()
-    message_id = f"msg_{uuid.uuid4().hex[:12]}"
+    message_id = str(message_id or f"msg_{uuid.uuid4().hex[:12]}")
     run_id = str((agent_result or {}).get("run_id") or "")
     repo.upsert_message(
         {
@@ -1544,26 +1553,25 @@ def _run_agent(
     session_id: str,
     llm_settings: LLMRuntimeSettings | None = None,
 ) -> dict[str, Any]:
+    """Compatibility helper for non-Streamlit callers; the UI uses submit/resume."""
     trace_event("ui.agent.submit", {"query": query, "user_id": user_id, "session_id": session_id})
     try:
-        result = _get_agent_application_service(db_path).run(
+        handle = _get_agent_application_service(db_path).submit_run(
             query,
             user_id=user_id,
             output_dir=output_dir,
             top_k=int(default_topk),
             session_id=session_id,
             llm_settings=llm_settings,
+            task_timeout_seconds=900,
         )
-        if isinstance(result, dict):
-            return result
-        return {
-            "success": True,
-            "answer": str(result),
-            "raw_result": result,
-        }
+        task = handle.wait(timeout_seconds=920)
+        if str(task.get("status") or "") == "succeeded":
+            result = task.get("result")
+            return result if isinstance(result, dict) else {"success": True, "answer": str(result), "raw_result": result}
+        return _agent_task_failure_result(task)
     except Exception as exc:
         trace_exception("ui.agent.failed", exc, run_id="", task_id="")
-        # LLM-First mode must never fall back to the legacy keyword registry.
         return {
             "success": False,
             "answer": (
@@ -1574,6 +1582,101 @@ def _run_agent(
             "error_type": type(exc).__name__,
             "fallback_used": False,
         }
+
+
+def _agent_task_failure_result(task: dict[str, Any]) -> dict[str, Any]:
+    status = str(task.get("status") or "failed")
+    error = task.get("error") or {}
+    messages = {
+        "cancelled": "本次 Agent 任务已取消。",
+        "timed_out": "本次 Agent 任务执行超时，已终止。",
+        "interrupted": "FastAPI 服务重启，本次 Agent 任务已中断。",
+        "failed": "LLM-First Agent 当前无法完成本次请求。",
+    }
+    return {
+        "success": False,
+        "answer": messages.get(status, "Agent 任务未完成。") + "\n\n" + COMPLIANCE_NOTE,
+        "error_type": str(error.get("code") or status),
+        "error": error,
+        "task_id": str(task.get("task_id") or ""),
+        "task_status": status,
+        "fallback_used": False,
+    }
+
+
+def _latest_agent_task(user_id: str, session_id: str) -> dict[str, Any] | None:
+    try:
+        return find_latest_task(
+            owner_id=user_id,
+            session_id=session_id,
+            task_type="agent.run",
+            unacknowledged_only=True,
+        )
+    except Exception:
+        return None
+
+
+def _render_agent_task_state(
+    *,
+    task: dict[str, Any],
+    messages: list[dict[str, Any]],
+    user_id: str,
+    session_id: str,
+    output_dir: str,
+    db_path: str | None,
+) -> bool:
+    """Render/resume a server task. Returns True when chat input should pause."""
+    task_id = str(task.get("task_id") or "")
+    status = str(task.get("status") or "")
+    progress = max(0.0, min(float(task.get("progress") or 0), 1.0))
+    message = str(task.get("message") or "Agent 正在处理请求")
+
+    if status not in TASK_TERMINAL_STATUSES:
+        st.info(f"Agent 任务 `{task_id[-8:]}` 正在运行；刷新页面后会自动恢复。")
+        st.progress(progress)
+        st.caption(f"{message} ｜ 状态：{status} ｜ 进度：{int(progress * 100)}%")
+        if st.button("取消当前 Agent 任务", key=f"cancel_agent_task::{task_id}"):
+            cancel_task(task_id)
+            st.warning("已提交取消请求。")
+            time.sleep(0.5)
+            st.rerun()
+        time.sleep(1.0)
+        st.rerun()
+        return True
+
+    result = task.get("result") if status == "succeeded" else _agent_task_failure_result(task)
+    if not isinstance(result, dict):
+        result = {"success": True, "answer": str(result), "raw_result": result}
+    result.setdefault("task_id", task_id)
+    answer = _normalise_answer(result)
+    metadata = dict(task.get("metadata") or {})
+
+    # Acknowledge only after the assistant message is persisted. This makes browser
+    # refresh recovery idempotent: unacknowledged terminal tasks are resumed once.
+    with st.chat_message("assistant"):
+        st.caption("Agent 已完成处理。" if result.get("success", False) else f"Agent 任务状态：{status}")
+        st.markdown(answer)
+        _render_result_details(
+            result,
+            user_id=user_id,
+            output_dir=output_dir,
+            render_scope=f"task::{task_id}",
+        )
+    assistant_message = {"role": "assistant", "content": answer, "agent_result": result}
+    messages.append(assistant_message)
+    assistant_message["message_id"] = _persist_conversation_message(
+        user_id=user_id,
+        conversation_id=session_id,
+        role="assistant",
+        content=answer,
+        db_path=db_path,
+        language=_get_reply_language(user_id),
+        agent_result=result,
+        message_id=f"msg_task_{task_id.replace('task_', '')[:20]}",
+    )
+    acknowledge_task(task_id)
+    _phase8_rerun(user_id, "agent_task_complete")
+    return True
 
 
 def _render_result_details(
@@ -2087,6 +2190,17 @@ def render_ai_agent_page(
             _phase8_rerun(user_id, "message_load_earlier")
     _render_history(messages, user_id=user_id, output_dir=output_dir)
 
+    pending_agent_task = _latest_agent_task(user_id, session_id)
+    if pending_agent_task and _render_agent_task_state(
+        task=pending_agent_task,
+        messages=messages,
+        user_id=user_id,
+        session_id=session_id,
+        output_dir=output_dir,
+        db_path=db_path,
+    ):
+        return
+
     typed_question = st.chat_input(
         "请输入问题，例如：分析 600519，或查看当前模拟盘持仓"
     )
@@ -2113,50 +2227,26 @@ def render_ai_agent_page(
         with st.chat_message("user"):
             st.markdown(question)
 
-        with st.chat_message("assistant"):
-            with st.spinner("Agent 正在识别意图并调用工具..."):
-                agent_kwargs: dict[str, Any] = {
-                    "user_id": user_id,
-                    "output_dir": output_dir,
-                    "db_path": db_path,
-                    "default_topk": default_topk,
-                    "session_id": session_id,
-                }
-                if llm_settings is not None:
-                    agent_kwargs["llm_settings"] = llm_settings
-                result = _run_agent(question, **agent_kwargs)
-
-            answer = _normalise_answer(result)
-
-            if result.get("success", False):
-                st.caption("Agent 已完成处理。")
-            else:
-                st.caption("相关功能仍在后续开发中。")
-
-            st.markdown(answer)
-            _render_result_details(
-                result,
-                user_id=user_id,
-                output_dir=output_dir,
-                render_scope=f"current::{session_id}::{len(messages)}",
-            )
-
-        assistant_message = {
-            "role": "assistant",
-            "content": answer,
-            "agent_result": result,
+        agent_kwargs: dict[str, Any] = {
+            "user_id": user_id,
+            "output_dir": output_dir,
+            "top_k": int(default_topk),
+            "session_id": session_id,
+            "task_metadata": {
+                "surface": "ai_agent",
+                "user_message_id": user_message["message_id"],
+                "conversation_id": session_id,
+                "query_preview": question[:160],
+            },
+            "task_timeout_seconds": 900,
         }
-        messages.append(assistant_message)
-        assistant_message["message_id"] = _persist_conversation_message(
-            user_id=user_id,
-            conversation_id=session_id,
-            role="assistant",
-            content=answer,
-            db_path=db_path,
-            language=_get_reply_language(user_id),
-            agent_result=result,
-        )
-        _phase8_rerun(user_id, "message_submit")
+        if llm_settings is not None:
+            agent_kwargs["llm_settings"] = llm_settings
+        handle = _get_agent_application_service(db_path).submit_run(question, **agent_kwargs)
+        st.session_state[f"ai_agent_active_task::{user_id}::{session_id}"] = handle.task_id
+        st.info(f"Agent 任务已提交：`{handle.task_id[-8:]}`。页面刷新后会自动恢复。")
+        time.sleep(0.3)
+        st.rerun()
 
     st.divider()
 

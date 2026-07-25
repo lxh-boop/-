@@ -1,70 +1,74 @@
-# Stock Daily App FastAPI 服务端
+# Stock Daily App API — Stage 4
 
-阶段 3 将整个 Streamlit 应用的业务调用统一迁移到 FastAPI。Streamlit 只负责页面交互和展示，Agent、RAG、模拟盘、回测、模型搜索、配置和系统监控均由服务端执行。
+Stage 4 keeps the frontend-independent boundary introduced in Stage 3 and adds a durable long-task runtime.
 
-## 架构
+## Runtime architecture
 
 ```text
 Streamlit / future React
-        ↓ HTTP JSON
-FastAPI server/api
+        ↓ HTTP + SSE
+FastAPI
         ↓
 Application Service
         ↓
 Agent / RAG / Portfolio / Pipeline / Repository
 ```
 
-客户端不得直接导入 `application`、`agent`、`database`、`pipelines`、`portfolio` 或 RAG 模块。
+Long-running work uses a separate process per task:
 
-## 启动
-
-安装增量依赖：
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-agent-api.txt
+```text
+POST task → task_id → Worker process → SQLite task state/events
+                       ↓
+             cancel / timeout / retry
 ```
 
-启动 FastAPI：
+## Task endpoints
 
-```powershell
-$env:AGENT_API_HOST = "127.0.0.1"
-$env:AGENT_API_PORT = "8010"
-.\.venv\Scripts\python.exe -u run_agent_api.py
+```text
+POST /api/v1/tasks
+GET  /api/v1/tasks
+GET  /api/v1/tasks/{task_id}
+POST /api/v1/tasks/{task_id}/cancel
+POST /api/v1/tasks/{task_id}/acknowledge
+GET  /api/v1/tasks/{task_id}/events   # text/event-stream
 ```
 
-另一个终端启动 Streamlit：
+Supported business task types:
 
-```powershell
-$env:STOCK_AGENT_API_URL = "http://127.0.0.1:8010"
-.\.venv\Scripts\python.exe -u -m streamlit run .\app.py
+- `agent.run`
+- `dashboard.rolling_update`
+- `dashboard.backtest`
+- `paper-trading.update`
+- `paper-profile.ai-news-adjustment`
+- `paper-profile.scheduler-manual`
+
+Diagnostic task types are used only by the Stage 4 acceptance workflow.
+
+## Persistence and recovery
+
+Task state and event history are stored in:
+
+```text
+runtime/task_runtime.sqlite3
 ```
 
-正式交付提供 `D:\google\D_google_run_stock_daily_app.bat`，无需手动打开两个终端。
+The file contains task metadata, status, progress, results and error summaries. LLM credentials are **not** persisted in this database. A credential required by an Agent Worker is passed through that process's environment and removed immediately after startup.
 
-## 核心接口
+When FastAPI restarts, unfinished `queued`, `running` or `cancelling` records are marked `interrupted`. The client can display the explicit terminal state and allow the user to submit a new task.
 
-- `GET /api/v1/health`
-- `GET /openapi.json`
-- `GET /api/v1/dashboard/bootstrap`
-- `POST /api/v1/dashboard/operations/{operation}`
-- `POST /api/v1/agent/operations/{operation}`
-- `POST /api/v1/paper-trading/operations/{operation}`
-- `POST /api/v1/paper-profile/operations/{operation}`
-- `POST /api/v1/model-search/operations/{operation}`
-- `POST /api/v1/system-monitor/operations/{operation}`
+## Cancellation and timeout
 
-每个 operation 都由服务端白名单控制，不能通过接口执行任意 Python 函数。
+Each long task runs in an independent process group. Cancellation and timeout terminate the Worker process tree, including nested update subprocesses. This avoids leaving a Python thread running after the UI reports cancellation.
 
-## 数据合同
+## Environment variables
 
-请求和响应只使用 JSON。DataFrame、Series、Path、日期、元组和业务结果对象通过显式类型标记传输，不使用 pickle。
+```text
+AGENT_API_HOST=127.0.0.1
+AGENT_API_PORT=8010
+STOCK_AGENT_API_URL=http://127.0.0.1:8010
+STOCK_AGENT_API_TIMEOUT_SECONDS=600
+STOCK_AGENT_TASK_DB=D:\stock_daily_app\runtime\task_runtime.sqlite3
+STOCK_AGENT_MAX_CONCURRENT_TASKS=4
+```
 
-LLM API Key 不会从服务端返回到 Streamlit。服务端生成短期 `settings_token`，连接验证和 Agent 执行时再由服务端恢复对应配置。
-
-## React 兼容
-
-FastAPI 不返回 Streamlit 对象或页面 HTML。后续 React 只需替换客户端，不需要重构 Agent、RAG、数据库和 Application Service。
-
-## 当前阶段边界
-
-阶段 3 仍采用同步 HTTP 请求。长任务持久化、SSE 流式状态、取消和服务重启恢复在阶段 4 完成。
+No real password, Token or API key belongs in this document.

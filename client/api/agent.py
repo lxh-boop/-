@@ -6,6 +6,7 @@ from typing import Any
 from client.api.base import call_operation, load_bootstrap
 from client.api.serialization import RemoteObject
 from client.api.types import LLMRuntimeSettings
+from client.api.tasks import TaskHandle, submit_task
 
 _BOOTSTRAP = load_bootstrap("agent")
 globals().update(_BOOTSTRAP)
@@ -14,6 +15,27 @@ globals().update(_BOOTSTRAP)
 class AgentApplicationService:
     def __init__(self, db_path: str | None = None) -> None:
         self.db_path = db_path or None
+
+    def submit_run(self, query: str, **kwargs: Any) -> TaskHandle:
+        llm_settings = kwargs.get("llm_settings")
+        if isinstance(llm_settings, LLMRuntimeSettings):
+            kwargs["llm_settings"] = llm_settings.to_dict()
+        metadata = dict(kwargs.pop("task_metadata", {}) or {})
+        owner_id = str(kwargs.get("user_id") or "")
+        session_id = str(kwargs.get("session_id") or "")
+        timeout_seconds = int(kwargs.pop("task_timeout_seconds", 900))
+        max_retries = int(kwargs.pop("task_max_retries", 0))
+        kwargs["_service_db_path"] = self.db_path
+        return submit_task(
+            "agent.run",
+            args=[query],
+            kwargs=kwargs,
+            owner_id=owner_id,
+            session_id=session_id,
+            metadata=metadata,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+        )
 
     def __getattr__(self, name: str):
         def remote_method(*args: Any, **kwargs: Any) -> Any:
@@ -28,6 +50,27 @@ class AgentApplicationService:
 class StrategyProposalService:
     def __init__(self, db_path: str | None = None) -> None:
         self.db_path = db_path or None
+
+    def submit_run(self, query: str, **kwargs: Any) -> TaskHandle:
+        llm_settings = kwargs.get("llm_settings")
+        if isinstance(llm_settings, LLMRuntimeSettings):
+            kwargs["llm_settings"] = llm_settings.to_dict()
+        metadata = dict(kwargs.pop("task_metadata", {}) or {})
+        owner_id = str(kwargs.get("user_id") or "")
+        session_id = str(kwargs.get("session_id") or "")
+        timeout_seconds = int(kwargs.pop("task_timeout_seconds", 900))
+        max_retries = int(kwargs.pop("task_max_retries", 0))
+        kwargs["_service_db_path"] = self.db_path
+        return submit_task(
+            "agent.run",
+            args=[query],
+            kwargs=kwargs,
+            owner_id=owner_id,
+            session_id=session_id,
+            metadata=metadata,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+        )
 
     def __getattr__(self, name: str):
         def remote_method(*args: Any, **kwargs: Any) -> Any:

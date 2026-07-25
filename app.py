@@ -83,13 +83,15 @@ from client.api.dashboard import (
     registered_zoo_backends,
     reset_discovery_cache,
     resolve_active_llm_settings,
-    run_latest_t1_backtest,
+    submit_latest_t1_backtest,
+    find_active_backtest,
     save_local_config,
     set_daily_retrain_job,
     validate_local_model,
     validate_tushare_token,
     zoo_model_name_from_backend,
 )
+from client.api.tasks import TaskHandle
 
 APP_TOP_LEVEL_PAGES = ["首页 / 预测排名", "AI 模拟盘", "AI Agent", "系统监控"]
 
@@ -277,6 +279,38 @@ def format_ranking_file_snapshot(snapshot: dict) -> str:
     return " ｜ ".join(parts)
 
 
+def _wait_remote_task(
+    handle: TaskHandle,
+    *,
+    title: str,
+    cancel_label: str,
+    timeout_seconds: int,
+) -> dict:
+    progress_bar = st.progress(0)
+    status_box = st.empty()
+    time_box = st.empty()
+    started = time.time()
+    if st.button(cancel_label, key=f"cancel_task::{handle.task_id}"):
+        handle.cancel()
+        status_box.warning("已提交取消请求，服务端正在终止任务进程。")
+    while True:
+        task = handle.status()
+        status = str(task.get("status") or "")
+        progress = max(0.0, min(float(task.get("progress") or 0), 1.0))
+        message = str(task.get("message") or title)
+        progress_bar.progress(int(progress * 100))
+        status_box.info(f"{message} ｜ 状态：{status}")
+        time_box.caption(
+            f"任务 ID：{handle.task_id[-8:]} ｜ 已运行：{format_seconds(time.time() - started)} ｜ "
+            "刷新页面后会自动恢复任务状态。"
+        )
+        if status in {"succeeded", "failed", "cancelled", "timed_out", "interrupted"}:
+            return task
+        if time.time() - started > timeout_seconds + 30:
+            return handle.status()
+        time.sleep(1)
+
+
 def run_rolling_update_with_time_progress(
     token: str,
     base_version: str = "latest",
@@ -284,124 +318,41 @@ def run_rolling_update_with_time_progress(
     checkpoint_path: str | None = None,
     default_estimate_seconds: int = 300,
     timeout_seconds: int = 3600,
+    existing_job=None,
 ):
-    """
-    按预计耗时显示进度条，不打印控制台输出。
-
-    重点：
-    1. stdout/stderr 不使用 PIPE，避免子进程输出过多导致卡死；
-    2. 输出写入 logs/rolling_update_app.log；
-    3. 进度条按时间推进，脚本未结束前最多到 95%；
-    4. 超过 timeout_seconds 自动终止。
-    """
-
-    estimated_seconds = load_time_estimate(default_seconds=default_estimate_seconds)
-
-    progress_bar = st.progress(0)
-    status_box = st.empty()
-    time_box = st.empty()
-
-    start_time = time.time()
     ranking_before = get_ranking_file_snapshot()
-
-    job = dashboard_service.start_rolling_update_job(
+    resuming = existing_job is not None
+    job = existing_job or dashboard_service.start_rolling_update_job(
         token=token,
         base_version=base_version,
         model_backend=model_backend,
         checkpoint_path=checkpoint_path,
+        estimated_seconds=default_estimate_seconds,
+        timeout_seconds=timeout_seconds,
     )
-
-    try:
-        last_progress = 0.0
-
-        while job.poll() is None:
-            elapsed = time.time() - start_time
-
-            if elapsed > timeout_seconds:
-                job.kill()
-                progress_bar.progress(min(int(last_progress * 100), 95))
-                status_box.error("滚动更新超时，已自动终止。")
-                time_box.caption(
-                    f"已运行：{format_seconds(elapsed)} ｜ "
-                    f"超时时间：{format_seconds(timeout_seconds)}"
-                )
-
-                job.write_log("\n[APP Error] rolling update timeout, process killed.\n")
-
-                return False, read_log_tail(ROLLING_UPDATE_LOG_PATH)
-
-            progress_value = min(elapsed / estimated_seconds, 0.95)
-            progress_value = max(progress_value, last_progress)
-            last_progress = progress_value
-
-            percent = int(progress_value * 100)
-            remaining = max(estimated_seconds - elapsed, 0)
-
-            progress_bar.progress(percent)
-            stage = get_stage_by_progress(
-                progress_value=progress_value,
-                elapsed=elapsed,
-                estimated_seconds=estimated_seconds,
-            )
-            status_box.info(f"{stage}：预计进度 {percent}%")
-
-            time_box.caption(
-                f"预计总耗时：{format_seconds(estimated_seconds)} ｜ "
-                f"已运行：{format_seconds(elapsed)} ｜ "
-                f"预计剩余：{format_seconds(remaining)}"
-            )
-
-            time.sleep(1)
-
-        return_code = job.returncode
-        elapsed = time.time() - start_time
-
-        job.write_log("\n" + "=" * 100 + "\n")
-        job.write_log(f"[APP Rolling Update Finished] {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        job.write_log(f"[Return Code] {return_code}\n")
-        job.write_log(f"[Elapsed Seconds] {elapsed:.2f}\n")
-        job.write_log("=" * 100 + "\n")
-    finally:
-        job.close()
-
-    if return_code == 0:
+    started = time.time()
+    task = _wait_remote_task(
+        job.handle,
+        title="每日更新正在运行",
+        cancel_label="取消每日更新任务",
+        timeout_seconds=timeout_seconds,
+    )
+    status = str(task.get("status") or "")
+    elapsed = time.time() - started
+    if status == "succeeded":
         save_time_cost(elapsed)
-
-        progress_bar.progress(100)
-        metrics = load_selected_model_metrics(model_backend) or {}
         ranking_after = get_ranking_file_snapshot()
         ranking_status_text = format_ranking_file_snapshot(ranking_after)
-        if str(metrics.get("status") or "").startswith("prediction_skipped"):
-            status_box.warning("每日数据缓存已更新，但预测阶段被跳过，ranking_latest.csv 没有刷新。")
-            time_box.caption(
-                f"本次实际耗时：{format_seconds(elapsed)} ｜ "
-                f"{ranking_status_text} ｜ 详情请查看模型指标或更新日志。"
-            )
-            return False, read_log_tail(ROLLING_UPDATE_LOG_PATH)
         if not ranking_after.get("exists"):
-            status_box.error("每日更新进程结束，但没有生成 ranking_latest.csv。")
-            time_box.caption(f"本次实际耗时：{format_seconds(elapsed)}")
-            return False, read_log_tail(ROLLING_UPDATE_LOG_PATH)
-        if ranking_after.get("mtime", 0.0) <= ranking_before.get("mtime", 0.0):
-            status_box.warning("每日更新进程结束，但未检测到 ranking_latest.csv 被改写。")
-            time_box.caption(
-                f"本次实际耗时：{format_seconds(elapsed)} ｜ "
-                f"{ranking_status_text} ｜ 请查看更新日志确认原因。"
-            )
-            return False, read_log_tail(ROLLING_UPDATE_LOG_PATH)
-        status_box.success("每日更新完成，预测排名已生成：100%")
-        time_box.caption(
-            f"本次实际耗时：{format_seconds(elapsed)} ｜ "
-            f"{ranking_status_text} ｜ 下次将根据本次耗时自动估计进度"
-        )
-
+            return False, "每日更新任务已完成，但没有生成 ranking_latest.csv。"
+        before_mark = ranking_before.get("mtime_ns") or ranking_before.get("mtime") or 0
+        after_mark = ranking_after.get("mtime_ns") or ranking_after.get("mtime") or 0
+        if not resuming and after_mark <= before_mark:
+            return False, f"每日更新任务已完成，但 ranking_latest.csv 未发生变化。{ranking_status_text}"
+        st.success("每日更新完成，预测排名已生成：100%")
         return True, ""
-
-    progress_bar.progress(min(int(last_progress * 100), 95))
-    status_box.error("每日更新失败。")
-
-    return False, read_log_tail(ROLLING_UPDATE_LOG_PATH)
-
+    error = task.get("error") or {}
+    return False, str(error.get("message") or task.get("message") or f"每日更新任务状态：{status}")
 
 
 def render_top_level_page_selector() -> str | None:
@@ -1281,6 +1232,24 @@ if local_cfg.get("auto_retrain_enabled", False) and local_cfg.get("tushare_token
 
 manual_retrain_button = st.sidebar.button("立即运行一次定时更新流程")
 
+_active_rolling_job = dashboard_service.find_active_rolling_update()
+if _active_rolling_job is not None and not manual_retrain_button and not refresh_button:
+    st.subheader("恢复每日更新任务")
+    ok, error_text = run_rolling_update_with_time_progress(
+        token=token or "",
+        base_version=selected_version,
+        model_backend=selected_backend,
+        checkpoint_path=dft_checkpoint_path,
+        default_estimate_seconds=300,
+        existing_job=_active_rolling_job,
+    )
+    if ok:
+        st.success("已恢复并完成每日更新任务。")
+        time.sleep(0.5)
+        st.rerun()
+    elif error_text:
+        st.error(error_text)
+
 if manual_retrain_button:
     if not token:
         st.error("请先填写 Tushare Token。")
@@ -2095,10 +2064,25 @@ if selected_home_section == "\u56de\u6d4b\u5206\u6790":
 
     run_backtest_button = st.button("检查数据并运行 T+1 回测")
 
+    _active_backtest = find_active_backtest()
+    if _active_backtest is not None and not run_backtest_button:
+        st.info(f"发现未完成回测任务 `{_active_backtest.task_id[-8:]}`，正在恢复。")
+        recovered = _wait_remote_task(
+            _active_backtest,
+            title="恢复 T+1 回测任务",
+            cancel_label="取消恢复中的回测任务",
+            timeout_seconds=3600,
+        )
+        if str(recovered.get("status") or "") == "succeeded":
+            st.success("恢复的回测任务已完成。")
+            st.rerun()
+        else:
+            st.error(str((recovered.get("error") or {}).get("message") or recovered.get("message") or "回测任务未完成"))
+
     if run_backtest_button:
         try:
             with st.spinner("正在检查本地行情；如数据不足会自动联网下载，然后运行 T+1 回测..."):
-                run_latest_t1_backtest(
+                handle = submit_latest_t1_backtest(
                     token=token or None,
                     model_version=selected_version,
                     model_backend=selected_backend,
@@ -2109,7 +2093,16 @@ if selected_home_section == "\u56de\u6d4b\u5206\u6790":
                     buy_cost=float(backtest_cost),
                     sell_cost=float(backtest_cost),
                     stamp_tax=0.0005,
+                    task_timeout_seconds=3600,
                 )
+                task = _wait_remote_task(
+                    handle,
+                    title="T+1 回测正在运行",
+                    cancel_label="取消当前回测任务",
+                    timeout_seconds=3600,
+                )
+                if str(task.get("status") or "") != "succeeded":
+                    raise RuntimeError(str((task.get("error") or {}).get("message") or task.get("message") or "回测任务未完成"))
             st.success(f"{selected_backend_label} T+1 回测已完成，数据检查和必要下载已由 APP 自动处理。")
         except Exception as e:
             st.error(f"基础回测失败：{e}")

@@ -47,10 +47,11 @@ from client.api.paper_trading import (
     ranking_exists,
     read_csv as read_application_csv,
     render_decision_attribution_markdown,
-    run_paper_trading_from_latest,
+    submit_paper_trading_update,
     save_classic_user_context,
     sync_event_cache_to_agent_db,
 )
+from client.api.tasks import TaskHandle, find_latest_task
 
 
 try:
@@ -1141,6 +1142,29 @@ def _render_composite_nav(nav_history: pd.DataFrame) -> None:
         st.dataframe(table, width="stretch")
 
 
+
+def _wait_paper_update_task(handle: TaskHandle, *, timeout_seconds: int = 1800) -> dict[str, Any]:
+    progress = st.progress(0)
+    status_box = st.empty()
+    started = __import__("time").time()
+    if st.button("取消当前模拟盘更新任务", key=f"cancel_paper_task::{handle.task_id}"):
+        handle.cancel()
+        st.warning("已提交取消请求。")
+    while True:
+        task = handle.status()
+        status = str(task.get("status") or "")
+        value = max(0.0, min(float(task.get("progress") or 0), 1.0))
+        progress.progress(int(value * 100))
+        status_box.info(
+            f"{str(task.get('message') or '模拟盘更新正在运行')} ｜ 状态：{status} ｜ "
+            f"任务：{handle.task_id[-8:]}"
+        )
+        if status in {"succeeded", "failed", "cancelled", "timed_out", "interrupted"}:
+            return task
+        if __import__("time").time() - started > timeout_seconds + 30:
+            return handle.status()
+        __import__("time").sleep(1)
+
 def render(
     user_id: str = "default",
     output_dir: str | Path = "outputs",
@@ -1164,25 +1188,47 @@ def render(
     if not profile_ready:
         st.info("请先填写用户画像和模拟盘资金量。")
 
-    if st.button("更新 AI 模拟盘", disabled=not profile_ready):
+    update_button = st.button("更新 AI 模拟盘", disabled=not profile_ready)
+    active_task = find_latest_task(
+        owner_id=user_id,
+        session_id="paper-trading-update",
+        task_type="paper-trading.update",
+        active_only=True,
+    )
+    if active_task and not update_button:
+        st.info(f"发现未完成模拟盘任务 `{str(active_task.get('task_id') or '')[-8:]}`，正在恢复。")
+        recovered = _wait_paper_update_task(TaskHandle(str(active_task.get("task_id") or "")))
+        recovered_status = str(recovered.get("status") or "")
+        if recovered_status == "succeeded":
+            clear_ai_paper_trading_page_cache()
+            st.success("恢复的 AI 模拟盘任务已完成。")
+            st.rerun()
+        elif recovered_status in {"failed", "cancelled", "timed_out", "interrupted"}:
+            st.error(str((recovered.get("error") or {}).get("message") or recovered.get("message") or "模拟盘任务未完成"))
+
+    if update_button:
         try:
-            sync_event_cache_to_agent_db(
-                db_path=db_path,
-                output_dir=output_dir,
-            )
             if not ranking_exists(output_dir):
                 st.error("缺少 outputs/ranking_latest.csv，请先执行“每日更新并生成预测排名”。")
             else:
-                result = run_paper_trading_from_latest(
+                handle = submit_paper_trading_update(
                     user_id=user_id,
                     output_dir=output_dir,
                     db_path=db_path,
                     dry_run=False,
                     paper_trading_enabled=True,
                     top_k=max(10, int(top_k)),
+                    sync_kwargs={"db_path": db_path, "output_dir": output_dir},
+                    task_timeout_seconds=1800,
                 )
-                if getattr(result, "status", "") in {PipelineStatus.FAILED, "failed"}:
-                    st.error(result.message)
+                task = _wait_paper_update_task(handle)
+                if str(task.get("status") or "") != "succeeded":
+                    raise RuntimeError(str((task.get("error") or {}).get("message") or task.get("message") or "模拟盘任务未完成"))
+                result = task.get("result")
+                result_status = result.get("status") if isinstance(result, dict) else getattr(result, "status", "")
+                result_message = result.get("message") if isinstance(result, dict) else getattr(result, "message", "")
+                if result_status in {PipelineStatus.FAILED, "failed"}:
+                    st.error(str(result_message or "模拟盘更新失败"))
                 else:
                     clear_ai_paper_trading_page_cache()
                     st.success("AI 模拟盘已按当前 ranking_latest.csv 更新，未调用模型生成。")
