@@ -1,0 +1,23 @@
+{
+  "contract_version": "stage6.0",
+  "type_key": "__transport_type__",
+  "types": [
+    "dataframe",
+    "series",
+    "path",
+    "datetime",
+    "date",
+    "time",
+    "enum",
+    "tuple",
+    "set",
+    "object"
+  ],
+  "browser_rules": {
+    "dataframe": "{columns, records}",
+    "series": "plain object",
+    "path_datetime_date_time": "string",
+    "tuple_set": "array",
+    "object": "plain object"
+  }
+}

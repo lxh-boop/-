@@ -1,0 +1,10 @@
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "OPERATION_NOT_ALLOWED",
+    "message": "operation is not allowed",
+    "details": {}
+  },
+  "request_id": "example-request-id"
+}

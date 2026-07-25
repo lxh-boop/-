@@ -1,0 +1,9 @@
+{
+  "contract_version": "stage6.0",
+  "shape": {
+    "code": "string",
+    "message": "string",
+    "details": "object"
+  },
+  "operation_not_allowed_code": "OPERATION_NOT_ALLOWED"
+}

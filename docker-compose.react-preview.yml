@@ -1,0 +1,22 @@
+name: stock_daily_app
+
+services:
+  react-preview:
+    image: stock-daily-app-react:stage6-1
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${STOCK_APP_REACT_PREVIEW_PORT:-3000}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    stop_grace_period: 10s

@@ -1,0 +1,12 @@
+{
+  "success": true,
+  "data": {
+    "status": "ok",
+    "service": "stock-daily-app-api",
+    "version": "4.0.0",
+    "deployment_mode": "compose",
+    "project_root": "/app"
+  },
+  "error": null,
+  "request_id": ""
+}
