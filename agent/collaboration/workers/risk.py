@@ -1,0 +1,56 @@
+"""Execute the portfolio-risk Worker task.
+
+The executor extracts an upstream portfolio GraphRef, delegates risk analysis to
+the provider facade, and normalizes the result. It does not load graph paths,
+generate proposals, or execute portfolio writes.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from agent.graph.contracts import GraphNodeKind
+from agent.graph.provider_adapter import GraphProviderAdapter
+
+from ..models import GraphAgentTask, GraphWorkerResult, ResultStatus
+from .common import refs_from_dependencies, safe_public_value
+
+
+def run_risk(
+    provider: GraphProviderAdapter,
+    task: GraphAgentTask,
+    dependency_results: dict[str, dict[str, Any]],
+    output_dir: str | Path,
+    db_path: str | Path | None,
+) -> GraphWorkerResult:
+    refs = refs_from_dependencies(dependency_results, kinds={GraphNodeKind.OBJECT})
+    portfolio_ref = next(
+        (ref for ref in refs if "portfolio" in ref.node_id.lower()),
+        None,
+    )
+    raw = provider.analyze_risk(
+        user_id=task.user_id,
+        output_dir=output_dir,
+        db_path=db_path,
+        portfolio_ref=portfolio_ref,
+    )
+    return GraphWorkerResult(
+        task_id=task.task_id,
+        agent_id=task.assigned_agent,
+        status=ResultStatus.COMPLETED if raw.get("success") else ResultStatus.FAILED,
+        focus_refs=[portfolio_ref] if portfolio_ref else task.focus_refs,
+        summary=str(
+            raw.get("message")
+            or ("已完成组合风险分析。" if raw.get("success") else "组合风险分析失败。")
+        ),
+        findings=[
+            {
+                "kind": "portfolio_risk",
+                "data": safe_public_value(raw.get("data") or {}),
+                "record_count": len(raw.get("records") or []),
+            }
+        ],
+        confidence=0.9 if raw.get("success") else 0.0,
+        warnings=[str(item) for item in raw.get("warnings") or []],
+    )
