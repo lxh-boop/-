@@ -1,8 +1,16 @@
+"""Public Worker capability catalog and private runtime bindings.
+
+The catalog is intentionally honest about the current Worker implementations.
+Capabilities that need future Worker/tool work are not advertised to the Main
+Agent until their execution path exists.
+"""
+
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Iterable
 
-from .models import AgentCapabilityCard
+from .capability_contracts import AgentCapabilityCard, WorkerCapability
 
 
 COORDINATOR = "COORDINATOR"
@@ -15,103 +23,250 @@ REPORT_WRITER = "REPORT_WRITER"
 SYSTEM_DIAGNOSTIC = "SYSTEM_DIAGNOSTIC"
 
 
-class AgentDirectory:
-    """Coordinator-facing Worker capability cards only.
+@dataclass(frozen=True)
+class ResolvedWorkerCapability:
+    """Private runtime binding resolved after capability-plan validation."""
 
-    The Main Agent never receives private tools, provider identifiers, Cypher,
-    database schemas or internal prompts.
-    """
+    capability_id: str
+    worker_id: str
+    task_type: str
+    required_dependency_output_types: tuple[str, ...]
+    accepted_dependency_output_types: tuple[str, ...]
+    produced_output_types: tuple[str, ...]
+    supports_parallel: bool
+    can_finalize: bool
+    side_effect_scope: str
 
-    def __init__(self) -> None:
-        cards = [
-            AgentCapabilityCard(
-                agent_id=EVIDENCE_RETRIEVER,
-                role=EVIDENCE_RETRIEVER,
-                description="读取新闻、公告、研报、RAG 与市场证据，并把结构化证据写入金融事实图。",
-                accepted_task_types=[
+
+def _capability(
+    capability_id: str,
+    task_type: str,
+    description: str,
+    when_to_use: str,
+    *,
+    not_for: str = "",
+    request_modes: Iterable[str] = ("analysis", "proposal"),
+    required_dependencies: Iterable[str] = (),
+    accepted_dependencies: Iterable[str] = (),
+    outputs: Iterable[str] = (),
+    supports_parallel: bool = True,
+    can_finalize: bool = False,
+    side_effect_scope: str = "read_only",
+) -> WorkerCapability:
+    produced_outputs = [
+        output_type
+        for output_type in (*outputs, "worker_result")
+        if output_type
+    ]
+    return WorkerCapability(
+        capability_id=capability_id,
+        task_type=task_type,
+        description=description,
+        when_to_use=when_to_use,
+        not_for=not_for,
+        request_modes=list(request_modes),
+        required_dependency_output_types=list(required_dependencies),
+        accepted_dependency_output_types=list(accepted_dependencies),
+        produced_output_types=list(dict.fromkeys(produced_outputs)),
+        supports_parallel=supports_parallel,
+        can_finalize=can_finalize,
+        side_effect_scope=side_effect_scope,
+    )
+
+
+def _default_cards() -> list[AgentCapabilityCard]:
+    """Return capability cards backed by an existing Worker execution path."""
+
+    return [
+        AgentCapabilityCard(
+            agent_id=EVIDENCE_RETRIEVER,
+            role=EVIDENCE_RETRIEVER,
+            description="检索和分析金融证据。",
+            capabilities=[
+                _capability(
+                    "evidence.retrieve",
                     "retrieve_evidence",
+                    "检索与目标相关的新闻、公告、研报和知识库证据。",
+                    "需要为已识别金融对象补充事实证据时使用。",
+                    not_for="不负责账户、持仓、组合风险或最终报告。",
+                    outputs=("evidence_result", "graph_patch"),
+                    side_effect_scope="derived_graph",
+                ),
+                _capability(
+                    "evidence.analyze_entity",
                     "analyze_entity_evidence",
-                    "compare_entity_evidence",
+                    "分析已识别金融对象的证据内容和来源覆盖情况。",
+                    "请求重点是一个或多个金融对象的现有证据时使用。",
+                    not_for="不负责组合比较或风险比较。",
+                    outputs=("evidence_result",),
+                ),
+                _capability(
+                    "evidence.ingest",
                     "ingest_evidence",
-                    "resolve_context",
-                ],
-                input_description="GraphRef 目标、查询目标、时间边界和任务图视图引用。",
-                output_types=["evidence_result", "graph_patch", "context_resolution"],
-                supports_parallel=True,
-            ),
-            AgentCapabilityCard(
-                agent_id=PORTFOLIO_ANALYST,
-                role=PORTFOLIO_ANALYST,
-                description="读取模拟盘账户与持仓，生成权威 PortfolioSnapshot GraphRef，并分析组合结构。",
-                accepted_task_types=[
+                    "检索并登记可复用的结构化证据结果。",
+                    "证据需要进入后续影响分析上下文时使用。",
+                    not_for="不修改账户、订单、持仓或策略。",
+                    outputs=("evidence_result", "graph_patch"),
+                    side_effect_scope="derived_graph",
+                ),
+            ],
+        ),
+        AgentCapabilityCard(
+            agent_id=PORTFOLIO_ANALYST,
+            role=PORTFOLIO_ANALYST,
+            description="读取并分析用户当前模拟盘组合。",
+            capabilities=[
+                _capability(
+                    "portfolio.load_snapshot",
                     "load_portfolio_snapshot",
+                    "读取当前账户、现金和持仓并形成权威组合快照。",
+                    "用户请求涉及自己的账户、持仓、现金、仓位或模拟盘时使用。",
+                    not_for="不用于一般市场分析。",
+                    outputs=("portfolio_snapshot",),
+                    side_effect_scope="derived_graph",
+                ),
+                _capability(
+                    "portfolio.analyze",
                     "analyze_portfolio",
-                    "analyze_portfolio_fit",
-                    "compare_portfolios",
-                    "resolve_context",
-                ],
-                input_description="运行时 user_id、GraphRef 上下文、时间边界和依赖结果引用。",
-                output_types=["portfolio_snapshot", "portfolio_analysis", "context_resolution"],
-                supports_parallel=True,
-            ),
-            AgentCapabilityCard(
-                agent_id=GRAPH_IMPACT_ANALYST,
-                role=GRAPH_IMPACT_ANALYST,
-                description="基于 Neo4j 金融事实图查找新闻、事件或声明到用户持仓的可追踪影响路径。",
-                accepted_task_types=[
-                    "analyze_graph_impact",
+                    "读取当前组合并返回持仓结构摘要。",
+                    "用户要求查看或分析自己的当前组合结构时使用。",
+                    not_for="当前不提供候选组合构造或两个方案比较。",
+                    outputs=("portfolio_snapshot", "portfolio_analysis"),
+                    side_effect_scope="derived_graph",
+                ),
+            ],
+        ),
+        AgentCapabilityCard(
+            agent_id=GRAPH_IMPACT_ANALYST,
+            role=GRAPH_IMPACT_ANALYST,
+            description="分析金融证据到用户持仓之间的可追踪关系。",
+            capabilities=[
+                _capability(
+                    "graph.map_evidence_to_holdings",
                     "map_evidence_to_holdings",
-                    "trace_financial_relation",
-                    "resolve_context",
-                ],
-                input_description="原因 GraphRef、PortfolioSnapshot GraphRef、时间边界和依赖结果引用。",
-                output_types=["impact_paths", "impacted_holdings", "context_resolution"],
-                supports_parallel=True,
-            ),
-            AgentCapabilityCard(
-                agent_id=RISK_ANALYST,
-                role=RISK_ANALYST,
-                description="分析用户风险画像、组合集中度、权限约束和方案前后风险。",
-                accepted_task_types=[
+                    "把已验证证据映射到可能受影响的当前持仓。",
+                    "已有证据结果和组合快照，需要分析持仓影响时使用。",
+                    not_for="不自行检索证据，也不自行读取账户。",
+                    required_dependencies=("evidence_result", "portfolio_snapshot"),
+                    accepted_dependencies=("evidence_result", "portfolio_snapshot"),
+                    outputs=("impact_paths", "impacted_holdings"),
+                ),
+            ],
+        ),
+        AgentCapabilityCard(
+            agent_id=RISK_ANALYST,
+            role=RISK_ANALYST,
+            description="分析用户当前组合风险。",
+            capabilities=[
+                _capability(
+                    "risk.analyze",
                     "analyze_risk",
-                    "compare_risk",
-                    "review_risk_constraints",
-                    "resolve_context",
-                ],
-                input_description="PortfolioSnapshot GraphRef、候选方案引用和任务图视图。",
-                output_types=["risk_analysis", "risk_comparison", "context_resolution"],
-                supports_parallel=True,
-            ),
-            AgentCapabilityCard(
-                agent_id=STRATEGY_GUARD,
-                role=STRATEGY_GUARD,
-                description="生成或审查模拟盘调整 Proposal，并保持 Approval→Revalidate→Commit 边界。",
-                accepted_task_types=["review_strategy", "build_proposal", "review_proposal"],
-                input_description="GraphRef 目标、组合与风险结果引用；只能生成或审查 Proposal。",
-                output_types=["strategy_review", "proposal"],
-                supports_parallel=False,
-                can_generate_proposal=True,
-            ),
-            AgentCapabilityCard(
-                agent_id=REPORT_WRITER,
-                role=REPORT_WRITER,
-                description="只依据 GraphWorkerResult 汇总最终报告，不重新解析原始证券代码或新闻正文。",
-                accepted_task_types=["write_report", "summarize_results"],
-                input_description="上游 GraphWorkerResult 引用。",
-                output_types=["report_draft"],
-                supports_parallel=False,
-            ),
-            AgentCapabilityCard(
-                agent_id=SYSTEM_DIAGNOSTIC,
-                role=SYSTEM_DIAGNOSTIC,
-                description="诊断 Agent、Neo4j、RAG、模型、数据库和运行链路状态。",
-                accepted_task_types=["diagnose_system", "inspect_runtime", "resolve_context"],
-                input_description="故障现象、运行引用和图运行时状态。",
-                output_types=["diagnostic_analysis", "context_resolution"],
-                supports_parallel=True,
-            ),
-        ]
-        self._cards = {card.agent_id: card for card in cards}
+                    "分析当前组合的风险、集中度和风险等级。",
+                    "已有组合快照且用户要求分析个人组合风险时使用。",
+                    not_for="当前不提供候选方案前后风险比较。",
+                    required_dependencies=("portfolio_snapshot",),
+                    accepted_dependencies=("portfolio_snapshot",),
+                    outputs=("risk_analysis",),
+                ),
+            ],
+        ),
+        AgentCapabilityCard(
+            agent_id=STRATEGY_GUARD,
+            role=STRATEGY_GUARD,
+            description="生成等待独立审批的策略 Proposal。",
+            capabilities=[
+                _capability(
+                    "strategy.build_proposal",
+                    "build_proposal",
+                    "根据上游专业结果生成等待审批的策略 Proposal。",
+                    "proposal 模式需要形成可审查但未执行的方案时使用。",
+                    not_for="不能审批、提交、启用策略或修改持仓。",
+                    request_modes=("proposal",),
+                    required_dependencies=("worker_result",),
+                    accepted_dependencies=("worker_result",),
+                    outputs=("proposal",),
+                    supports_parallel=False,
+                    side_effect_scope="proposal_only",
+                ),
+            ],
+        ),
+        AgentCapabilityCard(
+            agent_id=REPORT_WRITER,
+            role=REPORT_WRITER,
+            description="根据上游标准结果生成最终报告。",
+            capabilities=[
+                _capability(
+                    "report.write",
+                    "write_report",
+                    "把全部相关专业结果汇总为最终回答。",
+                    "专业分析任务完成后需要生成用户可读报告时使用。",
+                    not_for="不重新读取原始数据，不新增事实或业务结论。",
+                    required_dependencies=("worker_result",),
+                    accepted_dependencies=("worker_result",),
+                    outputs=("report_draft",),
+                    supports_parallel=False,
+                    can_finalize=True,
+                    side_effect_scope="reasoning_only",
+                ),
+            ],
+        ),
+        AgentCapabilityCard(
+            agent_id=SYSTEM_DIAGNOSTIC,
+            role=SYSTEM_DIAGNOSTIC,
+            description="检查当前金融图连接状态。",
+            capabilities=[
+                _capability(
+                    "system.check_graph_connectivity",
+                    "diagnose_system",
+                    "检查当前金融图运行链路的连接状态。",
+                    "用户明确询问金融图连接或可用状态时使用。",
+                    not_for="不负责完整系统诊断、修复、配置修改或服务重启。",
+                    request_modes=("analysis",),
+                    outputs=("diagnostic_analysis",),
+                ),
+            ],
+        ),
+    ]
+
+
+class AgentDirectory:
+    """Index public capabilities and resolve their private Worker bindings."""
+
+    def __init__(
+        self,
+        cards: list[AgentCapabilityCard] | None = None,
+        *,
+        required_outputs_by_mode: dict[str, Iterable[str]] | None = None,
+    ) -> None:
+        selected_cards = list(cards) if cards is not None else _default_cards()
+        self._cards = {card.agent_id: card for card in selected_cards}
+        if len(self._cards) != len(selected_cards):
+            raise ValueError("duplicate_worker_id")
+
+        self._capability_bindings: dict[
+            str, tuple[AgentCapabilityCard, WorkerCapability]
+        ] = {}
+        for card in selected_cards:
+            for capability in card.capabilities:
+                capability_id = str(capability.capability_id or "").strip()
+                if not capability_id:
+                    raise ValueError(f"empty_capability_id:{card.agent_id}")
+                if capability_id in self._capability_bindings:
+                    raise ValueError(f"duplicate_capability_id:{capability_id}")
+                self._capability_bindings[capability_id] = (card, capability)
+
+        policy = required_outputs_by_mode or {
+            "analysis": ("report_draft",),
+            "proposal": ("proposal", "report_draft"),
+        }
+        self._required_outputs_by_mode = {
+            str(mode).strip().lower(): tuple(
+                str(item).strip()
+                for item in outputs
+                if str(item).strip()
+            )
+            for mode, outputs in policy.items()
+        }
 
     def get(self, agent_id: str) -> AgentCapabilityCard:
         key = str(agent_id or "").upper()
@@ -119,11 +274,54 @@ class AgentDirectory:
             raise KeyError(f"unknown_worker_agent:{key}")
         return self._cards[key]
 
+    def get_capability(self, capability_id: str) -> WorkerCapability:
+        key = str(capability_id or "").strip()
+        binding = self._capability_bindings.get(key)
+        if binding is None:
+            raise KeyError(f"unknown_worker_capability:{key}")
+        return binding[1]
+
+    def resolve(
+        self,
+        capability_id: str,
+        *,
+        request_mode: str = "",
+    ) -> ResolvedWorkerCapability:
+        key = str(capability_id or "").strip()
+        binding = self._capability_bindings.get(key)
+        if binding is None:
+            raise KeyError(f"unknown_worker_capability:{key}")
+        card, capability = binding
+        mode = str(request_mode or "").strip().lower()
+        if mode and mode not in set(capability.request_modes):
+            raise ValueError(f"capability_not_available_for_mode:{key}:{mode}")
+        return ResolvedWorkerCapability(
+            capability_id=key,
+            worker_id=card.agent_id,
+            task_type=capability.task_type,
+            required_dependency_output_types=tuple(
+                capability.required_dependency_output_types
+            ),
+            accepted_dependency_output_types=tuple(
+                capability.accepted_dependency_output_types
+            ),
+            produced_output_types=tuple(capability.produced_output_types),
+            supports_parallel=capability.supports_parallel,
+            can_finalize=capability.can_finalize,
+            side_effect_scope=capability.side_effect_scope,
+        )
+
     def list_cards(self) -> list[AgentCapabilityCard]:
         return list(self._cards.values())
 
     def safe_catalog(self) -> list[dict[str, Any]]:
         return [card.safe_for_coordinator() for card in self.list_cards()]
+
+    def required_outputs_for_mode(self, request_mode: str) -> list[str]:
+        mode = str(request_mode or "").strip().lower()
+        if mode not in self._required_outputs_by_mode:
+            raise KeyError(f"unsupported_agent_request_mode:{mode}")
+        return list(self._required_outputs_by_mode[mode])
 
     def supports(self, agent_id: str, task_type: str) -> bool:
         try:
@@ -134,4 +332,22 @@ class AgentDirectory:
 
     def candidates_for(self, task_type: str) -> list[str]:
         task = str(task_type or "")
-        return [card.agent_id for card in self.list_cards() if task in card.accepted_task_types]
+        return [
+            card.agent_id
+            for card in self.list_cards()
+            if task in card.accepted_task_types
+        ]
+
+
+__all__ = [
+    "AgentDirectory",
+    "ResolvedWorkerCapability",
+    "COORDINATOR",
+    "EVIDENCE_RETRIEVER",
+    "PORTFOLIO_ANALYST",
+    "GRAPH_IMPACT_ANALYST",
+    "RISK_ANALYST",
+    "STRATEGY_GUARD",
+    "REPORT_WRITER",
+    "SYSTEM_DIAGNOSTIC",
+]

@@ -11,6 +11,18 @@ PUBLIC_CONTRACT_FILES = {
     Path("agent/graph/contracts.py"),
     Path("agent/collaboration/models.py"),
 }
+FORBIDDEN_TEST_MODULE_PREFIXES = {
+    "agent.collaboration_v2",
+    "agent.event_impact_agent",
+    "agent.intent_classifier",
+    "agent.portfolio_qa_agent",
+}
+FORBIDDEN_TEST_IMPORT_NAMES = {
+    ("agent.router", "route_agent_query"),
+    ("agent.executor", "_execute_readonly_multi_agent_collaboration"),
+    ("agent.executor", "_feature_unavailable_result"),
+    ("agent.executor", "_normalise_readonly_multi_agent_tasks"),
+}
 
 
 def _dataclass_fields(path: Path) -> dict[str, set[str]]:
@@ -28,6 +40,41 @@ def _dataclass_fields(path: Path) -> dict[str, set[str]]:
     return result
 
 
+def _stale_test_imports(root: Path) -> list[str]:
+    errors: list[str] = []
+    tests_root = root / "tests"
+    if not tests_root.exists():
+        return errors
+    for path in tests_root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        relative = path.relative_to(root).as_posix()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if any(
+                        alias.name == prefix
+                        or alias.name.startswith(prefix + ".")
+                        for prefix in FORBIDDEN_TEST_MODULE_PREFIXES
+                    ):
+                        errors.append(
+                            f"stale_test_import:{relative}:{alias.name}"
+                        )
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            module = str(node.module or "")
+            if any(
+                module == prefix or module.startswith(prefix + ".")
+                for prefix in FORBIDDEN_TEST_MODULE_PREFIXES
+            ):
+                errors.append(f"stale_test_import:{relative}:{module}")
+            for alias in node.names:
+                if (module, alias.name) in FORBIDDEN_TEST_IMPORT_NAMES:
+                    errors.append(
+                        f"stale_test_import:{relative}:{module}.{alias.name}"
+                    )
+    return errors
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
@@ -38,6 +85,7 @@ def main() -> None:
 
     if (root / "agent/collaboration_v2").exists():
         errors.append("legacy_directory_present:agent/collaboration_v2")
+    errors.extend(_stale_test_imports(root))
     for rel in PUBLIC_CONTRACT_FILES:
         path = root / rel
         if not path.exists():
@@ -55,14 +103,6 @@ def main() -> None:
             errors.append("legacy_executor_entry_present")
         if "financial_graph_agent" not in text:
             errors.append("financial_graph_entry_missing")
-
-    ui_page = root / "app/pages/ai_agent.py"
-    if ui_page.exists():
-        ui_text = ui_page.read_text(encoding="utf-8")
-        if "agent.collaboration_v2" in ui_text:
-            errors.append("legacy_ui_collaboration_entry_present")
-        if "from agent.collaboration import execute_control_action" not in ui_text:
-            errors.append("graph_control_action_import_missing")
 
     requirements = root / "requirements.txt"
     if requirements.exists() and "neo4j" not in requirements.read_text(encoding="utf-8").lower():

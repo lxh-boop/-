@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import sqlite3
 
-from agent.executor import _normalise_readonly_multi_agent_tasks
 from agent.mcp.client_manager import call_stats, reset_call_stats
 from agent.mcp.config import build_mcp_context_from_local_config
 from agent.mcp.discovery import discover_mcp_tools, discovery_stats, reset_discovery_cache
@@ -214,41 +213,6 @@ def test_mcp_dependency_failure_opens_circuit_and_falls_back(tmp_path) -> None:
     assert result["tool_calls"][0]["runtime_reliability"]["error_type"] == "dependency"
     assert result["tool_calls"][0]["runtime_reliability"]["circuit_state"] == "open"
     assert any(call["tool_name"] == "ranking" for call in result["tool_calls"])
-
-
-def test_stable_recommendation_planner_selects_mcp_when_available() -> None:
-    market_tasks, portfolio_tasks = _normalise_readonly_multi_agent_tasks(
-        query="Recommend a more robust paper portfolio holding",
-        decomposition={"tasks": [{"intent": "portfolio_state"}, {"intent": "portfolio_risk"}, {"intent": "ranking"}]},
-        default_top_k=5,
-        context=_ctx(),
-    )
-
-    assert market_tasks[0]["intent"] == default_example_tool_name()
-    assert [task["intent"] for task in portfolio_tasks] == ["portfolio_state", "portfolio_risk"]
-
-
-def test_mcp_unavailable_uses_local_ranking_candidate() -> None:
-    market_tasks, _ = _normalise_readonly_multi_agent_tasks(
-        query="Recommend a more robust paper portfolio holding",
-        decomposition={"tasks": [{"intent": "portfolio_state"}, {"intent": "portfolio_risk"}, {"intent": "ranking"}]},
-        default_top_k=5,
-        context=_ctx(False),
-    )
-
-    assert market_tasks[0]["intent"] == "ranking"
-
-
-def test_pure_holdings_query_does_not_select_mcp() -> None:
-    market_tasks, portfolio_tasks = _normalise_readonly_multi_agent_tasks(
-        query="current positions",
-        decomposition={"tasks": [{"intent": "portfolio_state"}]},
-        default_top_k=5,
-        context=_ctx(),
-    )
-
-    assert market_tasks == []
-    assert [task["intent"] for task in portfolio_tasks] == ["portfolio_state"]
 
 
 def test_page_tool_listing_does_not_trigger_mcp_discovery() -> None:

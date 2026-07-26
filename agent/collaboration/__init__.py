@@ -7,8 +7,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from .models import (
+from .capability_contracts import (
     AgentCapabilityCard,
+    CapabilityTaskPlan,
+    WorkerCapability,
+)
+from .models import (
     GraphAgentTask,
     GraphWorkerResult,
     MemoryUpdate,
@@ -46,6 +50,7 @@ def clear_financial_graph_agent_session(*args: Any, **kwargs: Any):
 
 __all__ = [
     "AgentCapabilityCard",
+    "CapabilityTaskPlan",
     "GraphAgentTask",
     "GraphWorkerResult",
     "MemoryUpdate",
@@ -53,6 +58,7 @@ __all__ = [
     "ResultStatus",
     "SessionMemoryItem",
     "TaskStatus",
+    "WorkerCapability",
     "clear_financial_graph_agent_session",
     "execute_control_action",
     "execute_unified_agent_request",

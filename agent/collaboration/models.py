@@ -9,6 +9,12 @@ from uuid import uuid4
 
 from agent.graph.contracts import GraphPatch, GraphPathRef, GraphRef, refs_from
 
+from .capability_contracts import (
+    AgentCapabilityCard,
+    CapabilityTaskPlan,
+    WorkerCapability,
+)
+
 
 def now_text() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -120,24 +126,6 @@ class ResultStatus(str, Enum):
         return cls.FAILED
 
 
-@dataclass(frozen=True)
-class AgentCapabilityCard:
-    agent_id: str
-    role: str
-    description: str
-    accepted_task_types: list[str] = field(default_factory=list)
-    input_description: str = ""
-    output_types: list[str] = field(default_factory=list)
-    supports_parallel: bool = True
-    can_generate_proposal: bool = False
-
-    def to_dict(self) -> dict[str, Any]:
-        return _plain(self)
-
-    def safe_for_coordinator(self) -> dict[str, Any]:
-        return self.to_dict()
-
-
 @dataclass
 class MissingContextItem:
     key: str
@@ -205,6 +193,7 @@ class GraphAgentTask:
     objective: str
     task_type: str
     user_id: str
+    capability_id: str = ""
     focus_refs: list[GraphRef] = field(default_factory=list)
     context_refs: list[GraphRef] = field(default_factory=list)
     dependency_task_ids: list[str] = field(default_factory=list)
@@ -225,6 +214,7 @@ class GraphAgentTask:
         self.objective = str(self.objective or "").strip()
         self.task_type = str(self.task_type or "general_analysis").strip()
         self.user_id = str(self.user_id or "default")
+        self.capability_id = str(self.capability_id or "").strip()
         self.focus_refs = refs_from(self.focus_refs)
         self.context_refs = refs_from(self.context_refs)
         self.dependency_task_ids = _str_list(self.dependency_task_ids, limit=50)
@@ -255,6 +245,7 @@ class GraphAgentTask:
             "assigned_agent": self.assigned_agent,
             "objective": self.objective,
             "task_type": self.task_type,
+            "capability_id": self.capability_id,
             "user_id": self.user_id,
             "focus_refs": [ref.to_dict() for ref in self.focus_refs],
             "context_refs": [ref.to_dict() for ref in self.context_refs],

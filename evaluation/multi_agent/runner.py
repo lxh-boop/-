@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from agent.executor import _execute_readonly_multi_agent_collaboration, run_agent_request
+from agent.executor import run_agent_request
 from agent.orchestration.multi_task_executor import execute_multi_intent_plan
 from evaluation.multi_agent.exporter import export_benchmark
 from evaluation.multi_agent.fixtures import write_benchmark_fixture
@@ -77,20 +77,15 @@ def _run_multi_agent_path(
             llm_api_key="",
         )
 
-    return _execute_readonly_multi_agent_collaboration(
-        query=scenario.query,
-        decomposition={
-            "query": scenario.query,
-            "tasks": scenario.tasks,
-            "is_multi_intent": True,
-        },
+    return run_agent_request(
+        scenario.query,
         user_id=user_id,
         output_dir=output_dir,
         db_path=db_path,
-        default_top_k=top_k,
+        top_k=top_k,
         session_id=f"benchmark_{scenario.scenario_id}_multi_agent",
-        language="en",
-        context={"benchmark_mode": MULTI_AGENT_MODE},
+        reply_language="en",
+        decomposition_context={"benchmark_mode": MULTI_AGENT_MODE},
     )
 
 

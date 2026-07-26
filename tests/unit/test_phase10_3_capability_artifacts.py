@@ -9,30 +9,6 @@ from agent.capability_index import (
     build_trusted_capability_index,
 )
 from agent.orchestration.multi_task_executor import execute_multi_intent_plan
-from agent.router import route_agent_query
-
-
-def test_complete_plan_does_not_query_capability_index() -> None:
-    routed = route_agent_query("查看当前持仓", enable_llm=False)
-    trace = routed.decomposition["diagnostics"]["phase10_goal_planning"]
-
-    assert trace["capability_gap"]["has_gap"] is False
-    assert trace["capability_runtime"]["index_lookup_triggered"] is False
-    assert trace["capability_runtime"]["candidate_count"] == 0
-
-
-def test_capability_gap_triggers_readonly_index_lookup_only_after_validation_gap() -> None:
-    routed = route_agent_query("target portfolio allocation", enable_llm=False)
-    trace = routed.decomposition["diagnostics"]["phase10_goal_planning"]
-
-    assert trace["semantic_goal"]["action"] == "generate_target_portfolio_allocation"
-    assert trace["initial_plan_validation"]["valid"] is False
-    assert trace["capability_gap"]["missing_outputs"] == ["target_portfolio_allocation"]
-    assert trace["capability_runtime"]["index_lookup_triggered"] is True
-    assert trace["capability_runtime"]["selected_capability_ids"] == [
-        "workflow:readonly_target_portfolio_allocation"
-    ]
-    assert trace["plan_validation"]["valid"] is True
 
 
 def test_capability_index_view_filters_by_agent_allowlist_and_hides_implementation_files() -> None:

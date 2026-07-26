@@ -179,9 +179,10 @@ def test_empty_dependency_gets_terminal_replan_skip(monkeypatch, tmp_path: Path)
         output_dir=tmp_path,
     )
 
-    assert result["success"] is True
+    assert result["success"] is False
+    assert result["partial_success"] is True
     assert result["execution_status"] == "partially_completed"
-    assert result["replan_count"] == 0
+    assert result["replan_count"] == 1
     assert result["task_results"]["task_2"]["step_status"] == "skipped"
     assert result["task_results"]["task_2"]["execution_mode"] == "terminal_replan_skip"
     assert result["errors"] == []

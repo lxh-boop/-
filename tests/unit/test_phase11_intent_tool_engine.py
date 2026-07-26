@@ -6,7 +6,6 @@ import pytest
 
 from agent.agent_specs import SUPERVISOR
 from agent.capability_index import CapabilityIndexRepository, build_trusted_capability_index
-from agent.router import route_agent_query
 from agent.tool_engine import (
     AGENT_MAIN,
     AGENT_READ,
@@ -57,57 +56,6 @@ def _demo_definition(
         requires_approval=operation_type == OP_WRITE,
         legacy_names=legacy_names or [],
     )
-
-
-def test_phase11_recommendation_with_reduce_words_stays_readonly_task_plan() -> None:
-    routed = route_agent_query(
-        "recommend a more stable target portfolio after reducing high concentration",
-        enable_llm=False,
-        context={"user_id": "u1", "session_id": "s1", "default_top_k": 10},
-    )
-    trace = routed.decomposition["diagnostics"]["phase10_goal_planning"]
-    intents = [task["intent"] for task in routed.decomposition["tasks"]]
-
-    assert routed.intent == "multi_intent"
-    assert routed.execution_route == "read_only_dag"
-    assert trace["execution_task_source"] == "task_plan"
-    assert trace["semantic_goal"]["canonical_action"] == "construct_recommendation"
-    assert trace["semantic_goal"]["requires_write"] is False
-    assert "one_time_position_operation" not in intents
-    assert {"portfolio_state", "portfolio_risk", "ranking"} <= set(intents)
-
-
-def test_phase11_manual_change_becomes_proposal_flow_not_direct_commit() -> None:
-    routed = route_agent_query(
-        "trim stock 603986 by half",
-        enable_llm=False,
-        context={"user_id": "u1", "session_id": "s1", "default_top_k": 10},
-    )
-    trace = routed.decomposition["diagnostics"]["phase10_goal_planning"]
-
-    assert routed.intent == "one_time_position_operation"
-    assert routed.execution_route == "proposal_flow"
-    assert trace["semantic_goal"]["canonical_action"] == "manual_change"
-    assert trace["semantic_goal"]["requires_write"] is True
-    assert trace["semantic_goal"]["explicit_parameters"]["stock_code"] == "603986"
-    assert trace["legacy_shadow"]["new_will_execute"] is False
-
-
-def test_phase11_legacy_shadow_records_old_and_new_mainline() -> None:
-    routed = route_agent_query(
-        "show top 10 ranking and analyze each stock",
-        enable_llm=False,
-        context={"user_id": "u1", "session_id": "s1", "default_top_k": 10},
-    )
-    trace = routed.decomposition["diagnostics"]["phase10_goal_planning"]
-    shadow = trace["legacy_shadow"]
-
-    assert routed.intent == "multi_intent"
-    assert routed.execution_route == "read_only_dag"
-    assert trace["execution_task_source"] == "task_plan"
-    assert shadow["legacy_intent"] == "multi_intent"
-    assert shadow["legacy_tasks"]
-    assert [task["intent"] for task in shadow["new_task_plan"]["tasks"]] == ["ranking", "stock_analysis"]
 
 
 def test_phase11_tool_registry_validates_duplicate_names_and_description_template() -> None:

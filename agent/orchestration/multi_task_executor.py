@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.console_trace import flow_event, trace_event, trace_exception
+from agent.dag_validation import DagNode, DagValidationError, DagValidator
 
 from agent.schemas import AgentStepStatus, AgentTaskStatus
 from agent.orchestration.argument_resolver import (
@@ -525,47 +526,6 @@ def _execute_single(
             ],
             "tool_name": intent,
         }
-
-
-def _topological_order(
-    tasks: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    by_id = {
-        str(task.get("task_id") or ""): task
-        for task in tasks
-        if str(task.get("task_id") or "")
-    }
-    pending = list(by_id.keys())
-    completed: set[str] = set()
-    ordered: list[dict[str, Any]] = []
-
-    while pending:
-        progressed = False
-
-        for task_id in list(pending):
-            task = by_id[task_id]
-            dependencies = [
-                str(item)
-                for item in (
-                    task.get("depends_on") or []
-                )
-            ]
-
-            if all(
-                dependency in completed
-                for dependency in dependencies
-            ):
-                ordered.append(task)
-                completed.add(task_id)
-                pending.remove(task_id)
-                progressed = True
-
-        if not progressed:
-            raise ValueError(
-                "intent_task_dependency_cycle_or_missing_dependency"
-            )
-
-    return ordered
 
 
 def _batch_values(
@@ -1892,9 +1852,30 @@ async def execute_multi_intent_plan_async(
     execution_context.setdefault("artifact_result_cache", {})
 
     try:
-        ordered_tasks = _topological_order(tasks)
+        tasks_by_id = {
+            str(task.get("task_id") or ""): task
+            for task in tasks
+            if str(task.get("task_id") or "")
+        }
+        dag_result = DagValidator().validate(
+            [
+                DagNode.from_values(
+                    task.get("task_id") or "",
+                    task.get("depends_on") or [],
+                )
+                for task in tasks
+            ]
+        )
+        ordered_tasks = [
+            tasks_by_id[task_id]
+            for task_id in dag_result.ordered_node_ids
+        ]
         trace_event("dag.plan.topological_order", {"ordered_task_ids": [str(item.get("task_id") or "") for item in ordered_tasks]}, run_id=str(execution_context.get("run_id") or ""))
     except Exception as exc:
+        if isinstance(exc, DagValidationError):
+            exc = ValueError(
+                "intent_task_dependency_cycle_or_missing_dependency"
+            )
         trace_exception("dag.plan.invalid", exc, run_id=str(execution_context.get("run_id") or ""))
         return {
             "success": False,

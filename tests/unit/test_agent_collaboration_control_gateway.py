@@ -1,5 +1,5 @@
-from agent.collaboration_v2.control_gateway import ControlGateway
-from agent.collaboration_v2.entry_decision import EntryDecision, RequestMode
+from agent.collaboration.control_gateway import ControlGateway
+from agent.collaboration.entry_decision import EntryDecision, RequestMode
 
 
 def test_confirmation_without_plan_id_returns_need_context_without_legacy_route(tmp_path):

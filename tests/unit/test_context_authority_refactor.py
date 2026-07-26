@@ -25,7 +25,6 @@ from agent.memory.conversation_state_manager import (
     RELATION_NEW_GOAL,
     resolve_turn_from_messages,
 )
-from agent.collaboration_v2.specialist_runtime import _artifact_refs
 from agent.orchestration.multi_task_executor import _artifact_ref_from_result
 
 
@@ -145,31 +144,3 @@ def test_multi_task_boundary_preserves_persisted_artifact_ref() -> None:
         "artifact_type": "tool_result",
         "producer_id": "stock_analysis",
     }
-
-
-def test_specialist_boundary_deduplicates_artifact_refs() -> None:
-    refs = _artifact_refs(
-        {
-            "task_results": {
-                "task_1": {
-                    "artifact_id": "artifact_tool_1",
-                    "artifact_refs": [
-                        {
-                            "artifact_id": "artifact_tool_1",
-                            "artifact_type": "tool_result",
-                        }
-                    ],
-                    "metadata": {
-                        "artifact_ref": {
-                            "artifact_id": "artifact_tool_1",
-                            "artifact_type": "tool_result",
-                        }
-                    },
-                    "data": {},
-                }
-            }
-        }
-    )
-
-    assert len(refs) == 1
-    assert refs[0]["artifact_id"] == "artifact_tool_1"

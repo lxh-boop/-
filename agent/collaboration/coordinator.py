@@ -18,7 +18,7 @@ from agent.graph.portfolio_graph import PortfolioGraphService
 from agent.graph.provider_adapter import GraphProviderAdapter
 from agent.graph.impact_service import GraphImpactService
 
-from .agent_directory import AgentDirectory, REPORT_WRITER
+from .agent_directory import AgentDirectory
 from .control_gateway import ControlGateway
 from .entry_decision import MainEntryDecisionPlanner, RequestMode
 from .models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus
@@ -324,7 +324,22 @@ class AgentCollaborationCoordinator:
                 )
 
         public_results = {task_id: result.safe_for_coordinator() for task_id, result in results.items()}
-        report = next((result for result in results.values() if result.agent_id == REPORT_WRITER), None)
+        finalizer_task_ids = {
+            task.task_id
+            for task in tasks
+            if task.capability_id
+            and self.directory.resolve(task.capability_id).can_finalize
+        }
+        report = next(
+            (
+                results[task.task_id]
+                for task in tasks
+                if task.task_id in finalizer_task_ids
+                and task.task_id in results
+                and results[task.task_id].summary
+            ),
+            None,
+        )
         answer = report.summary if report and report.summary else self._fallback_answer(results, language)
         statuses = [result.status for result in results.values()]
         need_context = [item for result in results.values() for item in result.missing_items if item.blocking]
@@ -420,6 +435,7 @@ class AgentCollaborationCoordinator:
                 "batch_index": batch_index,
                 "task_ids": [task.task_id for task in ready],
                 "agents": [task.assigned_agent for task in ready],
+                "capabilities": [task.capability_id for task in ready],
                 "parallel": len(ready) > 1,
             })
             max_workers = min(4, len(ready))
@@ -455,6 +471,7 @@ class AgentCollaborationCoordinator:
                     timeline.append({
                         "task_id": task.task_id,
                         "agent_id": task.assigned_agent,
+                        "capability_id": task.capability_id,
                         "status": result.status.value,
                         "summary": result.summary[:500],
                     })

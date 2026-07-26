@@ -1,46 +1,32 @@
+"""LLM planning facade for Main-Agent capability task graphs."""
+
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from core.llm import LLMService
 
-from .agent_directory import (
-    AgentDirectory,
-    GRAPH_IMPACT_ANALYST,
-    PORTFOLIO_ANALYST,
-    REPORT_WRITER,
-    STRATEGY_GUARD,
+from .agent_directory import AgentDirectory
+from .capability_plan_validator import (
+    CapabilityPlanValidator,
+    CoordinatorPlanningError,
 )
 from .models import GraphAgentTask, TaskStatus
 
 
-class CoordinatorPlanningError(RuntimeError):
-    pass
-
-
-def _contains_private_implementation(value: str) -> bool:
-    text = str(value or "").lower()
-    blocked = (
-        "tool", "schema", "cypher", "sql", "api endpoint", "database table",
-        "tool_registry", "stock_code", "stock_codes", "ts_code", "security_scope",
-        "route_agent_query", "intent router",
-    )
-    return any(item in text for item in blocked) or bool(re.search(r"\b[a-z]+\.[a-z_]+\b", text))
-
-
 class CoordinatorPlanner:
-    """Plan Worker-level tasks from capability cards only.
+    """Generate a capability DAG without exposing Worker implementation names.
 
-    The planner does not know private tools, provider identifiers, Neo4j schema,
-    or legacy intent names. GraphRefs are attached by the coordinator after the
-    business-level plan is validated.
+    The LLM selects public ``capability_id`` values. Only after the plan passes
+    deterministic validation does the directory bind each capability to an
+    internal Worker and task type.
     """
 
     def __init__(self, directory: AgentDirectory, *, llm_service: LLMService) -> None:
         self.directory = directory
         self.llm_service = llm_service
+        self.validator = CapabilityPlanValidator(directory)
 
     def plan(
         self,
@@ -57,62 +43,32 @@ class CoordinatorPlanner:
         as_of_time: str = "",
     ) -> tuple[list[GraphAgentTask], dict[str, Any]]:
         mode = str(request_mode or "analysis").strip().lower()
-        if mode not in {"analysis", "proposal"}:
-            raise CoordinatorPlanningError(f"unsupported_agent_request_mode:{mode}")
+        try:
+            required_plan_outputs = self.directory.required_outputs_for_mode(mode)
+        except KeyError as exc:
+            raise CoordinatorPlanningError(str(exc.args[0])) from exc
 
-        cards = self.directory.safe_catalog()
+        capability_catalog = self.directory.safe_catalog()
 
         def validate(payload: dict[str, Any]) -> None:
-            rows = payload.get("tasks")
-            if not isinstance(rows, list) or not rows:
-                raise CoordinatorPlanningError("coordinator_plan_missing_tasks")
-            if len(rows) > 8:
-                raise CoordinatorPlanningError("coordinator_plan_too_many_tasks")
-            known_ids: set[str] = set()
-            selected_agents: set[str] = set()
-            for row in rows:
-                if not isinstance(row, dict):
-                    raise CoordinatorPlanningError("coordinator_plan_task_not_object")
-                task_id = str(row.get("task_id") or "").strip()
-                if not task_id or task_id in known_ids:
-                    raise CoordinatorPlanningError("coordinator_plan_invalid_task_id")
-                known_ids.add(task_id)
-                agent_id = str(row.get("assigned_agent") or "").strip().upper()
-                card = self.directory.get(agent_id)
-                selected_agents.add(agent_id)
-                task_type = str(row.get("task_type") or "").strip()
-                if task_type not in card.accepted_task_types:
-                    raise CoordinatorPlanningError(
-                        f"unsupported_task_type_for_agent:{agent_id}:{task_type}"
-                    )
-                objective = str(row.get("objective") or "").strip()
-                if not objective or _contains_private_implementation(objective):
-                    raise CoordinatorPlanningError(f"invalid_agent_objective:{task_id}")
-                dependencies = row.get("dependency_task_ids") or []
-                if not isinstance(dependencies, list):
-                    raise CoordinatorPlanningError(f"invalid_dependencies:{task_id}")
-            for row in rows:
-                task_id = str(row.get("task_id") or "")
-                for dependency in row.get("dependency_task_ids") or []:
-                    if str(dependency) not in known_ids or str(dependency) == task_id:
-                        raise CoordinatorPlanningError(f"invalid_dependency_ref:{task_id}:{dependency}")
-            if mode == "proposal" and STRATEGY_GUARD not in selected_agents:
-                raise CoordinatorPlanningError("proposal_plan_missing_strategy_guard")
-            if REPORT_WRITER not in selected_agents:
-                raise CoordinatorPlanningError("plan_missing_report_writer")
+            self.validator.parse_and_validate(payload, request_mode=mode)
 
         system = (
-            "你是系统现有主协调 Agent 的任务规划器。主 Agent 已经具备 Worker 能力发现、委派、反馈和重新规划，"
-            "本步骤只生成 Worker 级业务任务。你只能看到能力卡，不能看到或猜测任何私有 Tool、函数、API、"
-            "Neo4j 标签、Cypher、数据库表、参数 Schema、provider code、旧 stock_code 字段或旧 intent。"
-            "把用户目标拆成 1 到 8 个 Worker 任务。task_type 必须来自对应能力卡 accepted_task_types。"
-            "报告任务依赖需要汇总的专业任务。分析某篇新闻对持仓影响时，应并行读取新闻证据和持仓快照，"
-            "随后安排 GRAPH_IMPACT_ANALYST，最后安排 REPORT_WRITER。"
-            "只有用户明确涉及个人持仓、账户、现金、仓位、模拟盘或组合适配时，才安排 PORTFOLIO_ANALYST。"
-            "RISK_ANALYST 处理个人组合风险时必须依赖组合结果。"
-            "proposal 模式必须安排 STRATEGY_GUARD，但它只能生成待审批方案，不能 Commit。"
-            "严格输出 JSON：{\"tasks\":[{\"task_id\":\"task_1\",\"assigned_agent\":\"...\","
-            "\"objective\":\"...\",\"task_type\":\"...\",\"constraints\":[],"
+            "你是主协调 Agent 的能力规划器。本步骤只生成 Worker 级业务能力任务图。"
+            "你只能看到公开的 Worker 能力卡，不能看到、输出或猜测 Worker 名称、Agent 名称、"
+            "内部 task_type、私有 Tool、函数、API、Neo4j 标签、Cypher、数据库表、参数 Schema、"
+            "provider code、旧 stock_code 字段或旧 intent。"
+            "每个任务必须从能力卡中选择一个 capability_id，不得输出 assigned_agent、agent_id、"
+            "worker_id、worker_name 或 task_type。"
+            "把用户目标拆成 1 到 8 个能力任务。没有依赖的任务可以并行；有依赖的任务必须使用"
+            " dependency_task_ids 明确引用上游任务。"
+            "某项能力声明的 required_dependency_output_types 必须由它的直接上游任务共同提供。"
+            "计划整体必须产生 request_output_policy 中要求的输出类型。"
+            "具有 can_finalize=true 的能力应位于任务图末端，并依赖需要纳入最终回答的全部分支。"
+            "不要为了填满能力而安排与用户目标无关的任务。"
+            "严格输出 JSON："
+            "{\"tasks\":[{\"task_id\":\"task_1\",\"capability_id\":\"...\","
+            "\"objective\":\"...\",\"constraints\":[],"
             "\"dependency_task_ids\":[],\"required_outputs\":[],\"priority\":1}]}。"
         )
         payload = self.llm_service.generate_json(
@@ -124,11 +80,18 @@ class CoordinatorPlanner:
                     "content": json.dumps(
                         {
                             "request_mode": mode,
+                            "request_output_policy": {
+                                "required_output_types": required_plan_outputs
+                            },
                             "user_request": str(query or ""),
                             "session_context_summary": str(memory_summary or "")[:6000],
-                            "resolved_focus_refs": [ref.to_dict() for ref in focus_refs],
-                            "available_context_refs": [ref.to_dict() for ref in context_refs],
-                            "agent_capability_catalog": cards,
+                            "resolved_focus_refs": [
+                                ref.to_dict() for ref in focus_refs
+                            ],
+                            "available_context_refs": [
+                                ref.to_dict() for ref in context_refs
+                            ],
+                            "worker_capability_catalog": capability_catalog,
                             "reply_language": language,
                         },
                         ensure_ascii=False,
@@ -137,74 +100,68 @@ class CoordinatorPlanner:
             ],
             max_output_tokens=3000,
             validator=validate,
-            operation=f"graph_agent_task_plan:{mode}",
+            operation=f"graph_capability_task_plan:{mode}",
         )
 
+        plans = self.validator.parse_and_validate(payload, request_mode=mode)
         tasks: list[GraphAgentTask] = []
-        for row in payload["tasks"]:
-            dependencies = [str(item) for item in row.get("dependency_task_ids") or []]
-            try:
-                priority = max(0, min(10, int(row.get("priority", 1))))
-            except (TypeError, ValueError):
-                priority = 1
+        for plan in plans:
+            binding = self.directory.resolve(
+                plan.capability_id,
+                request_mode=mode,
+            )
             tasks.append(
                 GraphAgentTask(
-                    task_id=str(row["task_id"]),
+                    task_id=plan.task_id,
                     run_id=run_id,
                     session_id=session_id,
-                    assigned_agent=str(row["assigned_agent"]).upper(),
-                    objective=str(row["objective"]),
-                    task_type=str(row["task_type"]),
+                    assigned_agent=binding.worker_id,
+                    objective=plan.objective,
+                    task_type=binding.task_type,
                     user_id=user_id,
+                    capability_id=plan.capability_id,
                     focus_refs=list(focus_refs),
                     context_refs=list(context_refs),
-                    dependency_task_ids=dependencies,
-                    required_outputs=[str(item) for item in row.get("required_outputs") or []],
-                    constraints=[str(item) for item in row.get("constraints") or []],
+                    dependency_task_ids=list(plan.dependency_task_ids),
+                    required_outputs=(
+                        list(plan.required_outputs)
+                        if plan.required_outputs
+                        else list(binding.produced_output_types)
+                    ),
+                    constraints=list(plan.constraints),
                     as_of_time=as_of_time,
-                    priority=priority,
-                    status=TaskStatus.READY if not dependencies else TaskStatus.CREATED,
-                    metadata={"request_mode": mode},
+                    priority=plan.priority,
+                    status=(
+                        TaskStatus.READY
+                        if not plan.dependency_task_ids
+                        else TaskStatus.CREATED
+                    ),
+                    metadata={
+                        "request_mode": mode,
+                        "capability_id": plan.capability_id,
+                        "produced_output_types": list(
+                            binding.produced_output_types
+                        ),
+                        "side_effect_scope": binding.side_effect_scope,
+                        "capability_binding": "runtime_resolved",
+                    },
                 )
             )
-        self._validate_dependencies(tasks)
-        self._validate_impact_dependency(tasks)
         return tasks, {
             "planner": "coordinator_llm",
             "request_mode": mode,
             "fallback_used": False,
             "legacy_task_plan_consumed": False,
             "tool_visibility": "none",
+            "worker_identity_visibility": "none",
+            "selection_basis": "worker_capability",
+            "required_plan_outputs": required_plan_outputs,
+            "capability_plan_contract_version": "capability_task_plan.v1",
             "graph_contract_version": "graph_agent_task.v1",
         }
 
-    @staticmethod
-    def _validate_dependencies(tasks: list[GraphAgentTask]) -> None:
-        ids = {task.task_id for task in tasks}
-        remaining = set(ids)
-        completed: set[str] = set()
-        while remaining:
-            progressed = False
-            for task in tasks:
-                if task.task_id not in remaining:
-                    continue
-                if all(dep in completed for dep in task.dependency_task_ids):
-                    completed.add(task.task_id)
-                    remaining.remove(task.task_id)
-                    progressed = True
-            if not progressed:
-                raise CoordinatorPlanningError("agent_task_dependency_cycle_or_unknown_dependency")
 
-    @staticmethod
-    def _validate_impact_dependency(tasks: list[GraphAgentTask]) -> None:
-        by_id = {task.task_id: task for task in tasks}
-        for task in tasks:
-            if task.assigned_agent != GRAPH_IMPACT_ANALYST:
-                continue
-            upstream_agents = {
-                by_id[dep].assigned_agent
-                for dep in task.dependency_task_ids
-                if dep in by_id
-            }
-            if PORTFOLIO_ANALYST not in upstream_agents:
-                raise CoordinatorPlanningError("graph_impact_missing_portfolio_dependency")
+__all__ = [
+    "CoordinatorPlanner",
+    "CoordinatorPlanningError",
+]

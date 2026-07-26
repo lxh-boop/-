@@ -27,8 +27,8 @@ def test_executor_has_one_coordinator_call_and_no_legacy_router_call():
 
 
 def test_collaboration_never_constructs_an_independent_model_client():
-    directory = ROOT / "agent/collaboration_v2"
-    for path in directory.glob("*.py"):
+    directory = ROOT / "agent/collaboration"
+    for path in directory.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
         assert "from llm_client import LLMClient" not in text, path.name
         assert "LLMClient(" not in text, path.name
@@ -37,7 +37,7 @@ def test_collaboration_never_constructs_an_independent_model_client():
 
 
 def test_strategy_guard_never_calls_old_router():
-    text = _text("agent/collaboration_v2/specialist_runtime.py")
+    text = _text("agent/collaboration/workers/strategy_guard.py")
     assert "from agent.router import route_agent_query" not in text
     assert "route_agent_query(" not in text
     assert "OP_PROPOSAL" in text
@@ -55,20 +55,13 @@ def test_public_legacy_entry_files_are_only_facades():
     assert "event_keywords" not in registry
     assert "answer_with_registry" in registry and "run_agent_request" in registry
     assert "_contains_any" not in intent_router
-    assert 'return "agent_collaboration_v2"' in intent_router
+    assert "route_unified_agent_request" in intent_router
     assert "route_intent(query)" not in core
     assert "run_agent_request" in core
 
 
-def test_ai_agent_confirmation_card_uses_control_gateway_facade():
-    text = _text("app/pages/ai_agent.py")
-    assert "execute_control_action" in text
-    assert "execute_confirmed_plan_v2" not in text
-    assert "reject_confirmation_plan" not in text
-
-
 def test_deprecated_action_fields_are_not_reintroduced():
-    targets = list((ROOT / "agent/collaboration_v2").glob("*.py")) + [
+    targets = list((ROOT / "agent/collaboration").rglob("*.py")) + [
         ROOT / "agent/router.py",
         ROOT / "agent/agent_core.py",
         ROOT / "agent/agent_registry.py",
@@ -79,3 +72,13 @@ def test_deprecated_action_fields_are_not_reintroduced():
         text = path.read_text(encoding="utf-8").lower()
         for marker in forbidden:
             assert marker not in text, f"{marker} in {path.name}"
+
+
+def test_agent_dags_reuse_the_shared_validator():
+    capability_validator = _text("agent/collaboration/capability_plan_validator.py")
+    multi_task_executor = _text("agent/orchestration/multi_task_executor.py")
+
+    assert "DagValidator" in capability_validator
+    assert "DagValidator" in multi_task_executor
+    assert "def _validate_dependencies" not in capability_validator
+    assert "def _topological_order" not in multi_task_executor

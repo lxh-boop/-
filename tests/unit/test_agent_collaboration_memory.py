@@ -1,4 +1,4 @@
-from agent.collaboration_v2.session_memory import SessionMemoryStore
+from agent.collaboration.session_memory import SessionMemoryStore
 
 
 def test_session_memory_is_sqlite_persistent_versioned_and_clearable(tmp_path):
