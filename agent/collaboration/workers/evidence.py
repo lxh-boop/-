@@ -1,9 +1,9 @@
-"""Execute evidence-domain Worker tasks behind the GraphRef boundary.
+"""Execute evidence-domain Worker tasks through private atomic tools.
 
-The executor consumes resolved object or evidence GraphRefs and delegates entity
-analysis or evidence retrieval to the provider facade. Evidence retrieval may
-ingest evidence into the financial graph; portfolio impact and proposals are
-outside this module's responsibility.
+The Worker consumes resolved object or evidence GraphRefs, chooses one
+allowlisted evidence capability, and consumes its normalized result. Provider
+dependencies, registration metadata, and graph persistence remain behind the
+private tool boundary.
 """
 
 from __future__ import annotations
@@ -11,14 +11,18 @@ from __future__ import annotations
 from pathlib import Path
 
 from agent.graph.contracts import GraphNodeKind, refs_from
-from agent.graph.provider_adapter import GraphProviderAdapter
+from agent.tool_runtime import ToolExecutor
+from agent.worker_tools import (
+    EVIDENCE_ANALYZE_ENTITIES_TOOL,
+    EVIDENCE_RETRIEVE_TOOL,
+)
 
 from ..models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus
 from .common import safe_public_value
 
 
 def run_evidence(
-    provider: GraphProviderAdapter,
+    tool_executor: ToolExecutor,
     task: GraphAgentTask,
     query: str,
     output_dir: str | Path,
@@ -65,24 +69,53 @@ def run_evidence(
                 )
             ],
         )
-    if task.task_type == "analyze_entity_evidence":
-        analysis = provider.analyze_entities(
-            object_refs,
-            user_id=task.user_id,
-            output_dir=output_dir,
-            db_path=db_path,
+    analyze_task_types = {
+        "analyze_entity_evidence",
+        "compare_entity_evidence",
+    }
+    tool_name = (
+        EVIDENCE_ANALYZE_ENTITIES_TOOL
+        if task.task_type in analyze_task_types
+        else EVIDENCE_RETRIEVE_TOOL
+    )
+    arguments = {
+        "object_refs": [ref.to_dict() for ref in object_refs],
+        "user_id": task.user_id,
+    }
+    if tool_name == EVIDENCE_RETRIEVE_TOOL:
+        arguments.update(
+            {
+                "query": query or task.objective,
+                "top_k": max(1, min(int(default_top_k or 20), 100)),
+                "source_task_id": task.task_id,
+                "source_agent_id": task.assigned_agent,
+                "as_of_time": task.as_of_time,
+            }
         )
-    else:
-        analysis = provider.retrieve_evidence(
-            object_refs,
-            query=query or task.objective,
-            top_k=max(1, min(int(default_top_k or 20), 100)),
-            output_dir=output_dir,
-            db_path=db_path,
-            source_task_id=task.task_id,
-            source_agent_id=task.assigned_agent,
-            as_of_time=task.as_of_time,
-        )
+    tool_result = tool_executor.execute(
+        tool_name,
+        arguments,
+        context={
+            "user_id": task.user_id,
+            "conversation_id": task.session_id,
+            "session_id": task.session_id,
+            "run_id": task.run_id,
+            "task_id": task.task_id,
+            "agent_role": task.assigned_agent,
+            "output_dir": output_dir,
+            "db_path": db_path,
+        },
+        agent_type=task.assigned_agent,
+    )
+    analysis = dict(tool_result.data or {})
+    analysis.update(
+        {
+            "success": tool_result.success,
+            "message": tool_result.message,
+            "warnings": list(tool_result.warnings or []),
+            "errors": list(tool_result.errors or []),
+        }
+    )
     produced_evidence = refs_from(analysis.get("evidence_refs") or [])
     success = bool(analysis.get("success"))
     findings = []
@@ -109,9 +142,21 @@ def run_evidence(
         findings=findings,
         confidence=0.85 if success else 0.0,
         evidence_refs=produced_evidence,
-        warnings=[str(item) for item in analysis.get("warnings") or []],
+        warnings=[
+            str(item)
+            for item in [
+                *(analysis.get("warnings") or []),
+                *(analysis.get("errors") or []),
+            ]
+            if str(item).strip()
+        ],
         metadata={
             "produced_refs": [ref.to_dict() for ref in produced_evidence],
             "ingestion_results": safe_public_value(analysis.get("ingestion_results") or []),
+            "tool_execution": {
+                "tool_name": tool_result.tool_name,
+                "artifact_id": tool_result.artifact_id,
+                "error_type": tool_result.error_type,
+            },
         },
     )

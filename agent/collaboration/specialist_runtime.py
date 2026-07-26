@@ -15,6 +15,8 @@ from core.llm import LLMService
 
 from agent.graph.impact_service import GraphImpactService
 from agent.graph.provider_adapter import GraphProviderAdapter
+from agent.tool_runtime import ToolExecutor
+from agent.worker_tools import WorkerToolDirectory, build_worker_tool_registry
 
 from .agent_directory import (
     EVIDENCE_RETRIEVER,
@@ -58,6 +60,13 @@ class SpecialistRuntime:
         self.llm_service = llm_service
         self.provider = provider
         self.impact_service = impact_service
+        self.worker_tool_registry = build_worker_tool_registry(provider=provider)
+        self.worker_tool_directory = WorkerToolDirectory(
+            self.worker_tool_registry
+        )
+        self.worker_tool_executor = ToolExecutor(
+            registry=self.worker_tool_registry
+        )
 
     def run(
         self,
@@ -161,7 +170,7 @@ class SpecialistRuntime:
         default_top_k: int,
     ) -> GraphWorkerResult:
         return run_evidence(
-            self.provider,
+            self.worker_tool_executor,
             task,
             query,
             output_dir,
