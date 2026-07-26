@@ -89,7 +89,7 @@ python -m pipelines.pipeline_runner --user-id default --trade-date latest --top-
 - `dry_run` 跳过落盘写入和模拟盘执行；
 - `paper_trading_enabled` 只代表是否执行模拟盘，不代表真实交易。
 
-入口 `daily_incremental_update.py` 和 `agent/report_agent.py` 继续保留。
+每日更新入口保留为 `daily_incremental_update.py`；报告由固定 Pipeline 生成。Agent 请求统一通过 `agent.executor.run_agent_request` 进入协作链路。
 
 ## 7. 后台每日调度
 
@@ -169,23 +169,23 @@ streamlit run app.py
 
 进入“AI 分析”页签，可以生成个股解释，也可以输入自然语言问题或点击快捷问题。
 
-## 10. 命令行使用
+## 10. Agent 正式入口
 
-```bash
-python -m agent.agent_core
+```python
+from agent.executor import run_agent_request
+
+result = run_agent_request(
+    "默认回测方案表现怎么样",
+    user_id="default",
+    output_dir="outputs",
+    db_path="data/agent_quant.db",
+)
+print(result["answer"])
 ```
 
-单次提问：
+## 11. 生成每日报告
 
-```bash
-python -m agent.agent_core --query "默认回测方案表现怎么样"
-```
-
-## 11. 生成 Agent 报告
-
-```bash
-python -m agent.report_agent
-```
+每日报告由固定 Pipeline 的 report 步骤生成，不再提供独立的旧 Agent 报告入口。
 
 报告输出到：
 
@@ -226,7 +226,7 @@ outputs/test_reports/agent_eval_report.md
 
 Stage 5 adds a local, deterministic Agent tool layer. It reads existing artifacts and database records; it does not replace the fixed Pipeline and does not create real trading instructions.
 
-Phase 0/1 of the financial Agent improvement route did not add new Agent tools. It added News RAG/Dense diagnostics and the command wrapper `scripts/resync_news_rag.py`; the existing tool registry and confirmation boundary remain the source of truth.
+Phase 0/1 of the financial Agent improvement route did not add new Agent tools. It added News RAG/Dense diagnostics and the command wrapper `scripts/resync_news_rag.py`; the canonical `agent.tool_engine` registry and confirmation boundary are the source of truth.
 
 Phase 2 also does not add Agent tools. It adds the observation-only `系统监控` page, `evaluation/system_monitor.py`, and `scripts/run_system_monitor_snapshot.py`; these read Agent runtime tables such as `agent_runs`, `agent_steps`, `agent_tool_calls`, and `agent_sources`, but they do not execute tools, create proposals, confirm actions, or write paper-trading business tables.
 
@@ -240,36 +240,29 @@ Phase 6 adds runtime reliability utilities rather than Agent tools. `agent/runti
 
 Phase 7 adds decision attribution through `portfolio/decision_attribution.py` and the AI paper-trading page. It is not a new Agent tool yet. It reads persisted final recommendations, paper decisions, and execution diagnostics to explain base allocation, original rank/score, news/user/reliability adjustments, stored formula checks, lot constraints, recursive allocation, final paper target, and evidence ids. It must not recompute or rewrite business results.
 
-Available tools:
+Agent 工具运行时：
 
 ```text
-agent.pipeline_tool
-agent.recommendation_tool
-agent.portfolio_tool
-agent.rag_tool
-agent.report_tool
-agent.decision_log_tool
+agent.tool_engine
+agent.tool_runtime
+agent.worker_tools
 ```
 
-Available lightweight agents:
+协作运行时：
 
 ```text
-PortfolioQAAgent
-EventImpactAgent
-PortfolioReviewAgent
-ModelMonitorAgent
+agent.collaboration.planner.CoordinatorPlanner
+agent.collaboration.integration.execute_unified_agent_request
 ```
 
 Example usage:
 
 ```python
-from agent.agent_registry import answer_with_registry
+from agent.executor import run_agent_request
 
-result = answer_with_registry(
+result = run_agent_request(
     "Why was 000001 down_weighted?",
     user_id="default",
-    trade_date="2026-06-11",
-    stock_code="000001",
     output_dir="outputs",
     db_path="data/agent_quant.db",
 )

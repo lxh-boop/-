@@ -214,11 +214,13 @@ AI Agent
 | `agent/goal_planning.py` | Phase 10 UserGoal / TaskPlan 规划、能力缺口判断和完成契约。 |
 | `agent/intent_decomposition/` | 分层意图拆解、LLM 拆解、规则 fallback、提示词和 schema。 |
 | `agent/orchestration/` | 参数解析、多任务执行、结果聚合；支持并发只读任务和依赖顺序。 |
-| `agent/tool_engine.py` | Phase 11 后的 v2 ToolExecutor 主路径，统一权限、适配器和工具执行。 |
-| `agent/tools/tool_registry.py` | 工具注册中心，声明权限、副作用、是否需要确认、并发、超时和保留策略。 |
-| `agent/tools/*_adapters.py` | v2 服务收敛后的工具适配器，Agent 默认路径优先走这些适配器。 |
-| `agent/tools/*_tool.py` | 兼容工具包装，旧页面、测试或 pipeline 仍可能引用。 |
-| `agent/services/` | 工具服务层：市场分析、证据/RAG、组合、风险、版本化长期策略闭环、写操作、系统辅助、用户画像等。 |
+| `agent/tool_engine.py` | 规范工具定义与唯一业务工具注册入口，声明名称、描述、输入输出、权限、审批和处理器。 |
+| `agent/tool_runtime/` | ToolDefinition、注册索引、输入输出校验、授权、审计和统一执行器。 |
+| `agent/worker_tools/` | Worker 私有原子工具及 capability 到工具的授权目录，不向 Main Agent 暴露处理器。 |
+| `agent/tools/*_adapters.py` | Agent 工具适配器，只负责参数映射、调用业务用例和统一结果，不承载业务规则。 |
+| `application/use_cases/` | 可由 Agent、API 或其他入口复用的业务函数；这些函数不命名为工具。 |
+| `agent/tools/*_tool.py`、`agent/tools/*_tools.py` | 受审批保护的提案/写操作入口；非写兼容包装器已经移除。 |
+| `agent/services/` | 应用服务层：市场分析、证据/RAG、组合、风险、版本化长期策略闭环、写操作、系统辅助、用户画像等。 |
 | `agent/write_gateway.py` | P0 写操作网关，负责 approval / revalidate / idempotency / commit 边界。 |
 | `agent/session/confirmation_manager.py` | 确认令牌、审批和确认状态管理。 |
 | `agent/session/pending_action_store.py` | 待确认动作存储。 |
@@ -236,8 +238,8 @@ AI Agent
 | `agent/artifacts.py` | Agent 产物引用、存储和摘要。 |
 | `agent/capability_index.py` | On-demand capability index 和能力检索。 |
 | `agent/agent_protocol.py`、`agent/agent_specs.py`、`agent/agent_registry.py` | Agent 输出协议、角色规格和注册表。 |
-| `agent/sandbox.py`、`agent/tools/python_sandbox_tool.py` | 受限只读 Python 分析运行器和工具包装。 |
-| `agent/*_agent.py`、`agent/*_tool.py` | 报告、组合问答、组合复盘、事件影响、模型监控等早期专业 Agent/工具，部分作为兼容层保留。 |
+| `agent/sandbox.py`、`agent/services/python_sandbox_service.py`、`agent/tools/system_auxiliary_adapters.py` | 受限只读 Python 分析实现、应用服务和 Agent 工具适配器。 |
+| `agent/*_agent.py` | 仍存在的早期 Agent 门面不属于正式工具链，按独立兼容清理阶段处理。 |
 
 ### 当前核心 Agent 工具边界
 

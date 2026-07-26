@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from agent.tool_engine import get_tool_registry_v2
-from agent.tools.tool_registry import get_tool_registry
 from app.pages.ai_agent import (
     STRATEGY_CONFIRM_LABELS,
     _strategy_plan_summary_rows,
@@ -93,7 +92,3 @@ def test_strategy_audit_tool_is_registered_as_read_only():
     assert modern is not None
     assert modern.operation_type == "read"
     assert modern.permission_scope == "read"
-
-    legacy = get_tool_registry()["strategy.get_audit_trace"]
-    assert legacy.read_only is True
-    assert legacy.requires_confirmation is False

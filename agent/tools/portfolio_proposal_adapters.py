@@ -43,28 +43,6 @@ def _float_or_none(value: Any) -> float | None:
         return None
 
 
-def portfolio_recommend_position_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
-    return portfolio_proposal_service.recommend_position(
-        user_id=str(_context_value(args, context, "user_id", "default")),
-        stock_code=str(args.get("stock_code") or ""),
-        requested_weight=_float_or_none(args.get("requested_weight")),
-        output_dir=_output_dir(context),
-        db_path=_db_path(context),
-        top_k=_int_value(args.get("top_k") or context.get("default_top_k"), DEFAULT_TOOL_TOP_K),
-    )
-
-
-def portfolio_recommend_replacement_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
-    return portfolio_proposal_service.recommend_replacement(
-        user_id=str(_context_value(args, context, "user_id", "default")),
-        stock_code=str(args.get("stock_code") or ""),
-        requested_weight=_float_or_none(args.get("requested_weight")),
-        output_dir=_output_dir(context),
-        db_path=_db_path(context),
-        limit=_int_value(args.get("limit"), 3),
-    )
-
-
 def portfolio_preview_manual_change_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
     return portfolio_proposal_service.preview_manual_position_change(
         user_id=str(_context_value(args, context, "user_id", "default")),

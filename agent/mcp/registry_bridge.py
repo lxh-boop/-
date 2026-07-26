@@ -7,7 +7,7 @@ from agent.mcp.client_manager import call_mcp_tool, parse_mcp_tool_name
 from agent.mcp.config import EXAMPLE_SERVER_ID, EXAMPLE_TOOL_NAME
 from agent.mcp.discovery import discover_mcp_tools
 from agent.mcp.models import MCPToolInfo
-from agent.mcp.schema_adapter import mcp_tool_to_tool_spec
+from agent.mcp.schema_adapter import mcp_tool_to_tool_definition
 from agent.tools.tool_schemas import ToolResult
 
 
@@ -25,8 +25,15 @@ def _mapped_tools(context: dict[str, Any] | None = None) -> list[MCPToolInfo]:
 
 
 def _handler_for(tool_name: str):
-    def _handler(**kwargs):
-        return execute_mcp_tool_as_tool_result(tool_name, kwargs).to_dict()
+    def _handler(
+        arguments: dict[str, Any],
+        context: dict[str, Any],
+    ):
+        return execute_mcp_tool_as_tool_result(
+            tool_name,
+            arguments,
+            context=context,
+        ).to_dict()
 
     return _handler
 
@@ -38,7 +45,12 @@ def list_mcp_tool_specs(context: dict[str, Any] | None = None, *, role: str | No
             continue
         if query and not _is_relevant(tool, query):
             continue
-        selected.append(mcp_tool_to_tool_spec(tool, _handler_for(tool.namespaced_name)))
+        selected.append(
+            mcp_tool_to_tool_definition(
+                tool,
+                _handler_for(tool.namespaced_name),
+            )
+        )
     return selected
 
 

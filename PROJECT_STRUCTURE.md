@@ -237,15 +237,19 @@ artifact、两次确认、注册结果、Binding、会话、运行及持仓前�
 
 ```text
 app/pages/ai_agent.py
+    -> application/agent_service.py
     -> agent/executor.py
-    -> agent/goal_planning.py
-    -> agent/intent_decomposition/
-    -> agent/orchestration/
+    -> agent/collaboration/planner.py
+    -> agent/collaboration/dag_runtime.py
+    -> agent/worker_planning/
+    -> agent/worker_tools/
     -> agent/context/
     -> agent/communication/
     -> agent/memory/
     -> agent/tool_engine.py
-    -> agent/tools/tool_registry.py
+    -> agent/tool_runtime/
+    -> agent/tools/*_adapters.py
+    -> application/use_cases/
     -> agent/services/
     -> agent/react/
     -> agent/reflection/
@@ -478,7 +482,7 @@ AI 模拟盘
 2. 处理 APP 页面时先看 `app.py`、`app/pages/ai_agent.py`、`app/pages/ai_paper_trading.py`、`app/pages/system_monitor.py`。
 3. 处理每日更新时先看 `daily_incremental_update.py`、`data_tushare.py`、`alpha158.py`、`model_zoo_backend.py`、`pipelines/daily_update_pipeline.py`。
 4. 处理模拟盘时先看 `portfolio/`、`pipelines/paper_trading_pipeline.py`、`pipelines/paper_backfill_pipeline.py`、`app/pages/ai_paper_trading.py`。
-5. 处理 Agent 时先看 `agent/executor.py`、`agent/tool_engine.py`、`agent/tools/tool_registry.py`、`agent/services/`、`agent/write_gateway.py`。
+5. 处理 Agent 时先看 `agent/executor.py`、`agent/collaboration/`、`agent/worker_planning/`、`agent/worker_tools/`、`agent/tool_engine.py`、`agent/tool_runtime/`、`application/use_cases/`、`agent/services/`、`agent/write_gateway.py`。
 6. 处理 Context/Message/Memory/ReAct/Reflection/Handoff 时分别看：
    - `agent/context/`
    - `agent/communication/`

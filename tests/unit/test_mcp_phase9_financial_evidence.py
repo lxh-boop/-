@@ -14,7 +14,7 @@ from agent.mcp.registry_bridge import (
     select_relevant_mcp_tools,
 )
 from agent.runtime import AgentRuntimeRecorder
-from agent.tools.tool_registry import get_tool_registry, list_tools
+from agent.tool_engine import OP_READ, get_tool_registry_v2
 
 
 def _ranking_fixture(tmp_path):
@@ -57,18 +57,42 @@ def test_mcp_discovery_success_for_enabled_example() -> None:
     assert default_example_tool_name() in mapped
 
 
-def test_mcp_schema_maps_to_existing_tool_spec() -> None:
+def test_mcp_schema_maps_to_v2_tool_definition() -> None:
     spec = get_mcp_tool_spec(default_example_tool_name(), _ctx())
 
     assert spec is not None
     assert spec.name.startswith("mcp.local_financial_evidence.")
-    assert spec.read_only is True
-    assert spec.permission == "read"
+    assert spec.operation_type == OP_READ
+    assert spec.mutates_business_state is False
+    assert spec.enabled is True
     assert "query" in spec.input_schema["properties"]
 
 
+def test_mcp_v2_tool_definition_executes_readonly_handler(tmp_path) -> None:
+    output_dir = _ranking_fixture(tmp_path)
+    context = {
+        **_ctx(),
+        "output_dir": str(output_dir),
+    }
+    spec = get_mcp_tool_spec(default_example_tool_name(), context)
+
+    assert spec is not None
+    result = spec.execution_handler(
+        {"query": "stable portfolio", "top_k": 1},
+        context,
+    )
+
+    assert result["success"] is True
+    assert spec.operation_type == OP_READ
+    assert spec.mutates_business_state is False
+    assert result["data"]["untrusted_evidence"] is True
+
+
 def test_mcp_namespace_does_not_conflict_with_local_registry() -> None:
-    local_names = set(get_tool_registry())
+    registry = get_tool_registry_v2()
+    local_names = {definition.name for definition in registry.list()}
+    for definition in registry.list():
+        local_names.update(definition.legacy_names)
     mcp_names = {spec.name for spec in list_mcp_tool_specs(_ctx())}
 
     assert default_example_tool_name() in mcp_names
@@ -76,7 +100,7 @@ def test_mcp_namespace_does_not_conflict_with_local_registry() -> None:
 
 
 def test_disabled_server_is_not_listed_or_discovered_by_default_page_tools() -> None:
-    assert list_tools()  # default local list still works
+    assert get_tool_registry_v2().list()
     assert discovery_stats()["discovery_count"] == {}
     assert select_relevant_mcp_tools(query="stable portfolio", context=_ctx(False)) == []
 
@@ -159,10 +183,17 @@ def test_mcp_tool_calls_and_sources_are_recorded_without_secrets(tmp_path) -> No
 def test_page_tool_listing_does_not_trigger_mcp_discovery() -> None:
     reset_discovery_cache()
 
-    tools = list_tools()
+    tools = [
+        definition.public_view()
+        for definition in get_tool_registry_v2().list()
+    ]
 
     assert tools
-    assert all(not tool["name"].startswith("mcp.") for tool in tools)
+    assert any(tool["name"] == "mcp.readonly.invoke" for tool in tools)
+    assert all(
+        not tool["name"].startswith("mcp.local_financial_evidence.")
+        for tool in tools
+    )
     assert discovery_stats()["discovery_count"] == {}
 
 

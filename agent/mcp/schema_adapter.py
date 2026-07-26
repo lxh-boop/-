@@ -4,8 +4,11 @@ from typing import Any
 
 from agent.mcp.models import MCPToolInfo
 from agent.mcp.security import safe_external_payload
-from agent.tools.tool_registry import ToolCategory, ToolSpec
-from agent.tools.tool_schemas import ToolPermission
+from agent.tool_runtime import (
+    OP_READ,
+    TOOL_VISIBILITY_PUBLIC,
+    ToolDefinition,
+)
 
 
 def validate_arguments(schema: dict[str, Any], arguments: dict[str, Any] | None) -> tuple[bool, list[str]]:
@@ -38,14 +41,26 @@ def validate_arguments(schema: dict[str, Any], arguments: dict[str, Any] | None)
     return not errors, errors
 
 
-def mcp_tool_to_tool_spec(tool: MCPToolInfo, handler) -> ToolSpec:
-    metadata = tool.to_dict()
-    return ToolSpec(
+def mcp_tool_to_tool_definition(
+    tool: MCPToolInfo,
+    handler,
+) -> ToolDefinition:
+    description = "\n".join(
+        [
+            f"Function: {tool.description}",
+            "Applies when: A mapped read-only MCP source is needed as external evidence.",
+            "Not for: Any write, destructive, unmapped, or unallowlisted MCP operation.",
+            "Preconditions: The MCP server and tool are enabled, mapped, and allowlisted.",
+            "Main inputs: The MCP tool input schema.",
+            "Main outputs: Sanitized external evidence and source metadata.",
+            "Side effects: None; the bridge permits read-only MCP calls only.",
+        ]
+    )
+    return ToolDefinition(
         name=tool.namespaced_name,
-        permission=ToolPermission.READ if tool.mapped else "blocked",
-        description=tool.description,
-        handler=handler,
-        requires_confirmation=False,
+        display_name=tool.tool_name,
+        description=description,
+        execution_handler=handler,
         input_schema=safe_external_payload(tool.input_schema, max_chars=4000),
         output_schema={
             "type": "object",
@@ -59,12 +74,25 @@ def mcp_tool_to_tool_spec(tool: MCPToolInfo, handler) -> ToolSpec:
             "required": ["success", "data"],
             "additionalProperties": True,
         },
-        read_only=tool.effective_read_only,
-        has_side_effect=False,
-        concurrency_safe=True,
-        idempotent=True,
-        timeout_seconds=int(max(1, tool.timeout_seconds)),
-        retry_policy={"max_attempts": 2, "backoff_seconds": 0.05},
-        result_retention="summary",
-        category=ToolCategory.READ_QUERY,
+        supported_actions=["retrieve_evidence"],
+        supported_objects=["external_evidence"],
+        produced_outputs=["mcp_evidence", "sources"],
+        operation_type=OP_READ,
+        allowed_agent_types=list(tool.effective_allowed_agents),
+        permission_scope=OP_READ,
+        requires_approval=False,
+        runtime_policy={
+            "timeout_seconds": int(max(1, tool.timeout_seconds)),
+            "retry_policy": {
+                "max_attempts": 2,
+                "backoff_seconds": 0.05,
+            },
+        },
+        enabled=bool(tool.mapped and tool.effective_read_only),
+        sensitivity="external_untrusted",
+        visibility=TOOL_VISIBILITY_PUBLIC,
+        side_effects=[],
+        mutates_business_state=False,
+        idempotency="idempotent",
+        audit_level="source_trace",
     )

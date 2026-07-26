@@ -13,16 +13,12 @@ from agent.agent_specs import (
     REPORTING,
     RISK_OPERATION,
     SUPERVISOR,
-    get_agent_spec,
-    list_agent_specs,
 )
 from agent.tool_engine import OP_READ, OP_SYSTEM, ToolDefinition, get_tool_registry_v2
-from agent.tools.tool_registry import ToolCategory, ToolSpec, get_tool_registry
-from agent.tools.tool_schemas import ToolPermission
 
 
 INDEX_BUILDER_VERSION = "phase10.3-capability-index-v1"
-REGISTRY_VERSION = "tool-registry-v2+legacy-preview-v1"
+REGISTRY_VERSION = "tool-registry-v2"
 PERMISSION_VERSION = "agent-allowlist-v1"
 MCP_CONFIG_VERSION = "mcp-allowlist-v1"
 
@@ -275,73 +271,6 @@ def _input_names(schema: dict[str, Any] | None, *, required: bool) -> list[str]:
     properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
     required_set = set(schema.get("required") or [])
     return [str(name) for name in properties if name not in required_set]
-
-
-def _permission_scope(spec: ToolSpec) -> str:
-    if spec.permission == ToolPermission.READ:
-        return "read"
-    if spec.permission == ToolPermission.PREVIEW:
-        return "preview"
-    return "write"
-
-
-def _allowed_agents_for_tool(tool_name: str, spec: ToolSpec) -> list[str]:
-    allowed: set[str] = set()
-    for item in list_agent_specs():
-        if tool_name in set(item.get("tool_whitelist") or []):
-            allowed.add(str(item.get("role") or ""))
-    if spec.permission == ToolPermission.READ and tool_name in {"ranking", "portfolio_state", "portfolio_risk", "scheduler_status", "report"}:
-        allowed.add(SUPERVISOR)
-    if spec.permission == ToolPermission.PREVIEW:
-        allowed.add(RISK_OPERATION)
-    if spec.permission == ToolPermission.WRITE:
-        allowed.add(RISK_OPERATION)
-    if tool_name.startswith("mcp."):
-        allowed.add(MARKET_INTELLIGENCE)
-    return sorted(allowed)
-
-
-def _record_from_tool(name: str, spec: ToolSpec) -> CapabilityRecord:
-    produced = sorted(OUTPUTS_BY_TOOL.get(name) or {"tool_result"})
-    actions = sorted(ACTION_BY_TOOL.get(name) or {"fallback_intent"})
-    module_name = getattr(spec.handler, "__module__", "")
-    content = {
-        "name": name,
-        "permission": spec.permission,
-        "description": spec.description,
-        "produced_outputs": produced,
-        "actions": actions,
-        "allowed_agents": _allowed_agents_for_tool(name, spec),
-        "schema": spec.input_schema,
-    }
-    return CapabilityRecord(
-        capability_id=f"tool:{name}",
-        name=name,
-        description=spec.description,
-        supported_goal_actions=actions,
-        supported_objects=["current_portfolio"] if "portfolio" in name or name in {"ranking", "position_recommendation"} else [],
-        required_inputs=_input_names(spec.input_schema, required=True),
-        optional_inputs=_input_names(spec.input_schema, required=False),
-        produced_outputs=produced,
-        read_or_write="read" if spec.permission == ToolPermission.READ else "write",
-        tool_or_workflow="tool",
-        registered_tool_names=[name],
-        allowed_agent_types=_allowed_agents_for_tool(name, spec),
-        permission_scope=_permission_scope(spec),
-        requires_approval=bool(spec.requires_confirmation),
-        runtime_policy={
-            "timeout_seconds": spec.timeout_seconds,
-            "retry_policy": dict(spec.retry_policy or {}),
-            "concurrency_safe": bool(spec.concurrency_safe),
-        },
-        fallback_capabilities=[],
-        implementation_files=[module_name] if module_name else [],
-        version="1",
-        test_status="passed",
-        enabled=True,
-        sensitivity="normal" if spec.permission == ToolPermission.READ else "restricted",
-        content_hash=_hash_payload(content),
-    )
 
 
 def _allowed_agents_for_unified_tool(definition: ToolDefinition) -> list[str]:

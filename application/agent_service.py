@@ -20,9 +20,9 @@ from agent.react.react_context_bridge import (
 from agent.runtime import load_run_snapshot
 from agent.services.strategy_proposal_service import StrategyProposalService
 from agent.session.pending_action_store import load_pending_actions
-from agent.tools.portfolio_state_tool import query_portfolio_state
-from agent.tools.scheduler_tool import query_scheduler_status
-from agent.tools.tool_registry import list_tools
+from agent.services.portfolio_service import portfolio_service
+from agent.tool_engine import get_tool_registry_v2
+from application.use_cases.system_queries import read_scheduler_status
 from agent.tools.tool_schemas import PAPER_AGENT_DISCLAIMER
 from application.handoff_service import build_handoff_safe_summary, format_handoff_caption
 from application.reflection_service import build_reflection_safe_summary, format_reflection_caption
@@ -168,20 +168,24 @@ class AgentApplicationService:
         )
 
     def list_registered_tools(self) -> list[Any]:
-        return list(list_tools() or [])
+        return [
+            definition.public_view()
+            for definition in get_tool_registry_v2().list()
+            if definition.enabled
+        ]
 
     def list_pending_actions(self, user_id: str, output_dir: str | Path) -> dict[str, dict[str, Any]]:
         return dict(load_pending_actions(str(user_id), output_dir) or {})
 
     def query_portfolio(self, user_id: str, *, output_dir: str, db_path: str | None = None) -> dict[str, Any]:
-        return query_portfolio_state(
+        return portfolio_service.get_portfolio_state(
             str(user_id),
             output_dir=str(output_dir),
             db_path=db_path if db_path is not None else self.db_path,
         )
 
     def query_scheduler(self, root: str = ".") -> dict[str, Any]:
-        return query_scheduler_status(str(root))
+        return read_scheduler_status(str(root))
 
     def control_action(self, **kwargs: Any) -> dict[str, Any]:
         return dict(execute_control_action(**kwargs) or {})
