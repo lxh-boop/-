@@ -789,12 +789,6 @@ README 只描述已确认的能力。具体完成状态以当前分支、测试�
 
 ---
 
-## 14. 面试介绍参考
-
-> 这是一个自主设计的多 Agent 智能任务编排与 RAG 系统。我将复杂请求拆成显式 Task DAG，由 Main Agent 基于 Worker 能力卡进行任务委派；无依赖的只读节点通过 Asyncio 并发执行，同步阻塞工具由线程池兼容，写任务保持串行。系统使用 Pydantic 定义接口和 Agent 协议，并通过 GraphRef 与 Neo4j 保证跨 Agent 传递的业务实体身份一致。检索侧采用 BM25、Dense、RRF 和 Cross-Encoder 组成混合 RAG；写操作采用 Proposal、Approval、Revalidate、Commit 闭环。后端通过 FastAPI 暴露任务、会话和状态接口，并使用 Docker Compose 统一前端、API、存储和运行环境。
-
---。
-
 ---
 
 ## 16. License
