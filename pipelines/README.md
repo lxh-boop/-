@@ -15,7 +15,7 @@
 - Scoring only outputs constrained post-processing actions.
 - Portfolio only performs paper trading.
 - Real trading is isolated and not connected.
-- Existing entry points such as `daily_incremental_update.py` and `agent/report_agent.py` remain unchanged.
+- The daily update entry remains `daily_incremental_update.py`; reports are produced by the fixed Pipeline report step.
 
 ## CLI
 
