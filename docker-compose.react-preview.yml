@@ -2,7 +2,7 @@ name: stock_daily_app
 
 services:
   react-preview:
-    image: stock-daily-app-react:stage6-1
+    image: stock-daily-app-react:stage6-2
     build:
       context: ./frontend
       dockerfile: Dockerfile

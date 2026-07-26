@@ -1,0 +1,3 @@
+import { Card, Statistic } from 'antd'
+import { MetricGrid } from '../common/MetricGrid'
+export function BacktestMetricCards({ metrics }: { metrics: Record<string, unknown> }) { const preferred=['annual_return','cumulative_return','max_drawdown','sharpe','information_ratio','win_rate','turnover']; const keys=preferred.filter(k=>k in metrics).slice(0,6); const shown=keys.length?keys:Object.keys(metrics).slice(0,6); return <MetricGrid>{shown.map(k=><Card key={k}><Statistic title={k} value={typeof metrics[k]==='number'?Number(metrics[k]).toFixed(4):String(metrics[k]??'—')}/></Card>)}</MetricGrid> }

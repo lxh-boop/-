@@ -1,0 +1,1 @@
+import { ServiceHealthPanel } from './ServiceHealthPanel'; export function HandoffHealthPanel({ data }: { data?: Record<string, unknown> }) { return <ServiceHealthPanel title="Handoff" data={data}/> }

@@ -8,3 +8,13 @@ body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSyst
 .page-loading { min-height: 360px; justify-content: center; }
 .metric-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
 @media (max-width: 720px) { .app-header { align-items: flex-start; } .app-content { padding: 16px; } }
+
+.page-heading h2 { margin: 0; }
+.page-heading { margin-bottom: 4px; }
+.simple-chart { width: 100%; overflow: hidden; }
+.simple-chart svg { width: 100%; min-height: 180px; }
+.chart-axis { stroke: #cbd5e1; stroke-width: 1; }
+.chart-line { fill: none; stroke: #0284c7; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.chart-label { font-size: 13px; fill: #64748b; }
+.chart-range { display: flex; justify-content: space-between; color: #64748b; font-size: 12px; }
+.ant-card { box-shadow: 0 8px 24px rgba(15, 23, 42, .04); }

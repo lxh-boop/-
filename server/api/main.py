@@ -23,6 +23,13 @@ from server.api.dispatch import (
 )
 from server.api.router_factory import build_operation_router
 from server.api.tasks import router as tasks_router
+from server.api.routers.web_dashboard import router as web_dashboard_router
+from server.api.routers.web_stocks import router as web_stocks_router
+from server.api.routers.web_models import router as web_models_router
+from server.api.routers.web_backtests import router as web_backtests_router
+from server.api.routers.web_news import router as web_news_router
+from server.api.routers.web_settings import router as web_settings_router
+from server.api.routers.web_monitor import router as web_monitor_router
 
 
 def create_app() -> FastAPI:
@@ -62,6 +69,13 @@ def create_app() -> FastAPI:
     app.include_router(build_operation_router(prefix="/api/v1/handoff", tag="handoff", invoker=invoke_handoff))
     app.include_router(build_operation_router(prefix="/api/v1/reflection", tag="reflection", invoker=invoke_reflection))
     app.include_router(tasks_router)
+    app.include_router(web_dashboard_router)
+    app.include_router(web_stocks_router)
+    app.include_router(web_models_router)
+    app.include_router(web_backtests_router)
+    app.include_router(web_news_router)
+    app.include_router(web_settings_router)
+    app.include_router(web_monitor_router)
     return app
 
 
