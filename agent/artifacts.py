@@ -116,7 +116,7 @@ def infer_artifact_outputs(intent: str, result: dict[str, Any] | None = None) ->
         outputs.update({"market_evidence", "evidence", "reasons", "limitations"})
     data = dict((result or {}).get("data") or {})
     if data.get("positions"):
-        outputs.update({"portfolio_state", "position_count"})
+        outputs.update({"portfolio_snapshot", "position_count"})
     if data.get("records"):
         outputs.update({"market_evidence", "candidate_stocks"})
     if data.get("chunks") or data.get("events") or data.get("mcp_sources"):

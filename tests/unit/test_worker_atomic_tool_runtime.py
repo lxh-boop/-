@@ -28,6 +28,7 @@ from agent.tool_runtime import (
     AGENT_WORKER,
     OP_PROPOSAL,
     TOOL_VISIBILITY_PUBLIC,
+    TOOL_VISIBILITY_SYSTEM_PRIVATE,
     TOOL_VISIBILITY_WORKER_PRIVATE,
     ToolDefinition,
     ToolExecutor,
@@ -44,6 +45,8 @@ from agent.worker_tools import (
     EVIDENCE_SEARCH_TOOL,
     IMPACT_FIND_PATHS_TOOL,
     IMPACT_SUMMARIZE_PATHS_TOOL,
+    PORTFOLIO_MATERIALIZE_SNAPSHOT_TOOL,
+    PORTFOLIO_READ_SNAPSHOT_TOOL,
     WorkerToolDirectory,
     build_worker_tool_directory,
     build_worker_tool_registry,
@@ -115,6 +118,29 @@ def _provider() -> SimpleNamespace:
                 "ingestion_results": [{"patch_id": "patch-1"}],
             }
         ),
+        read_portfolio_snapshot=Mock(
+            return_value={
+                "success": True,
+                "message": "ok",
+                "account_summary": {"total_assets": 100000.0},
+                "positions": [],
+                "position_count": 0,
+            }
+        ),
+        materialize_portfolio_snapshot=Mock(
+            return_value={
+                "success": True,
+                "portfolio_ref": {
+                    "graph_id": "financial_graph",
+                    "node_id": "portfolio:user-1",
+                    "node_kind": "portfolio",
+                    "role": "portfolio",
+                },
+                "holding_refs": [],
+                "unresolved_positions": [],
+                "portfolio": {},
+            }
+        ),
     )
 
 
@@ -133,16 +159,28 @@ def _directory(
     return build_worker_tool_directory(registry)
 
 
-def test_tool_engine_remains_a_compatible_runtime_facade() -> None:
+def test_tool_engine_facade_separates_public_and_system_private_tools() -> None:
     assert FacadeToolDefinition is ToolDefinition
     assert FacadeToolExecutor is ToolExecutor
     assert FacadeToolRegistry is ToolRegistry
 
     definitions = get_tool_registry_v2().list()
 
-    assert len(definitions) == 55
+    assert len(definitions) == 53
+    private_names = {
+        definition.name
+        for definition in definitions
+        if definition.visibility == TOOL_VISIBILITY_SYSTEM_PRIVATE
+    }
+    assert private_names == {
+        "memory.search",
+        "memory.get_summary",
+        "sandbox.python_analysis",
+        "portfolio.save_target_artifact",
+    }
     assert all(
-        definition.visibility == TOOL_VISIBILITY_PUBLIC
+        definition.visibility
+        in {TOOL_VISIBILITY_PUBLIC, TOOL_VISIBILITY_SYSTEM_PRIVATE}
         for definition in definitions
     )
 
@@ -184,6 +222,31 @@ def test_private_tool_rejects_another_capability() -> None:
     assert result.success is False
     assert result.error_type == "unauthorized_worker_capability"
     provider.analyze_entities.assert_not_called()
+
+
+def test_portfolio_worker_reads_one_atomic_snapshot(tmp_path) -> None:
+    provider = _provider()
+    directory = _directory(provider)
+    executor = ToolExecutor(registry=directory.registry)
+
+    assert directory.allowed_tool_names("portfolio.load_snapshot") == [
+        PORTFOLIO_READ_SNAPSHOT_TOOL,
+        PORTFOLIO_MATERIALIZE_SNAPSHOT_TOOL,
+    ]
+    assert directory.registry.get("graph.portfolio.read_state") is None
+
+    result = executor.execute(
+        PORTFOLIO_READ_SNAPSHOT_TOOL,
+        {"user_id": "user-1"},
+        context={"output_dir": tmp_path},
+        agent_type=AGENT_WORKER,
+        capability_id="portfolio.load_snapshot",
+    )
+
+    assert result.success is True
+    assert result.data["portfolio_payload"]["position_count"] == 0
+    provider.read_portfolio_snapshot.assert_called_once()
+    provider.materialize_portfolio_snapshot.assert_not_called()
 
 
 def test_atomic_evidence_search_does_not_ingest(tmp_path) -> None:

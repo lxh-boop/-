@@ -82,7 +82,15 @@ class MemoryCandidateExtractor:
                     confidence=0.7,
                 )
             )
-        if any(item in produced_outputs for item in ("portfolio_state", "account_summary", "position_count")):
+        if any(
+            item in produced_outputs
+            for item in (
+                "portfolio_snapshot",
+                "portfolio_state",
+                "account_summary",
+                "position_count",
+            )
+        ):
             records.append(
                 MemoryRecord(
                     user_id=user_id,

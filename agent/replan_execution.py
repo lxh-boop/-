@@ -169,13 +169,16 @@ def _target_portfolio_tasks(
     task_results: dict[str, dict[str, Any]],
     user_goal: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    state_id, current_portfolio = _first_result_data(task_results, {"portfolio_state", "portfolio.get_state"})
+    state_id, current_portfolio = _first_result_data(
+        task_results,
+        {"portfolio_state", "portfolio.read_snapshot"},
+    )
     ranking_id, ranking = _first_result_data(task_results, {"ranking", "market.get_ranking"})
     _, risk = _first_result_data(task_results, {"portfolio_risk", "portfolio.analyze_risk"})
     if not state_id or not ranking_id:
         return []
     design_id = f"replan_{round_index}_target_design"
-    construct_id = f"replan_{round_index}_target_portfolio"
+    calculate_id = f"replan_{round_index}_target_portfolio"
     return [
         {
             "task_id": design_id,
@@ -192,8 +195,8 @@ def _target_portfolio_tasks(
             "capability_status": "executable",
         },
         {
-            "task_id": construct_id,
-            "intent": "portfolio.construct_target_portfolio",
+            "task_id": calculate_id,
+            "intent": "portfolio.calculate_target_portfolio",
             "parameters": {
                 "current_portfolio": current_portfolio,
                 "ranking": ranking,
@@ -201,7 +204,7 @@ def _target_portfolio_tasks(
                 "target_design_source": f"${design_id}.target_design",
             },
             "depends_on": [design_id],
-            "reason": "materialize readonly target portfolio from replan design",
+            "reason": "calculate readonly target portfolio from replan design",
             "capability_status": "executable",
         },
     ]

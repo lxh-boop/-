@@ -54,7 +54,7 @@ EXECUTABLE_INTENTS = {
     "classic_ranking",
     "python_sandbox_analysis",
     "portfolio.design_target_portfolio",
-    "portfolio.construct_target_portfolio",
+    "portfolio.calculate_target_portfolio",
     "portfolio.load_target_portfolio",
     "portfolio.compare_portfolios",
 }

@@ -47,7 +47,7 @@ def test_final_write_tools_require_approval_and_mcp_write_is_not_exposed() -> No
         agent_type=AGENT_MAIN,
     )
     blocked_mcp = execute_tool(
-        "mcp.readonly.invoke",
+        "evidence.invoke_mcp_readonly",
         {"mcp_tool_name": "mcp.local_financial_evidence.unsafe_write_trade", "arguments": {"stock_code": "000001"}},
         context={"mcp": {"servers": []}},
         agent_type=AGENT_READ,
@@ -109,7 +109,7 @@ def test_final_representative_tools_create_artifacts(tmp_path: Path) -> None:
         execute_tool("ranking", {"top_k": 1}, context=context, agent_type=AGENT_READ),
         execute_tool("stock_analysis", {"user_id": "u1", "stock_code": "600519", "include_rag": False}, context=context, agent_type=AGENT_READ),
         execute_tool("stock_news", {"stock_code": "600519", "as_of_date": "2026-06-12"}, context=context, agent_type=AGENT_READ),
-        execute_tool("portfolio_state", {"user_id": "u1"}, context=context, agent_type=AGENT_READ),
+        execute_tool("portfolio.read_snapshot", {"user_id": "u1"}, context=context, agent_type=AGENT_READ),
         execute_tool("portfolio.analyze_risk", {"user_id": "u1"}, context=context, agent_type=AGENT_READ),
         execute_tool("portfolio.preview_rebalance", {"user_id": "u1", "stock_code": "600519"}, context=context, agent_type=AGENT_MAIN),
     ]

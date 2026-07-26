@@ -7,6 +7,7 @@ from agent.mcp.config import build_mcp_context_from_local_config
 from agent.mcp.discovery import reset_discovery_cache
 from agent.mcp.registry_bridge import default_example_tool_name
 from agent.tool_engine import AGENT_MAIN, AGENT_READ, OP_READ, OP_SYSTEM, execute_tool, get_tool_registry_v2
+from agent.tool_runtime import TOOL_VISIBILITY_SYSTEM_PRIVATE
 
 
 def _mcp_context() -> dict:
@@ -35,14 +36,14 @@ def setup_function() -> None:
     reset_discovery_cache()
 
 
-def test_p1b_system_aux_tools_are_registered_with_legacy_aliases() -> None:
+def test_p1b_system_aux_tools_have_canonical_names_and_visibility() -> None:
     registry = get_tool_registry_v2()
     expected = {
         "user.profile.get": (OP_READ, ["user_profile"]),
-        "sandbox.python_analysis": (OP_SYSTEM, ["python_sandbox_analysis"]),
+        "sandbox.python_analysis": (OP_SYSTEM, []),
         "system.scheduler_status": (OP_SYSTEM, ["scheduler_status"]),
         "report.list_latest": (OP_READ, ["report", "report_latest"]),
-        "mcp.readonly.invoke": (OP_READ, ["mcp_tool"]),
+        "evidence.invoke_mcp_readonly": (OP_READ, []),
     }
 
     for name, (operation_type, aliases) in expected.items():
@@ -51,6 +52,11 @@ def test_p1b_system_aux_tools_are_registered_with_legacy_aliases() -> None:
         assert definition.operation_type == operation_type
         for alias in aliases:
             assert registry.get(alias).name == name
+
+    assert (
+        registry.get("sandbox.python_analysis").visibility
+        == TOOL_VISIBILITY_SYSTEM_PRIVATE
+    )
 
 
 def test_user_profile_v2_is_readonly_and_saves_artifact(tmp_path) -> None:
@@ -70,7 +76,7 @@ def test_user_profile_v2_is_readonly_and_saves_artifact(tmp_path) -> None:
 
 def test_python_sandbox_v2_blocks_business_state_writes(tmp_path) -> None:
     result = execute_tool(
-        "python_sandbox_analysis",
+        "sandbox.python_analysis",
         {
             "code": "RESULT = {'total': sum(SNAPSHOT['values'])}",
             "snapshot": {"values": [2, 3, 5]},
@@ -99,27 +105,30 @@ def test_mcp_readonly_bridge_executes_and_blocks_unsafe_write(tmp_path) -> None:
     _ranking_fixture(output_dir)
     context = {**_mcp_context(), "output_dir": output_dir, "user_id": "u1"}
     result = execute_tool(
-        "mcp.readonly.invoke",
+        "evidence.invoke_mcp_readonly",
         {"mcp_tool_name": default_example_tool_name(), "arguments": {"query": "stable portfolio", "top_k": 1}},
         context=context,
         agent_type=AGENT_READ,
     )
     blocked = execute_tool(
-        "mcp.readonly.invoke",
+        "evidence.invoke_mcp_readonly",
         {"mcp_tool_name": "mcp.local_financial_evidence.unsafe_write_trade", "arguments": {"stock_code": "600176"}},
         context=context,
         agent_type=AGENT_READ,
     )
 
     assert result.success is True
-    assert result.metadata["canonical_tool_name"] == "mcp.readonly.invoke"
+    assert (
+        result.metadata["canonical_tool_name"]
+        == "evidence.invoke_mcp_readonly"
+    )
     assert result.data["mutation_performed"] is False
     assert result.data["mcp_canonical_tool"] == default_example_tool_name()
     assert blocked.success is False
     assert "mcp_readonly_tool_not_allowed" in blocked.errors
 
 
-def test_capability_index_exposes_p1b_tools() -> None:
+def test_capability_index_hides_system_private_tools() -> None:
     repo = CapabilityIndexRepository()
     supervisor = repo.query(
         agent_identity="supervisor",
@@ -134,5 +143,8 @@ def test_capability_index_exposes_p1b_tools() -> None:
         permission_scope="read",
     )
 
-    assert any("sandbox.python_analysis" in item["registered_tool_names"] for item in supervisor)
+    assert not any(
+        "sandbox.python_analysis" in item["registered_tool_names"]
+        for item in supervisor
+    )
     assert any("user.profile.get" in item["registered_tool_names"] for item in portfolio)

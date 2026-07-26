@@ -121,13 +121,17 @@ def test_phase11_capability_index_uses_unified_tool_registry_read_view() -> None
     assert all("execution_handler" not in record for record in registry_records)
 
     index = build_trusted_capability_index()
-    portfolio = next(record for record in index.records if record.capability_id == "tool:portfolio_state")
-    assert "portfolio.get_state" in portfolio.registered_tool_names
+    portfolio = next(
+        record
+        for record in index.records
+        if record.capability_id == "tool:portfolio.read_snapshot"
+    )
+    assert "portfolio.read_snapshot" in portfolio.registered_tool_names
 
     supervisor_view = CapabilityIndexRepository(index).query(
         agent_identity=SUPERVISOR,
         goal_action="query",
-        missing_outputs=["portfolio_state"],
+        missing_outputs=["portfolio_snapshot"],
         permission_scope="read",
         limit=2,
     )

@@ -10,6 +10,7 @@ from agent.memory import (
     build_memory_store_health_summary,
 )
 from agent.tool_engine import execute_tool, get_tool_registry_v2
+from agent.tool_runtime import TOOL_VISIBILITY_SYSTEM_PRIVATE
 from app.pages.system_monitor import _memory_store_health_rows
 
 
@@ -24,6 +25,13 @@ def test_phase14_memory_tools_are_registered_and_read_only(tmp_path) -> None:
     assert search_def.operation_type == "read"
     assert summary_def.operation_type == "read"
     assert search_def.requires_approval is False
+    assert search_def.visibility == TOOL_VISIBILITY_SYSTEM_PRIVATE
+    assert summary_def.visibility == TOOL_VISIBILITY_SYSTEM_PRIVATE
+    public_names = {
+        row["tool_name"] for row in registry.public_index_records()
+    }
+    assert "memory.search" not in public_names
+    assert "memory.get_summary" not in public_names
 
 
 def test_phase14_memory_search_and_summary_tools(tmp_path) -> None:

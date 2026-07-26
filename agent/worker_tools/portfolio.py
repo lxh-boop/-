@@ -19,7 +19,7 @@ from agent.tool_runtime import (
 from .backends import PortfolioToolBackend
 
 
-PORTFOLIO_READ_STATE_TOOL = "graph.portfolio.read_state"
+PORTFOLIO_READ_SNAPSHOT_TOOL = "graph.portfolio.read_snapshot"
 PORTFOLIO_MATERIALIZE_SNAPSHOT_TOOL = (
     "graph.portfolio.materialize_snapshot"
 )
@@ -53,11 +53,11 @@ def _snapshot_arguments(plan_context: dict[str, Any]) -> dict[str, Any]:
 def build_portfolio_tool_definitions(
     provider: PortfolioToolBackend,
 ) -> list[ToolDefinition]:
-    def read_state(
+    def read_snapshot(
         arguments: dict[str, Any],
         context: dict[str, Any],
     ) -> dict[str, Any]:
-        raw = provider.read_portfolio_state(
+        raw = provider.read_portfolio_snapshot(
             user_id=str(
                 arguments.get("user_id") or context.get("user_id") or ""
             ),
@@ -68,8 +68,16 @@ def build_portfolio_tool_definitions(
             "success": bool(raw.get("success")),
             "message": str(raw.get("message") or ""),
             "data": {"portfolio_payload": raw},
-            "warnings": list(raw.get("warnings") or []),
-            "errors": list(raw.get("errors") or []),
+            "warnings": list(
+                raw.get("warnings")
+                or raw.get("consistency_warnings")
+                or []
+            ),
+            "errors": list(
+                raw.get("errors")
+                or raw.get("consistency_errors")
+                or []
+            ),
         }
 
     def materialize_snapshot(
@@ -91,8 +99,8 @@ def build_portfolio_tool_definitions(
     ]
     return [
         ToolDefinition(
-            name=PORTFOLIO_READ_STATE_TOOL,
-            display_name="Read Portfolio State",
+            name=PORTFOLIO_READ_SNAPSHOT_TOOL,
+            display_name="Read Portfolio Snapshot",
             description=description(
                 "Read the current authoritative paper-portfolio state.",
                 "The assigned capability needs account cash and positions.",
@@ -105,9 +113,9 @@ def build_portfolio_tool_definitions(
                 required=["user_id"],
             ),
             output_schema=result_schema(["portfolio_payload"]),
-            execution_handler=read_state,
+            execution_handler=read_snapshot,
             argument_builder=_read_arguments,
-            supported_actions=["read_portfolio_state"],
+            supported_actions=["read_portfolio_snapshot"],
             supported_objects=["paper_portfolio"],
             produced_outputs=["portfolio_state"],
             operation_type=OP_READ,

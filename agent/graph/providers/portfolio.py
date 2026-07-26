@@ -20,7 +20,7 @@ class PortfolioGraphProvider:
 
     portfolio_graph: PortfolioGraphService
 
-    def read_portfolio_state(
+    def read_portfolio_snapshot(
         self,
         *,
         user_id: str,
@@ -29,7 +29,7 @@ class PortfolioGraphProvider:
     ) -> dict[str, Any]:
         from agent.services.portfolio_service import PortfolioService
 
-        return PortfolioService().get_portfolio_state(
+        return PortfolioService().read_portfolio_snapshot(
             user_id=user_id,
             output_dir=output_dir,
             db_path=db_path,

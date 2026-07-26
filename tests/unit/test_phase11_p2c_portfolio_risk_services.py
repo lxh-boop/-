@@ -36,29 +36,39 @@ def _fixture_with_order(tmp_path: Path):
     return output_dir, db_path
 
 
-def test_p2c_portfolio_tools_registered_with_legacy_aliases() -> None:
+def test_p2c_portfolio_tools_use_atomic_snapshot_and_order_reads() -> None:
     registry = get_tool_registry_v2()
     expected = {
-        "portfolio.get_state": ["portfolio_state"],
-        "portfolio.get_account_summary": ["portfolio_account_summary"],
-        "portfolio.get_positions": ["portfolio_positions"],
-        "portfolio.get_orders": ["portfolio_orders"],
-        "portfolio.analyze_risk": ["portfolio_risk"],
-        "portfolio.compare_risk_before_after": ["portfolio_risk_compare"],
+        "portfolio.read_snapshot",
+        "portfolio.list_orders",
+        "portfolio.analyze_risk",
+        "portfolio.compare_risk_before_after",
     }
 
-    for canonical, aliases in expected.items():
+    for canonical in expected:
         definition = registry.get(canonical)
         assert definition is not None
         assert definition.name == canonical
         assert definition.operation_type == OP_READ
-        for alias in aliases:
-            assert registry.get(alias).name == canonical
 
-    assert callable(portfolio_state_adapters.execute_portfolio_state_query_tool)
-    assert callable(portfolio_state_adapters.execute_portfolio_account_summary_tool)
-    assert callable(portfolio_state_adapters.execute_portfolio_positions_query_tool)
-    assert callable(portfolio_state_adapters.execute_portfolio_orders_query_tool)
+    for removed in (
+        "portfolio.get_state",
+        "portfolio.get_account_summary",
+        "portfolio.get_positions",
+        "portfolio.get_orders",
+        "portfolio_state",
+        "portfolio_account_summary",
+        "portfolio_positions",
+        "portfolio_orders",
+    ):
+        assert registry.get(removed) is None
+
+    assert callable(
+        portfolio_state_adapters.execute_portfolio_snapshot_read_tool
+    )
+    assert callable(
+        portfolio_state_adapters.execute_portfolio_orders_list_tool
+    )
     assert callable(portfolio_risk_adapters.execute_portfolio_risk_analysis_tool)
     assert callable(portfolio_risk_adapters.execute_portfolio_risk_comparison_tool)
 
@@ -84,7 +94,7 @@ def test_p2c_risk_service_and_tool_executor_artifacts(tmp_path: Path) -> None:
 
     direct = portfolio_risk_service.analyze_current_risk("u1", output_dir=output_dir, db_path=db_path)
     state_tool = execute_tool(
-        "portfolio_state",
+        "portfolio.read_snapshot",
         {"user_id": "u1"},
         context={"user_id": "u1", "output_dir": output_dir, "db_path": db_path},
         agent_type=AGENT_READ,
@@ -99,7 +109,10 @@ def test_p2c_risk_service_and_tool_executor_artifacts(tmp_path: Path) -> None:
     assert direct["status"] == "success"
     assert direct["risk_report"]["holding_count"] == 1
     assert state_tool.success is True
-    assert state_tool.metadata["canonical_tool_name"] == "portfolio.get_state"
+    assert (
+        state_tool.metadata["canonical_tool_name"]
+        == "portfolio.read_snapshot"
+    )
     assert state_tool.artifact_id
     assert risk_tool.success is True
     assert risk_tool.metadata["canonical_tool_name"] == "portfolio.analyze_risk"

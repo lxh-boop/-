@@ -24,64 +24,26 @@ def _db_path(context: dict[str, Any]) -> str | Path | None:
     return context.get("db_path")
 
 
-def execute_portfolio_state_query_tool(
+def execute_portfolio_snapshot_read_tool(
     args: dict[str, Any],
     context: dict[str, Any],
 ) -> Any:
-    data = portfolio_service.get_portfolio_state(
+    data = portfolio_service.read_portfolio_snapshot(
         str(_context_value(args, context, "user_id", "default")),
         output_dir=_output_dir(context),
         db_path=_db_path(context),
     )
     return {
-        "success": True,
-        "message": "Portfolio state queried.",
+        "success": bool(data.get("success")),
+        "message": str(data.get("message") or "Portfolio snapshot read."),
         "data": data,
-        "warnings": [],
-        "errors": [],
-        "tool_name": "portfolio.get_state",
+        "warnings": list(data.get("consistency_warnings") or []),
+        "errors": list(data.get("consistency_errors") or []),
+        "tool_name": "portfolio.read_snapshot",
     }
 
 
-def execute_portfolio_account_summary_tool(
-    args: dict[str, Any],
-    context: dict[str, Any],
-) -> Any:
-    data = portfolio_service.get_account_summary(
-        str(_context_value(args, context, "user_id", "default")),
-        output_dir=_output_dir(context),
-        db_path=_db_path(context),
-    )
-    return {
-        "success": bool(data.get("account")),
-        "message": "Account summary queried." if data.get("account") else "Account summary is empty.",
-        "data": data,
-        "warnings": [] if data.get("account") else ["missing_account"],
-        "errors": [],
-        "tool_name": "portfolio.get_account_summary",
-    }
-
-
-def execute_portfolio_positions_query_tool(
-    args: dict[str, Any],
-    context: dict[str, Any],
-) -> Any:
-    data = portfolio_service.get_current_positions(
-        str(_context_value(args, context, "user_id", "default")),
-        output_dir=_output_dir(context),
-        db_path=_db_path(context),
-    )
-    return {
-        "success": True,
-        "message": "Positions queried.",
-        "data": data,
-        "warnings": [],
-        "errors": [],
-        "tool_name": "portfolio.get_positions",
-    }
-
-
-def execute_portfolio_orders_query_tool(
+def execute_portfolio_orders_list_tool(
     args: dict[str, Any],
     context: dict[str, Any],
 ) -> Any:
@@ -96,13 +58,11 @@ def execute_portfolio_orders_query_tool(
         "data": data,
         "warnings": [],
         "errors": [],
-        "tool_name": "portfolio.get_orders",
+        "tool_name": "portfolio.list_orders",
     }
 
 
 __all__ = [
-    "execute_portfolio_account_summary_tool",
-    "execute_portfolio_orders_query_tool",
-    "execute_portfolio_positions_query_tool",
-    "execute_portfolio_state_query_tool",
+    "execute_portfolio_orders_list_tool",
+    "execute_portfolio_snapshot_read_tool",
 ]

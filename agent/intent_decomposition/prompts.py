@@ -174,7 +174,7 @@ INTENT_CATALOG: dict[str, dict[str, Any]] = {
             "assumptions", "source_map", "not_executed"
         ],
     },
-    "portfolio.construct_target_portfolio": {
+    "portfolio.calculate_target_portfolio": {
         "description": "根据上一步 LLM 生成的 target_design、当前模拟盘、排名和用户风险上限，确定性生成完整结构化目标组合。它负责精确计算和硬约束，不重新决定业务目标，不创建订单。",
         "operation_type": "read",
         "parameters": [
@@ -249,10 +249,10 @@ PLANNER_SYSTEM_PROMPT = r'''
 12. 分析/建议通常 requires_write=false。生成待确认预案 requires_write=true，但只能规划 preview 类能力。真正执行只有用户明确确认且上下文中存在 plan_id 和 confirmation_token 时才可规划 confirm_execute。
 13. 输出 confidence 必须真实反映不确定性。confidence < 0.60 时必须澄清，不能执行。
 14. reason_summary 只能给简短、可展示的依据，不输出隐藏推理过程。
-15. “推荐一个更稳健的持仓/组合”只有在能够产出完整结构化目标组合时才算完成：必须规划 portfolio.construct_target_portfolio；仅有 ranking、portfolio_state、portfolio_risk 或一段文字不算目标组合。
+15. “推荐一个更稳健的持仓/组合”只有在能够产出完整结构化目标组合时才算完成：必须规划 portfolio.calculate_target_portfolio；仅有 ranking、portfolio_state、portfolio_risk 或一段文字不算目标组合。
 16. 对“推荐一个更稳健的持仓/组合”，不要因为用户没有亲自指定 target_position_count、target_cash_weight、candidate_policy、allocation_method 就先询问用户。你必须规划 portfolio.design_target_portfolio，让第二个 LLM 决策步骤在真实持仓、风险、用户画像、策略配置和排名数据可用后主动设计这些参数。
 17. 只有缺少真实当前持仓、模型候选、用户关键风险上限，或这些数据互相冲突导致无法形成可靠方案时，才允许澄清。可以从当前持仓数量、当前现金比例、用户画像、已有策略配置和风险报告中推导或提出只读推荐，并在 assumptions/source_map 中明确来源。
-18. 完整目标组合建议的标准任务依赖应包括：读取当前组合、读取组合风险、读取用户画像、读取排名；然后调用 portfolio.design_target_portfolio；再把 target_design 传给 portfolio.construct_target_portfolio；最后调用 portfolio.compare_portfolios 和风险对比能力。所有业务选择由 LLM 设计步骤作出，确定性工具只负责精确计算和硬约束。
+18. 完整目标组合建议的标准任务依赖应包括：读取当前组合、读取组合风险、读取用户画像、读取排名；然后调用 portfolio.design_target_portfolio；再把 target_design 传给 portfolio.calculate_target_portfolio；最后调用 portfolio.compare_portfolios 和风险对比能力。所有业务选择由 LLM 设计步骤作出，确定性工具只负责精确计算和硬约束。
 19. 比较当前组合和目标组合时，必须同时规划 portfolio_state、portfolio.load_target_portfolio、portfolio.compare_portfolios；如果 Context Packet 没有唯一目标组合引用，必须澄清，不能重新生成建议，也不能只返回当前持仓。
 20. 不得把只读目标组合或比较结果标记为 proposal/write；只有真实待确认预览工具才属于 preview/proposal。
 21. 参数引用示例：完整目标组合计划可以使用
@@ -262,11 +262,11 @@ PLANNER_SYSTEM_PROMPT = r'''
     - portfolio.design_target_portfolio.ranking_source="$task_4.data"
     - portfolio.design_target_portfolio.query_source="$context.query"
     - portfolio.design_target_portfolio.user_goal_source="$context.user_goal"
-    - portfolio.construct_target_portfolio.current_portfolio_source="$task_1.data"
-    - portfolio.construct_target_portfolio.ranking_source="$task_4.data"
-    - portfolio.construct_target_portfolio.user_profile_source="$task_3.data"
-    - portfolio.construct_target_portfolio.risk_report_source="$task_2.data"
-    - portfolio.construct_target_portfolio.target_design_source="$task_5.data.target_design"
+    - portfolio.calculate_target_portfolio.current_portfolio_source="$task_1.data"
+    - portfolio.calculate_target_portfolio.ranking_source="$task_4.data"
+    - portfolio.calculate_target_portfolio.user_profile_source="$task_3.data"
+    - portfolio.calculate_target_portfolio.risk_report_source="$task_2.data"
+    - portfolio.calculate_target_portfolio.target_design_source="$task_5.data.target_design"
    比较计划可以使用
     - current_portfolio_source="$task_1.data"
     - target_portfolio_source="$task_2.data.target_portfolio"
@@ -347,7 +347,7 @@ REVIEW_SYSTEM_PROMPT = r'''
 6. 任何必要信息不确定时，输出 clarify，并给出具体问题。
 7. 如可修复，必须输出完整 revised_user_goal 或 revised_task_plan；不能只给模糊意见。
 8. 不输出隐藏推理，只给简短问题项。
-9. 对“更稳健组合”检查是否先使用 portfolio.design_target_portfolio，让 LLM 在真实数据到齐后主动设计参数；随后必须使用 portfolio.construct_target_portfolio 并产出 target_portfolio_ref。不能因为用户没有主动填写持仓数量、现金比例或候选策略就直接 clarify。
+9. 对“更稳健组合”检查是否先使用 portfolio.design_target_portfolio，让 LLM 在真实数据到齐后主动设计参数；随后必须使用 portfolio.calculate_target_portfolio 并产出 target_portfolio。不能因为用户没有主动填写持仓数量、现金比例或候选策略就直接 clarify。
 10. 对“与当前持仓比较”检查是否同时包含两个组合来源和 portfolio.compare_portfolios；只有 portfolio_state 时必须 clarify/revise。若目标组合刚在同一计划中生成，应直接使用任务输出，不要求用户指定 artifact。
 11. 不得把只读建议中的“未执行、Commit、模拟盘”等说明性文字当成写操作。
 12. 只输出 JSON。

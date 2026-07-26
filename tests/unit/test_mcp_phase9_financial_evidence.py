@@ -189,7 +189,10 @@ def test_page_tool_listing_does_not_trigger_mcp_discovery() -> None:
     ]
 
     assert tools
-    assert any(tool["name"] == "mcp.readonly.invoke" for tool in tools)
+    assert any(
+        tool["name"] == "evidence.invoke_mcp_readonly"
+        for tool in tools
+    )
     assert all(
         not tool["name"].startswith("mcp.local_financial_evidence.")
         for tool in tools

@@ -8,11 +8,13 @@ from unittest.mock import Mock
 
 from agent.graph.contracts import GraphNodeKind, GraphRef
 from agent.graph.provider_adapter import GraphProviderAdapter
+from agent.graph.providers.portfolio import PortfolioGraphProvider
 from agent.graph.providers.common import (
     ProviderIdentityResolver,
     records_from_payload,
     sources_from_payload,
 )
+from agent_control_center_utils import write_agent_fixture
 
 
 def _object_ref() -> GraphRef:
@@ -59,7 +61,9 @@ def test_graph_provider_adapter_delegates_to_domain_adapters() -> None:
     adapter._evidence_provider.analyze_entities.return_value = {"success": True}
     adapter._evidence_provider.search_evidence.return_value = {"success": True}
     adapter._evidence_provider.ingest_evidence.return_value = {"success": True}
-    adapter._portfolio_provider.read_portfolio_state.return_value = {"success": True}
+    adapter._portfolio_provider.read_portfolio_snapshot.return_value = {
+        "success": True
+    }
     adapter._portfolio_provider.materialize_portfolio_snapshot.return_value = {"success": True}
     adapter._risk_provider.analyze_risk.return_value = {"success": True}
     ref = _object_ref()
@@ -82,7 +86,7 @@ def test_graph_provider_adapter_delegates_to_domain_adapters() -> None:
         source_task_id="task-1",
         source_agent_id="worker",
     ) == {"success": True}
-    assert adapter.read_portfolio_state(
+    assert adapter.read_portfolio_snapshot(
         user_id="u1",
         output_dir="outputs",
         db_path=None,
@@ -103,7 +107,7 @@ def test_graph_provider_adapter_delegates_to_domain_adapters() -> None:
     adapter._evidence_provider.analyze_entities.assert_called_once()
     adapter._evidence_provider.search_evidence.assert_called_once()
     adapter._evidence_provider.ingest_evidence.assert_called_once()
-    adapter._portfolio_provider.read_portfolio_state.assert_called_once()
+    adapter._portfolio_provider.read_portfolio_snapshot.assert_called_once()
     adapter._portfolio_provider.materialize_portfolio_snapshot.assert_called_once()
     adapter._risk_provider.analyze_risk.assert_called_once()
 
@@ -114,3 +118,23 @@ def test_graph_provider_adapter_keeps_original_dataclass_fields() -> None:
         "evidence_ingestion",
         "portfolio_graph",
     ]
+
+
+def test_portfolio_graph_provider_reads_atomic_snapshot(tmp_path) -> None:
+    output_dir, db_path = write_agent_fixture(
+        tmp_path,
+        with_position=True,
+        price=10.0,
+    )
+    provider = PortfolioGraphProvider(portfolio_graph=SimpleNamespace())
+
+    snapshot = provider.read_portfolio_snapshot(
+        user_id="u1",
+        output_dir=output_dir,
+        db_path=db_path,
+    )
+
+    assert snapshot["success"] is True
+    assert snapshot["position_count"] == 1
+    assert snapshot["account_summary"]["total_assets"] > 0
+    assert "orders" not in snapshot

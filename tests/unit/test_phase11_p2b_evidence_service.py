@@ -57,7 +57,7 @@ def test_p2b_evidence_tools_registered_with_legacy_aliases() -> None:
         "evidence.search_rag": ["stock_rag", "rag_search"],
         "evidence.get_stock_evidence": [],
         "evidence.get_market_evidence": [],
-        "evidence.mcp_readonly_evidence": ["mcp_market_risk_summary"],
+        "evidence.invoke_mcp_readonly": [],
     }
 
     for canonical, aliases in expected.items():
@@ -67,6 +67,14 @@ def test_p2b_evidence_tools_registered_with_legacy_aliases() -> None:
         assert definition.operation_type == OP_READ
         for alias in aliases:
             assert registry.get(alias).name == canonical
+
+    for removed in (
+        "evidence.mcp_readonly_evidence",
+        "mcp.readonly.invoke",
+        "mcp_market_risk_summary",
+        "mcp_tool",
+    ):
+        assert registry.get(removed) is None
 
     assert callable(evidence_adapters.execute_evidence_news_search_tool)
     assert callable(evidence_adapters.execute_evidence_rag_search_tool)
@@ -193,13 +201,13 @@ def test_p2b_mcp_readonly_evidence_and_write_block(tmp_path: Path) -> None:
     ).to_csv(tmp_path / "ranking_latest.csv", index=False, encoding="utf-8-sig")
 
     allowed = execute_tool(
-        "evidence.mcp_readonly_evidence",
+        "evidence.invoke_mcp_readonly",
         {"mcp_tool_name": default_example_tool_name(), "arguments": {"query": "stable portfolio", "top_k": 1}},
         context={**_mcp_context(True), "output_dir": tmp_path, "db_path": tmp_path / "agent_quant.db"},
         agent_type=AGENT_READ,
     )
     blocked = execute_tool(
-        "evidence.mcp_readonly_evidence",
+        "evidence.invoke_mcp_readonly",
         {"mcp_tool_name": "mcp.local_financial_evidence.unsafe_write_trade", "arguments": {"stock_code": "000001"}},
         context=_mcp_context(True),
         agent_type=AGENT_READ,

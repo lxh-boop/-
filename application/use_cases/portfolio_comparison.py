@@ -1351,15 +1351,16 @@ def design_target_portfolio(inputs: dict[str, Any], runtime_context: dict[str, A
     }
 
 
-def construct_target_portfolio(inputs: dict[str, Any], runtime_context: dict[str, Any]) -> dict[str, Any]:
+def calculate_target_portfolio(inputs: dict[str, Any], runtime_context: dict[str, Any]) -> dict[str, Any]:
+    """Validate and calculate an LLM design without persistence or mutation."""
+
     args = dict(inputs or {})
     context = dict(runtime_context or {})
-    """Validate and materialize an LLM design without changing its decisions."""
 
     run_id = str(context.get("run_id") or "")
     task_id = str(context.get("task_id") or "")
     trace_event(
-        "portfolio.target.construct.start",
+        "portfolio.target.calculate.start",
         {
             "argument_keys": sorted(args),
             "decision_source": "target_design.selected_candidates",
@@ -1561,40 +1562,12 @@ def construct_target_portfolio(inputs: dict[str, Any], runtime_context: dict[str
         "limitations": limitations,
     }
 
-    user_id = str(args.get("user_id") or context.get("user_id") or "default")
-    conversation_id = str(context.get("conversation_id") or context.get("session_id") or "")
-    try:
-        artifact_ref = TargetPortfolioStore(context.get("output_dir") or "outputs").save(
-            payload,
-            user_id=user_id,
-            conversation_id=conversation_id,
-            run_id=run_id,
-            task_id=task_id,
-        )
-    except Exception as exc:
-        trace_exception("portfolio.target.artifact_save_failed", exc, run_id=run_id, task_id=task_id)
-        return {
-            "success": False,
-            "status": "artifact_save_failed",
-            "message": "目标组合已经计算，但无法保存为可供后续对比的结构化对象。",
-            "errors": ["artifact_save_failed"],
-            "data": {
-                "target_portfolio": payload,
-                "repairable": False,
-                "replan_required": False,
-                "next_action": "report_limitation",
-                "not_executed": True,
-            },
-        }
-
     data = {
         "target_portfolio": payload,
-        "target_portfolio_ref": artifact_ref,
-        "artifact_id": artifact_ref["artifact_id"],
         **payload,
     }
     flow_event(
-        "TARGET_CONSTRUCTION",
+        "TARGET_CALCULATION",
         {
             "status": "success",
             "candidate_decision_source": "llm",
@@ -1605,7 +1578,6 @@ def construct_target_portfolio(inputs: dict[str, Any], runtime_context: dict[str
             "target_positions": target_rows,
             "current_risk_snapshot": current_snapshot,
             "target_risk_snapshot": target_snapshot,
-            "target_portfolio_ref": artifact_ref,
             "not_executed": True,
         },
         run_id=run_id,
@@ -1614,8 +1586,96 @@ def construct_target_portfolio(inputs: dict[str, Any], runtime_context: dict[str
     return {
         "success": True,
         "status": "success",
-        "message": "已按 LLM 原始设计生成结构化目标组合；构造器未修改证券或目标权重。",
+        "message": "已按 LLM 原始设计计算结构化目标组合；计算器未修改证券或目标权重。",
         "data": data,
+    }
+
+
+def save_target_portfolio_artifact(
+    inputs: dict[str, Any],
+    runtime_context: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist one already calculated target portfolio as a derived artifact."""
+
+    args = dict(inputs or {})
+    context = dict(runtime_context or {})
+    target_value = _unwrap(args.get("target_portfolio"))
+    if (
+        isinstance(target_value, dict)
+        and isinstance(target_value.get("target_portfolio"), dict)
+    ):
+        target_value = target_value["target_portfolio"]
+    target_portfolio = (
+        dict(target_value) if isinstance(target_value, dict) else {}
+    )
+    if not target_portfolio:
+        return _missing_result(
+            "Missing calculated target portfolio.",
+            ["target_portfolio"],
+        )
+
+    run_id = str(context.get("run_id") or "")
+    task_id = str(context.get("task_id") or "")
+    user_id = str(
+        args.get("user_id") or context.get("user_id") or "default"
+    )
+    conversation_id = str(
+        args.get("conversation_id")
+        or context.get("conversation_id")
+        or context.get("session_id")
+        or ""
+    )
+    try:
+        artifact_ref = TargetPortfolioStore(
+            context.get("output_dir") or "outputs"
+        ).save(
+            target_portfolio,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            run_id=run_id,
+            task_id=task_id,
+        )
+    except Exception as exc:
+        trace_exception(
+            "portfolio.target.artifact_save_failed",
+            exc,
+            run_id=run_id,
+            task_id=task_id,
+        )
+        return {
+            "success": False,
+            "status": "artifact_save_failed",
+            "message": "Calculated target portfolio could not be saved.",
+            "errors": ["artifact_save_failed"],
+            "data": {
+                "target_portfolio": target_portfolio,
+                "not_executed": True,
+                "mutation_performed": False,
+            },
+        }
+
+    trace_event(
+        "portfolio.target.artifact_saved",
+        {
+            "artifact_id": artifact_ref["artifact_id"],
+            "target_position_count": int(
+                target_portfolio.get("target_position_count") or 0
+            ),
+        },
+        run_id=run_id,
+        task_id=task_id,
+    )
+    return {
+        "success": True,
+        "status": "success",
+        "message": "Target portfolio artifact saved.",
+        "data": {
+            "target_portfolio": target_portfolio,
+            "target_portfolio_ref": artifact_ref,
+            "artifact_id": artifact_ref["artifact_id"],
+            "not_executed": True,
+            "mutation_performed": False,
+        },
     }
 
 

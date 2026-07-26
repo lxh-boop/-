@@ -39,7 +39,7 @@ class EvidenceToolBackend(Protocol):
 
 
 class PortfolioToolBackend(Protocol):
-    def read_portfolio_state(
+    def read_portfolio_snapshot(
         self,
         *,
         user_id: str,

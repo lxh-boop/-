@@ -9,6 +9,7 @@ from .contracts import (
     OP_READ,
     OP_SYSTEM,
     OP_WRITE,
+    TOOL_VISIBILITY_PUBLIC,
     TOOL_VISIBILITIES,
     ToolDefinition,
 )
@@ -140,5 +141,8 @@ class ToolRegistry:
                 "idempotency": definition.idempotency,
                 "audit_level": definition.audit_level,
             }
-            for definition in self.list(agent_type=agent_type)
+            for definition in self.list(
+                agent_type=agent_type,
+                visibility=TOOL_VISIBILITY_PUBLIC,
+            )
         ]

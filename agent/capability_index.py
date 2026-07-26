@@ -15,6 +15,7 @@ from agent.agent_specs import (
     SUPERVISOR,
 )
 from agent.tool_engine import OP_READ, OP_SYSTEM, ToolDefinition, get_tool_registry_v2
+from agent.tool_runtime import TOOL_VISIBILITY_PUBLIC
 
 
 INDEX_BUILDER_VERSION = "phase10.3-capability-index-v1"
@@ -23,7 +24,7 @@ PERMISSION_VERSION = "agent-allowlist-v1"
 MCP_CONFIG_VERSION = "mcp-allowlist-v1"
 
 CORE_CAPABILITY_IDS = {
-    "tool:portfolio_state",
+    "tool:portfolio.read_snapshot",
     "tool:portfolio_risk",
     "tool:ranking",
     "tool:scheduler_status",
@@ -33,10 +34,10 @@ CORE_CAPABILITY_IDS = {
 OUTPUTS_BY_TOOL: dict[str, set[str]] = {
     "portfolio_state": {"portfolio_state", "position_count", "account_summary"},
     "portfolio_risk": {"current_risk", "risk_factors", "limitations"},
-    "portfolio.get_state": {"portfolio_state", "position_count", "account_summary", "positions", "orders"},
-    "portfolio.get_account_summary": {"account_summary", "cash_state", "account"},
-    "portfolio.get_positions": {"positions", "position_weights", "position_count"},
-    "portfolio.get_orders": {"orders", "order_count", "latest_trade_date"},
+    "portfolio.read_snapshot": {"portfolio_snapshot", "position_count", "account_summary", "positions", "position_weights"},
+    "portfolio.list_orders": {"orders", "order_count", "latest_trade_date"},
+    "portfolio.calculate_target_portfolio": {"target_portfolio", "target_positions", "current_risk_snapshot", "target_risk_snapshot", "limitations"},
+    "portfolio.save_target_artifact": {"target_portfolio_ref", "artifact_id"},
     "portfolio.analyze_risk": {"current_risk", "risk_factors", "limitations", "risk_summary"},
     "portfolio.compare_risk_before_after": {"risk_before_after", "delta", "summary", "limitations"},
     "ranking": {"market_evidence", "evidence", "candidate_stocks", "reasons", "limitations"},
@@ -50,7 +51,7 @@ OUTPUTS_BY_TOOL: dict[str, set[str]] = {
     "rag_search": {"market_evidence", "evidence", "rag_contexts", "sources", "limitations"},
     "evidence.get_stock_evidence": {"market_evidence", "evidence", "sources", "reasons", "limitations"},
     "evidence.get_market_evidence": {"market_evidence", "evidence", "sources", "reasons", "limitations"},
-    "mcp_market_risk_summary": {"market_evidence", "evidence", "mcp_sources", "sources", "limitations"},
+    "evidence.invoke_mcp_readonly": {"market_evidence", "evidence", "mcp_sources", "sources", "limitations"},
     "stock_analysis": {"stock_analysis", "market_evidence", "evidence", "reasons", "limitations"},
     "position_recommendation": {"target_position", "reasons", "limitations"},
     "replacement_recommendation": {"replacement_candidates", "score_comparison", "risk_comparison", "reasons", "limitations"},
@@ -67,7 +68,6 @@ OUTPUTS_BY_TOOL: dict[str, set[str]] = {
     "scheduler_status": {"scheduler_status"},
     "user_profile": {"user_profile", "constraints", "risk_assessment", "investment_goal"},
     "python_sandbox_analysis": {"sandbox_result", "calculation", "warnings"},
-    "mcp_tool": {"market_evidence", "evidence", "mcp_sources", "limitations"},
     "report": {"report_summary"},
     "report_latest": {"report_summary"},
 }
@@ -75,10 +75,10 @@ OUTPUTS_BY_TOOL: dict[str, set[str]] = {
 ACTION_BY_TOOL: dict[str, set[str]] = {
     "portfolio_state": {"query_portfolio_state"},
     "portfolio_risk": {"analyze_portfolio_risk", "recommend_portfolio", "recommend_portfolio_adjustment"},
-    "portfolio.get_state": {"query_portfolio_state"},
-    "portfolio.get_account_summary": {"query_portfolio_state"},
-    "portfolio.get_positions": {"query_portfolio_state"},
-    "portfolio.get_orders": {"query_portfolio_state"},
+    "portfolio.read_snapshot": {"query_portfolio_state"},
+    "portfolio.list_orders": {"query_portfolio_orders"},
+    "portfolio.calculate_target_portfolio": {"recommend_portfolio", "recommend_portfolio_adjustment"},
+    "portfolio.save_target_artifact": {"persist_derived_artifact"},
     "portfolio.analyze_risk": {"analyze_portfolio_risk", "recommend_portfolio", "recommend_portfolio_adjustment"},
     "portfolio.compare_risk_before_after": {"analyze_portfolio_risk", "recommend_portfolio", "recommend_portfolio_adjustment"},
     "ranking": {"recommend_portfolio", "recommend_portfolio_adjustment", "explain_previous_plan", "explain_portfolio_decision"},
@@ -92,7 +92,7 @@ ACTION_BY_TOOL: dict[str, set[str]] = {
     "rag_search": {"retrieve_evidence", "explain_previous_plan", "explain_portfolio_decision"},
     "evidence.get_stock_evidence": {"retrieve_evidence", "explain_previous_plan", "explain_portfolio_decision"},
     "evidence.get_market_evidence": {"retrieve_evidence", "explain_previous_plan", "explain_portfolio_decision"},
-    "mcp_market_risk_summary": {"retrieve_evidence"},
+    "evidence.invoke_mcp_readonly": {"retrieve_evidence"},
     "stock_analysis": {"analyze_stock"},
     "position_recommendation": {"recommend_position"},
     "replacement_recommendation": {"recommend_replacement"},
@@ -109,7 +109,6 @@ ACTION_BY_TOOL: dict[str, set[str]] = {
     "scheduler_status": {"query_scheduler_status"},
     "user_profile": {"query_user_profile"},
     "python_sandbox_analysis": {"run_readonly_python_analysis"},
-    "mcp_tool": {"retrieve_evidence"},
     "report": {"query_report"},
     "report_latest": {"query_report"},
 }
@@ -278,6 +277,8 @@ def _allowed_agents_for_unified_tool(definition: ToolDefinition) -> list[str]:
     allowed: set[str] = {SUPERVISOR}
     if name.startswith("market."):
         allowed.update({MARKET_INTELLIGENCE, PORTFOLIO_ANALYSIS, REPORTING})
+    elif name.startswith("evidence."):
+        allowed.update({MARKET_INTELLIGENCE, REPORTING})
     elif name.startswith("portfolio."):
         if definition.operation_type == OP_READ:
             allowed.update({PORTFOLIO_ANALYSIS, REPORTING})
@@ -352,7 +353,12 @@ def build_trusted_capability_index(
 ) -> CapabilityIndex:
     """Trusted builder: builds an index from registered tools and allowlists only."""
 
-    records = [_record_from_unified_tool(definition) for definition in get_tool_registry_v2().list()]
+    records = [
+        _record_from_unified_tool(definition)
+        for definition in get_tool_registry_v2().list(
+            visibility=TOOL_VISIBILITY_PUBLIC
+        )
+    ]
     records = [record for record in records if record.enabled and record.allowed_agent_types]
     content_hash = _hash_payload([record.to_dict(agent_view=False) for record in records])
     generated_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")

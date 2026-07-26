@@ -55,7 +55,10 @@ def test_trusted_index_builder_generates_versioned_authorized_records() -> None:
     assert index.index_version.startswith("capidx-")
     assert index.content_hash
     assert index.builder_version.startswith("phase10.3")
-    assert any(record.capability_id == "tool:portfolio_state" for record in index.records)
+    assert any(
+        record.capability_id == "tool:portfolio.read_snapshot"
+        for record in index.records
+    )
     assert all(record.enabled for record in index.records)
     assert all(record.allowed_agent_types for record in index.records)
 
@@ -69,7 +72,7 @@ def test_artifact_store_allows_same_scope_read_and_blocks_cross_user(tmp_path: P
         run_id="run_1",
         conversation_id="conv_1",
         task_id="task_1",
-        tool_name="portfolio_state",
+        tool_name="portfolio.read_snapshot",
         result={
             "success": True,
             "message": "ok",
@@ -85,7 +88,7 @@ def test_artifact_store_allows_same_scope_read_and_blocks_cross_user(tmp_path: P
 
     assert same_user is not None
     assert same_user["content"]["result"]["data"]["token"] == "***"
-    assert "portfolio_state" in same_user["content"]["produced_outputs"]
+    assert "portfolio_snapshot" in same_user["content"]["produced_outputs"]
     assert cross_user is None
 
 
@@ -121,10 +124,10 @@ def test_supervisor_read_view_returns_small_relevant_candidate_set() -> None:
     candidates = repo.query(
         agent_identity=SUPERVISOR,
         goal_action="query_portfolio_state",
-        missing_outputs=["portfolio_state"],
+        missing_outputs=["portfolio_snapshot"],
         permission_scope="read",
         limit=2,
     )
 
     assert 1 <= len(candidates) <= 2
-    assert candidates[0]["capability_id"] == "tool:portfolio_state"
+    assert candidates[0]["capability_id"] == "tool:portfolio.read_snapshot"

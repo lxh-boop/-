@@ -22,6 +22,7 @@ from agent.services.strategy_proposal_service import StrategyProposalService
 from agent.session.pending_action_store import load_pending_actions
 from agent.services.portfolio_service import portfolio_service
 from agent.tool_engine import get_tool_registry_v2
+from agent.tool_runtime import TOOL_VISIBILITY_PUBLIC
 from application.use_cases.system_queries import read_scheduler_status
 from agent.tools.tool_schemas import PAPER_AGENT_DISCLAIMER
 from application.handoff_service import build_handoff_safe_summary, format_handoff_caption
@@ -170,7 +171,9 @@ class AgentApplicationService:
     def list_registered_tools(self) -> list[Any]:
         return [
             definition.public_view()
-            for definition in get_tool_registry_v2().list()
+            for definition in get_tool_registry_v2().list(
+                visibility=TOOL_VISIBILITY_PUBLIC
+            )
             if definition.enabled
         ]
 

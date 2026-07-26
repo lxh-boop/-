@@ -11,7 +11,7 @@ def test_phase15_observation_event_serializes_roundtrip():
     event = ObservationEvent(
         run_id="run_1",
         task_id="task_1",
-        source_tool_name="portfolio.get_state",
+        source_tool_name="portfolio.read_snapshot",
         observation_type=ObservationType.TOOL_SUCCESS,
         status=ObservationStatus.RECORDED,
         severity=ObservationSeverity.INFO,

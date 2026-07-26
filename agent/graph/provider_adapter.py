@@ -93,14 +93,14 @@ class GraphProviderAdapter:
             source_agent_id=source_agent_id,
         )
 
-    def read_portfolio_state(
+    def read_portfolio_snapshot(
         self,
         *,
         user_id: str,
         output_dir: str | Path,
         db_path: str | Path | None,
     ) -> dict[str, Any]:
-        return self._portfolio_provider.read_portfolio_state(
+        return self._portfolio_provider.read_portfolio_snapshot(
             user_id=user_id,
             output_dir=output_dir,
             db_path=db_path,

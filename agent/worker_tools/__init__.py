@@ -17,7 +17,7 @@ from .impact import (
 )
 from .portfolio import (
     PORTFOLIO_MATERIALIZE_SNAPSHOT_TOOL,
-    PORTFOLIO_READ_STATE_TOOL,
+    PORTFOLIO_READ_SNAPSHOT_TOOL,
     build_portfolio_tool_definitions,
 )
 from .proposal import build_proposal_tool_definitions
@@ -36,7 +36,7 @@ __all__ = [
     "IMPACT_FIND_PATHS_TOOL",
     "IMPACT_SUMMARIZE_PATHS_TOOL",
     "PORTFOLIO_MATERIALIZE_SNAPSHOT_TOOL",
-    "PORTFOLIO_READ_STATE_TOOL",
+    "PORTFOLIO_READ_SNAPSHOT_TOOL",
     "RISK_ANALYZE_TOOL",
     "WorkerToolDirectory",
     "build_diagnostic_tool_definitions",
