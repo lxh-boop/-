@@ -1,3 +1,5 @@
+"""Agent-only evidence tools that adapt arguments to evidence services."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -29,7 +31,10 @@ def _int_value(value: Any, default: int) -> int:
         return int(default)
 
 
-def evidence_search_news_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_evidence_news_search_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     return evidence_service.search_news(
         str(args.get("stock_code") or ""),
         as_of_date=args.get("as_of_date"),
@@ -38,7 +43,10 @@ def evidence_search_news_adapter(args: dict[str, Any], context: dict[str, Any]) 
     )
 
 
-def evidence_search_rag_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_evidence_rag_search_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     return evidence_service.search_rag(
         str(args.get("stock_code") or ""),
         query=str(args.get("query") or f"{args.get('stock_code', '')} risk evidence"),
@@ -47,7 +55,10 @@ def evidence_search_rag_adapter(args: dict[str, Any], context: dict[str, Any]) -
     )
 
 
-def evidence_get_stock_evidence_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_stock_evidence_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     return evidence_service.get_stock_evidence(
         str(args.get("stock_code") or ""),
         query=str(args.get("query") or ""),
@@ -58,7 +69,10 @@ def evidence_get_stock_evidence_adapter(args: dict[str, Any], context: dict[str,
     )
 
 
-def evidence_get_market_evidence_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_market_evidence_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     return evidence_service.get_market_evidence(
         query=str(args.get("query") or ""),
         stock_codes=args.get("stock_codes") or args.get("stock_code") or [],
@@ -69,7 +83,10 @@ def evidence_get_market_evidence_adapter(args: dict[str, Any], context: dict[str
     )
 
 
-def evidence_mcp_readonly_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_mcp_readonly_evidence_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     tool_name = str(args.get("mcp_tool_name") or args.get("tool_name") or "")
     arguments = args.get("arguments") if isinstance(args.get("arguments"), dict) else {}
     return evidence_service.get_mcp_readonly_evidence(
@@ -79,8 +96,10 @@ def evidence_mcp_readonly_adapter(args: dict[str, Any], context: dict[str, Any])
     )
 
 
-EvidenceSearchNewsAdapter = evidence_search_news_adapter
-EvidenceSearchRagAdapter = evidence_search_rag_adapter
-EvidenceGetStockEvidenceAdapter = evidence_get_stock_evidence_adapter
-EvidenceGetMarketEvidenceAdapter = evidence_get_market_evidence_adapter
-EvidenceMcpReadonlyAdapter = evidence_mcp_readonly_adapter
+__all__ = [
+    "execute_evidence_news_search_tool",
+    "execute_evidence_rag_search_tool",
+    "execute_market_evidence_tool",
+    "execute_mcp_readonly_evidence_tool",
+    "execute_stock_evidence_tool",
+]

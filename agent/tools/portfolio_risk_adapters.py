@@ -1,3 +1,5 @@
+"""Agent-only portfolio-risk tools backed by the risk service."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -22,7 +24,10 @@ def _db_path(context: dict[str, Any]) -> str | Path | None:
     return context.get("db_path")
 
 
-def portfolio_analyze_risk_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_portfolio_risk_analysis_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     data = portfolio_risk_service.analyze_current_risk(
         str(_context_value(args, context, "user_id", "default")),
         output_dir=_output_dir(context),
@@ -40,7 +45,10 @@ def portfolio_analyze_risk_adapter(args: dict[str, Any], context: dict[str, Any]
     }
 
 
-def portfolio_compare_risk_before_after_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_portfolio_risk_comparison_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     data = portfolio_risk_service.compare_risk_before_after(
         str(_context_value(args, context, "user_id", "default")),
         before=args.get("before") if isinstance(args.get("before"), dict) else None,
@@ -59,5 +67,7 @@ def portfolio_compare_risk_before_after_adapter(args: dict[str, Any], context: d
     }
 
 
-PortfolioAnalyzeRiskAdapter = portfolio_analyze_risk_adapter
-PortfolioCompareRiskBeforeAfterAdapter = portfolio_compare_risk_before_after_adapter
+__all__ = [
+    "execute_portfolio_risk_analysis_tool",
+    "execute_portfolio_risk_comparison_tool",
+]

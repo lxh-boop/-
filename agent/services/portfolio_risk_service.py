@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.services.portfolio_service import portfolio_service
-from agent.tools._common import portfolio_user_dir, safe_float
+from application.use_cases.common import portfolio_user_dir, safe_float
 from portfolio.portfolio_risk import calculate_portfolio_risk
 from portfolio.storage import PortfolioStorage
 from portfolio.user_profile import build_user_constraints, default_user_profile, load_user_context

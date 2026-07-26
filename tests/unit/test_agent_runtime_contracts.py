@@ -6,72 +6,68 @@ from agent.schemas import (
     PROTECTED_BUSINESS_WRITE_TYPES,
     is_protected_business_write,
 )
-from agent.tools.tool_registry import ToolCategory, get_tool_registry, list_tools, validate_tool_args
-from agent.tools.tool_schemas import ToolPermission
+from agent.tool_engine import OP_READ, OP_WRITE, get_tool_registry_v2
+from agent.tool_runtime import validate_input
 
 
-def test_tool_registry_exposes_runtime_metadata() -> None:
-    registry = get_tool_registry()
-    assert "ranking" in registry
-    assert "paper_trade_execute" in registry
+def test_v2_tool_registry_exposes_runtime_metadata() -> None:
+    registry = get_tool_registry_v2()
+    assert registry.get("ranking") is not None
+    assert registry.get("paper_trade_execute") is not None
 
-    for spec in registry.values():
-        metadata = spec.metadata()
+    for definition in registry.list():
+        metadata = definition.public_view()
         for key in [
             "name",
             "description",
             "input_schema",
             "output_schema",
-            "read_only",
-            "has_side_effect",
-            "requires_confirmation",
-            "concurrency_safe",
-            "idempotent",
-            "timeout_seconds",
-            "retry_policy",
-            "result_retention",
-            "category",
+            "operation_type",
+            "allowed_agent_types",
+            "requires_approval",
+            "runtime_policy",
+            "visibility",
+            "side_effects",
+            "idempotency",
         ]:
             assert key in metadata
 
-    ranking = registry["ranking"]
-    assert ranking.permission == ToolPermission.READ
-    assert ranking.read_only is True
-    assert ranking.concurrency_safe is True
-    assert ranking.has_side_effect is False
+    ranking = registry.get("ranking")
+    assert ranking is not None
+    assert ranking.operation_type == OP_READ
+    assert ranking.requires_approval is False
+    assert ranking.side_effects == []
 
-    execute = registry["paper_trade_execute"]
-    assert execute.permission == ToolPermission.WRITE
-    assert execute.read_only is False
-    assert execute.has_side_effect is True
-    assert execute.requires_confirmation is True
-    assert execute.concurrency_safe is False
-    assert execute.category == ToolCategory.PROTECTED_EXECUTION
+    execute = registry.get("paper_trade_execute")
+    assert execute is not None
+    assert execute.operation_type == OP_WRITE
+    assert execute.requires_approval is True
 
 
-def test_list_tools_keeps_existing_fields_and_adds_contract() -> None:
-    tools = list_tools()
-    ranking = next(item for item in tools if item["name"] == "ranking")
-    assert ranking["permission"] == ToolPermission.READ
-    assert ranking["requires_confirmation"] is False
-    assert ranking["read_only"] is True
+def test_v2_public_tool_view_contains_stable_contract() -> None:
+    tools = [
+        definition.public_view()
+        for definition in get_tool_registry_v2().list()
+    ]
+    ranking = next(item for item in tools if item["name"] == "market.get_ranking")
+    assert ranking["operation_type"] == OP_READ
+    assert ranking["requires_approval"] is False
     assert ranking["input_schema"]["type"] == "object"
 
 
-def test_tool_arg_validation_rejects_unregistered_and_missing_required() -> None:
-    ok, errors = validate_tool_args("missing_tool", {})
-    assert ok is False
-    assert errors == ["unregistered_tool"]
+def test_v2_tool_arg_validation_rejects_missing_required() -> None:
+    registry = get_tool_registry_v2()
+    assert registry.get("missing_tool") is None
+    execute = registry.get("paper_trade_execute")
+    assert execute is not None
 
-    ok, errors = validate_tool_args("paper_trade_execute", {"user_id": "u1", "plan_id": "p1"})
-    assert ok is False
+    errors = validate_input(execute, {"user_id": "u1", "plan_id": "p1"})
     assert "missing_required:confirmation_token" in errors
 
-    ok, errors = validate_tool_args(
-        "paper_trade_execute",
+    errors = validate_input(
+        execute,
         {"user_id": "u1", "plan_id": "p1", "confirmation_token": "tok"},
     )
-    assert ok is True
     assert errors == []
 
 

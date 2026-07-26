@@ -35,7 +35,7 @@ from .memory_store import (
     SQLiteMemoryStore,
     VectorMemoryStore,
 )
-from .memory_tool import memory_get_summary_adapter, memory_search_adapter
+from .memory_tool import execute_memory_search_tool, execute_memory_summary_tool
 from .memory_types import (
     MemoryRecord,
     MemoryScope,
@@ -79,8 +79,8 @@ __all__ = [
     "get_memory_manager_for_output",
     "is_record_expired",
     "list_memory_records_safe_page",
-    "memory_get_summary_adapter",
-    "memory_search_adapter",
+    "execute_memory_search_tool",
+    "execute_memory_summary_tool",
     "memory_store_path",
     "score_record",
 ]

@@ -1,6 +1,7 @@
+"""Canonical Agent Tool definitions, LLM-visible cards and runtime registry."""
+
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from agent.runtime_reliability import (
@@ -32,18 +33,18 @@ from agent.tool_runtime.validation import (
     validate_output as _validate_output,
 )
 from agent.tools.evidence_adapters import (
-    evidence_get_market_evidence_adapter,
-    evidence_get_stock_evidence_adapter,
-    evidence_mcp_readonly_adapter,
-    evidence_search_news_adapter,
-    evidence_search_rag_adapter,
+    execute_evidence_news_search_tool,
+    execute_evidence_rag_search_tool,
+    execute_market_evidence_tool,
+    execute_mcp_readonly_evidence_tool,
+    execute_stock_evidence_tool,
 )
 from agent.tools.market_analysis_adapters import (
-    market_analyze_stock_adapter,
-    market_compare_stocks_adapter,
-    market_get_ranking_adapter,
-    market_lookup_stock_adapter,
-    market_signal_summary_adapter,
+    execute_market_ranking_tool,
+    execute_market_signal_summary_tool,
+    execute_market_stock_analysis_tool,
+    execute_market_stock_comparison_tool,
+    execute_market_stock_lookup_tool,
 )
 from agent.tools.portfolio_proposal_adapters import (
     portfolio_commit_paper_trade_adapter,
@@ -51,24 +52,26 @@ from agent.tools.portfolio_proposal_adapters import (
     portfolio_preview_manual_change_adapter,
     portfolio_preview_paper_trade_adapter,
     portfolio_preview_rebalance_adapter,
-    portfolio_recommend_position_adapter,
-    portfolio_recommend_replacement_adapter,
 )
-from agent.tools.portfolio_comparison_tools import (
-    compare_portfolios_adapter,
-    construct_target_portfolio_adapter,
-    design_target_portfolio_adapter,
-    load_target_portfolio_adapter,
+from agent.tools.portfolio_recommendation_tools import (
+    execute_portfolio_position_recommendation_tool,
+    execute_portfolio_replacement_recommendation_tool,
+)
+from agent.tools.portfolio_comparison_adapters import (
+    execute_compare_portfolios_tool,
+    execute_construct_target_portfolio_tool,
+    execute_design_target_portfolio_tool,
+    execute_load_target_portfolio_tool,
 )
 from agent.tools.portfolio_risk_adapters import (
-    portfolio_analyze_risk_adapter,
-    portfolio_compare_risk_before_after_adapter,
+    execute_portfolio_risk_analysis_tool,
+    execute_portfolio_risk_comparison_tool,
 )
 from agent.tools.portfolio_state_adapters import (
-    portfolio_get_account_summary_adapter,
-    portfolio_get_orders_adapter,
-    portfolio_get_positions_adapter,
-    portfolio_get_state_adapter,
+    execute_portfolio_account_summary_tool,
+    execute_portfolio_orders_query_tool,
+    execute_portfolio_positions_query_tool,
+    execute_portfolio_state_query_tool,
 )
 from agent.tools.write_operation_adapters import (
     approval_confirm_plan_adapter,
@@ -76,9 +79,6 @@ from agent.tools.write_operation_adapters import (
     backfill_preview_adapter,
     capital_change_commit_adapter,
     capital_change_preview_adapter,
-    strategy_get_active_proposal_adapter,
-    strategy_get_audit_trace_adapter,
-    strategy_get_context_adapter,
     strategy_builder_preview_adapter,
     strategy_disable_commit_adapter,
     strategy_disable_preview_adapter,
@@ -93,41 +93,21 @@ from agent.tools.write_operation_adapters import (
     strategy_prepare_implementation_adapter,
     strategy_save_proposal_draft_adapter,
 )
-from agent.tools.system_auxiliary_adapters import (
-    python_sandbox_analysis_adapter,
-    report_list_latest_adapter,
-    scheduler_status_adapter,
-    user_profile_get_adapter,
+from agent.tools.strategy_read_tools import (
+    execute_active_strategy_proposal_tool,
+    execute_strategy_audit_trace_tool,
+    execute_strategy_context_tool,
 )
-from agent.memory.memory_tool import memory_get_summary_adapter, memory_search_adapter
-
-
-def _ctx_path(context: dict[str, Any], key: str, default: str | Path = ".") -> str | Path:
-    return context.get(key) or default
-
-
-def _portfolio_state_handler(args: dict[str, Any], context: dict[str, Any]) -> Any:
-    return portfolio_get_state_adapter(args, context)
-
-
-def _portfolio_risk_handler(args: dict[str, Any], context: dict[str, Any]) -> Any:
-    return portfolio_analyze_risk_adapter(args, context)
-
-
-def _ranking_handler(args: dict[str, Any], context: dict[str, Any]) -> Any:
-    return market_get_ranking_adapter(args, context)
-
-
-def _stock_analysis_handler(args: dict[str, Any], context: dict[str, Any]) -> Any:
-    return market_analyze_stock_adapter(args, context)
-
-
-def _stock_news_handler(args: dict[str, Any], context: dict[str, Any]) -> Any:
-    return evidence_search_news_adapter(args, context)
-
-
-def _stock_rag_handler(args: dict[str, Any], context: dict[str, Any]) -> Any:
-    return evidence_search_rag_adapter(args, context)
+from agent.tools.system_auxiliary_adapters import (
+    execute_latest_report_list_tool,
+    execute_python_sandbox_analysis_tool,
+    execute_scheduler_status_query_tool,
+    execute_user_profile_query_tool,
+)
+from agent.memory.memory_tool import (
+    execute_memory_search_tool,
+    execute_memory_summary_tool,
+)
 
 
 def build_core_tool_definitions() -> list[ToolDefinition]:
@@ -144,7 +124,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"user_id": {"type": "string"}}),
             output_schema=_result_schema(),
-            execution_handler=_portfolio_state_handler,
+            execution_handler=execute_portfolio_state_query_tool,
             supported_actions=["query", "analyze", "construct_recommendation"],
             supported_objects=["current_portfolio"],
             produced_outputs=["portfolio_state", "account_summary", "position_count"],
@@ -162,7 +142,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"user_id": {"type": "string"}}),
             output_schema=_result_schema(),
-            execution_handler=portfolio_get_account_summary_adapter,
+            execution_handler=execute_portfolio_account_summary_tool,
             supported_actions=["query", "analyze"],
             supported_objects=["paper_account", "current_portfolio"],
             produced_outputs=["account_summary", "cash_state", "account"],
@@ -180,7 +160,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"user_id": {"type": "string"}}),
             output_schema=_result_schema(),
-            execution_handler=portfolio_get_positions_adapter,
+            execution_handler=execute_portfolio_positions_query_tool,
             supported_actions=["query", "analyze"],
             supported_objects=["positions", "current_portfolio"],
             produced_outputs=["positions", "position_weights", "position_count"],
@@ -198,7 +178,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"user_id": {"type": "string"}}),
             output_schema=_result_schema(),
-            execution_handler=portfolio_get_orders_adapter,
+            execution_handler=execute_portfolio_orders_query_tool,
             supported_actions=["query", "analyze"],
             supported_objects=["orders", "paper_account"],
             produced_outputs=["orders", "order_count", "latest_trade_date"],
@@ -216,7 +196,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"user_id": {"type": "string"}}),
             output_schema=_result_schema(),
-            execution_handler=_portfolio_risk_handler,
+            execution_handler=execute_portfolio_risk_analysis_tool,
             supported_actions=["analyze", "construct_recommendation", "explain"],
             supported_objects=["current_portfolio"],
             produced_outputs=["current_risk", "risk_factors", "limitations"],
@@ -234,7 +214,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"user_id": {"type": "string"}, "before": {"type": "object"}, "after": {"type": "object"}}),
             output_schema=_result_schema(),
-            execution_handler=portfolio_compare_risk_before_after_adapter,
+            execution_handler=execute_portfolio_risk_comparison_tool,
             supported_actions=["analyze", "construct_recommendation", "explain"],
             supported_objects=["current_portfolio", "risk"],
             produced_outputs=["risk_before_after", "delta", "summary", "limitations"],
@@ -263,7 +243,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
                 required=["current_portfolio", "ranking"],
             ),
             output_schema=_result_schema(),
-            execution_handler=design_target_portfolio_adapter,
+            execution_handler=execute_design_target_portfolio_tool,
             supported_actions=["construct", "recommend", "analyze"],
             supported_objects=["current_portfolio", "target_portfolio", "constraints"],
             produced_outputs=["target_design", "design_rationale", "assumptions", "not_executed"],
@@ -281,6 +261,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
                 "Redesigning the business recommendation, creating orders, changing positions, or bypassing approval.",
                 "user_id, current_portfolio, ranking, risk_report, user_profile, target_design and optional explicit safety caps.",
                 "target_portfolio, target_positions, target_portfolio_ref, current and target risk snapshots, limitations and not_executed.",
+                "Persists only a conversation-scoped target-portfolio artifact; does not change accounts, positions, orders, strategy bindings or other formal business state.",
             ),
             input_schema=_schema(
                 {
@@ -300,7 +281,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
                 required=["current_portfolio", "ranking", "target_design"],
             ),
             output_schema=_result_schema(),
-            execution_handler=construct_target_portfolio_adapter,
+            execution_handler=execute_construct_target_portfolio_tool,
             supported_actions=["construct", "recommend", "compare"],
             supported_objects=["current_portfolio", "target_portfolio", "constraints"],
             produced_outputs=["target_portfolio", "target_positions", "target_portfolio_ref", "current_risk_snapshot", "target_risk_snapshot", "limitations", "not_executed"],
@@ -321,7 +302,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"user_id": {"type": "string"}, "conversation_id": {"type": "string"}, "artifact_id": {"type": "string"}}),
             output_schema=_result_schema(),
-            execution_handler=load_target_portfolio_adapter,
+            execution_handler=execute_load_target_portfolio_tool,
             supported_actions=["query", "compare"],
             supported_objects=["target_portfolio", "artifact"],
             produced_outputs=["target_portfolio", "target_portfolio_ref"],
@@ -342,7 +323,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"current_portfolio": {"type": "object"}, "target_portfolio": {"type": "object"}}, required=["current_portfolio", "target_portfolio"]),
             output_schema=_result_schema(),
-            execution_handler=compare_portfolios_adapter,
+            execution_handler=execute_compare_portfolios_tool,
             supported_actions=["compare", "analyze", "explain"],
             supported_objects=["current_portfolio", "target_portfolio"],
             produced_outputs=["portfolio_comparison", "current_vs_target", "added_stocks", "removed_stocks", "increased_stocks", "decreased_stocks", "cash_difference", "risk_before_after", "not_executed"],
@@ -363,7 +344,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"stock_code": {"type": "string"}, "top_k": {"type": "integer"}, "model_name": {"type": "string"}}),
             output_schema=_result_schema(),
-            execution_handler=_ranking_handler,
+            execution_handler=execute_market_ranking_tool,
             supported_actions=["query", "construct_recommendation", "explain"],
             supported_objects=["market_evidence", "candidate_stocks"],
             produced_outputs=["candidate_stocks", "market_evidence", "reasons", "limitations"],
@@ -381,7 +362,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"user_id": {"type": "string"}, "stock_code": {"type": "string"}, "top_k": {"type": "integer"}}, required=["stock_code"]),
             output_schema=_result_schema(),
-            execution_handler=_stock_analysis_handler,
+            execution_handler=execute_market_stock_analysis_tool,
             supported_actions=["analyze", "explain"],
             supported_objects=["stock", "market_evidence"],
             produced_outputs=["stock_analysis", "market_evidence", "evidence", "reasons", "limitations"],
@@ -399,7 +380,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"user_id": {"type": "string"}, "stock_query": {"type": "string"}, "stock_code": {"type": "string"}}),
             output_schema=_result_schema(),
-            execution_handler=market_lookup_stock_adapter,
+            execution_handler=execute_market_stock_lookup_tool,
             supported_actions=["query", "analyze", "explain"],
             supported_objects=["stock", "market_evidence"],
             produced_outputs=["stock_lookup", "market_evidence", "evidence", "reasons", "limitations"],
@@ -417,7 +398,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"user_id": {"type": "string"}, "stock_codes": {"type": "array"}, "stock_code": {"type": "string"}, "top_k": {"type": "integer"}}),
             output_schema=_result_schema(),
-            execution_handler=market_compare_stocks_adapter,
+            execution_handler=execute_market_stock_comparison_tool,
             supported_actions=["compare", "analyze", "explain"],
             supported_objects=["stock", "market_evidence"],
             produced_outputs=["stock_comparison", "market_evidence", "evidence", "reasons", "limitations"],
@@ -435,7 +416,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"user_id": {"type": "string"}, "sort_by": {"type": "string"}}),
             output_schema=_result_schema(),
-            execution_handler=market_signal_summary_adapter,
+            execution_handler=execute_market_signal_summary_tool,
             supported_actions=["query", "explain"],
             supported_objects=["market_evidence", "candidate_stocks"],
             produced_outputs=["candidate_stocks", "market_evidence", "signal_summary", "reasons", "limitations"],
@@ -453,7 +434,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"stock_code": {"type": "string"}, "as_of_date": {"type": "string"}, "limit": {"type": "integer"}, "top_k": {"type": "integer"}}),
             output_schema=_result_schema(),
-            execution_handler=_stock_news_handler,
+            execution_handler=execute_evidence_news_search_tool,
             supported_actions=["query", "retrieve_evidence", "explain"],
             supported_objects=["stock", "news_evidence", "market_evidence"],
             produced_outputs=["news_events", "evidence", "market_evidence", "sources", "reasons", "limitations"],
@@ -471,7 +452,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"stock_code": {"type": "string"}, "query": {"type": "string"}, "top_k": {"type": "integer"}}),
             output_schema=_result_schema(),
-            execution_handler=_stock_rag_handler,
+            execution_handler=execute_evidence_rag_search_tool,
             supported_actions=["query", "retrieve_evidence", "explain"],
             supported_objects=["stock", "rag_evidence", "market_evidence"],
             produced_outputs=["rag_contexts", "evidence", "market_evidence", "sources", "limitations"],
@@ -489,7 +470,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"stock_code": {"type": "string"}, "query": {"type": "string"}, "as_of_date": {"type": "string"}, "top_k": {"type": "integer"}}),
             output_schema=_result_schema(),
-            execution_handler=evidence_get_stock_evidence_adapter,
+            execution_handler=execute_stock_evidence_tool,
             supported_actions=["query", "retrieve_evidence", "explain"],
             supported_objects=["stock", "market_evidence"],
             produced_outputs=["evidence", "market_evidence", "sources", "reasons", "limitations"],
@@ -507,7 +488,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"query": {"type": "string"}, "stock_codes": {"type": "array"}, "stock_code": {"type": "string"}, "as_of_date": {"type": "string"}, "top_k": {"type": "integer"}}),
             output_schema=_result_schema(),
-            execution_handler=evidence_get_market_evidence_adapter,
+            execution_handler=execute_market_evidence_tool,
             supported_actions=["query", "retrieve_evidence", "explain"],
             supported_objects=["market_evidence"],
             produced_outputs=["evidence", "market_evidence", "sources", "reasons", "limitations"],
@@ -526,7 +507,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"mcp_tool_name": {"type": "string"}, "tool_name": {"type": "string"}, "arguments": {"type": "object"}}, required=["mcp_tool_name"]),
             output_schema=_result_schema(),
-            execution_handler=evidence_mcp_readonly_adapter,
+            execution_handler=execute_mcp_readonly_evidence_tool,
             supported_actions=["query", "retrieve_evidence"],
             supported_objects=["mcp_evidence", "market_evidence"],
             produced_outputs=["market_evidence", "evidence", "mcp_sources", "sources", "limitations"],
@@ -547,7 +528,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema(),
             output_schema=_result_schema(),
-            execution_handler=scheduler_status_adapter,
+            execution_handler=execute_scheduler_status_query_tool,
             supported_actions=["system_control", "query"],
             supported_objects=["scheduler"],
             produced_outputs=["scheduler_status"],
@@ -568,7 +549,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema(),
             output_schema=_result_schema(),
-            execution_handler=report_list_latest_adapter,
+            execution_handler=execute_latest_report_list_tool,
             supported_actions=["query", "explain"],
             supported_objects=["report"],
             produced_outputs=["report_summary"],
@@ -596,7 +577,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
                 }
             ),
             output_schema=_result_schema(),
-            execution_handler=memory_search_adapter,
+            execution_handler=execute_memory_search_tool,
             supported_actions=["query", "retrieve_context"],
             supported_objects=["memory", "user_context"],
             produced_outputs=["memory_context", "user_preferences", "evidence"],
@@ -618,7 +599,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"user_id": {"type": "string"}}),
             output_schema=_result_schema(),
-            execution_handler=memory_get_summary_adapter,
+            execution_handler=execute_memory_summary_tool,
             supported_actions=["query", "system_control"],
             supported_objects=["memory", "system"],
             produced_outputs=["memory_health", "memory_context"],
@@ -639,7 +620,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             ),
             input_schema=_schema({"user_id": {"type": "string"}}),
             output_schema=_result_schema(),
-            execution_handler=user_profile_get_adapter,
+            execution_handler=execute_user_profile_query_tool,
             supported_actions=["query", "analyze"],
             supported_objects=["user_profile", "constraints"],
             produced_outputs=["user_profile", "risk_assessment", "investment_goal", "constraints"],
@@ -670,7 +651,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
                 required=["code"],
             ),
             output_schema=_result_schema(),
-            execution_handler=python_sandbox_analysis_adapter,
+            execution_handler=execute_python_sandbox_analysis_tool,
             supported_actions=["analyze", "calculate"],
             supported_objects=["snapshot", "system"],
             produced_outputs=["sandbox_result", "calculation", "warnings"],
@@ -699,7 +680,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
                 required=["mcp_tool_name"],
             ),
             output_schema=_result_schema(),
-            execution_handler=evidence_mcp_readonly_adapter,
+            execution_handler=execute_mcp_readonly_evidence_tool,
             supported_actions=["query", "retrieve_evidence"],
             supported_objects=["mcp_evidence", "market_evidence"],
             produced_outputs=["market_evidence", "evidence", "mcp_sources", "limitations"],
@@ -728,7 +709,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
                 required=["stock_code"],
             ),
             output_schema=_result_schema(),
-            execution_handler=portfolio_recommend_position_adapter,
+            execution_handler=execute_portfolio_position_recommendation_tool,
             supported_actions=["recommend_position", "construct_recommendation"],
             supported_objects=["current_portfolio", "stock"],
             produced_outputs=["candidate_stocks", "target_weights", "current_vs_target", "risk_notes", "assumptions", "not_executed"],
@@ -757,7 +738,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
                 required=["stock_code"],
             ),
             output_schema=_result_schema(),
-            execution_handler=portfolio_recommend_replacement_adapter,
+            execution_handler=execute_portfolio_replacement_recommendation_tool,
             supported_actions=["recommend_replacement", "construct_recommendation"],
             supported_objects=["current_portfolio", "stock"],
             produced_outputs=["source_stock", "replacement_candidates", "score_comparison", "risk_comparison", "not_executed"],
@@ -940,7 +921,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
                 }
             ),
             output_schema=_result_schema(["strategy_conversation_context"]),
-            execution_handler=strategy_get_context_adapter,
+            execution_handler=execute_strategy_context_tool,
             supported_actions=["query"],
             supported_objects=["strategy", "paper_account", "conversation"],
             produced_outputs=["strategy_conversation_context"],
@@ -966,7 +947,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
                 }
             ),
             output_schema=_result_schema(["proposal", "versions"]),
-            execution_handler=strategy_get_active_proposal_adapter,
+            execution_handler=execute_active_strategy_proposal_tool,
             supported_actions=["query"],
             supported_objects=["strategy_proposal"],
             produced_outputs=["strategy_proposal", "strategy_proposal_versions"],
@@ -998,7 +979,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
                 required=["user_id"],
             ),
             output_schema=_result_schema(["strategy_audit_trace"]),
-            execution_handler=strategy_get_audit_trace_adapter,
+            execution_handler=execute_strategy_audit_trace_tool,
             supported_actions=["query_audit"],
             supported_objects=[
                 "strategy_proposal",

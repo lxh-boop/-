@@ -7,7 +7,9 @@ import pandas as pd
 from agent.capability_index import build_trusted_capability_index
 from agent.tool_engine import AGENT_READ, OP_READ, execute_tool, get_tool_registry_v2
 from agent.tools import market_analysis_adapters
-from agent.tools.position_recommendation_tool import recommend_position_weight
+from application.use_cases.position_recommendation import (
+    recommend_position_weight,
+)
 from agent_control_center_utils import write_agent_fixture
 from app.classic_services import format_classic_ranking_for_display, load_classic_ranking_with_ai_adjustment
 
@@ -30,11 +32,11 @@ def test_p2a_market_tools_registered_with_legacy_aliases() -> None:
         for alias in aliases:
             assert registry.get(alias).name == canonical
 
-    assert callable(market_analysis_adapters.MarketGetRankingAdapter)
-    assert callable(market_analysis_adapters.MarketAnalyzeStockAdapter)
-    assert callable(market_analysis_adapters.MarketLookupStockAdapter)
-    assert callable(market_analysis_adapters.MarketCompareStocksAdapter)
-    assert callable(market_analysis_adapters.MarketSignalSummaryAdapter)
+    assert callable(market_analysis_adapters.execute_market_ranking_tool)
+    assert callable(market_analysis_adapters.execute_market_stock_analysis_tool)
+    assert callable(market_analysis_adapters.execute_market_stock_lookup_tool)
+    assert callable(market_analysis_adapters.execute_market_stock_comparison_tool)
+    assert callable(market_analysis_adapters.execute_market_signal_summary_tool)
 
 
 def test_p2a_ranking_alias_uses_v2_executor_and_artifact(tmp_path: Path) -> None:

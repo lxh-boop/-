@@ -6,8 +6,8 @@ from typing import Any
 from database.repositories import NewsRepository as DbNewsRepository
 
 from agent.mcp.registry_bridge import is_mcp_tool_name
-from agent.tools._common import first_present, latest_trade_date, normalize_stock_code
-from agent.tools.tool_schemas import ToolPermission, ToolResult
+from application.contracts import BusinessResult
+from application.use_cases.common import first_present, latest_trade_date, normalize_stock_code
 
 
 class SourceFormatter:
@@ -123,7 +123,7 @@ class McpEvidenceClient:
         arguments: dict[str, Any] | None = None,
         *,
         context: dict[str, Any] | None = None,
-    ) -> ToolResult:
+    ) -> BusinessResult:
         from agent.services.mcp_readonly_client import mcp_readonly_client
 
         return mcp_readonly_client.invoke(tool_name, dict(arguments or {}), context=context)
@@ -432,10 +432,10 @@ class EvidenceService:
         arguments: dict[str, Any] | None = None,
         *,
         context: dict[str, Any] | None = None,
-    ) -> ToolResult:
+    ) -> BusinessResult:
         name = str(tool_name or "")
         if not is_mcp_tool_name(name):
-            return ToolResult(
+            return BusinessResult(
                 success=False,
                 message="MCP evidence tool name is invalid.",
                 data={
@@ -450,8 +450,6 @@ class EvidenceService:
                     "mutation_performed": False,
                 },
                 errors=["not_mcp_tool"],
-                permission=ToolPermission.READ,
-                tool_name="evidence.mcp_readonly_evidence",
             )
         result = self.mcp_client.invoke(name, dict(arguments or {}), context=context)
         raw_data = dict(result.data or {})
@@ -477,17 +475,13 @@ class EvidenceService:
             "mutation_performed": False,
             "mcp_canonical_tool": name,
         }
-        return ToolResult(
+        return BusinessResult(
             success=bool(result.success),
             message=str(result.message or ""),
             data=data,
             warnings=list(result.warnings or []),
             errors=list(result.errors or []),
-            permission=ToolPermission.READ,
-            tool_name="evidence.mcp_readonly_evidence",
-            disclaimer=result.disclaimer,
             status=result.status,
-            requires_confirmation=False,
         )
 
 

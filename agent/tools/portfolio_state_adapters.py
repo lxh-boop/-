@@ -1,3 +1,5 @@
+"""Agent-only portfolio-state tools backed by the portfolio service."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -22,7 +24,10 @@ def _db_path(context: dict[str, Any]) -> str | Path | None:
     return context.get("db_path")
 
 
-def portfolio_get_state_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_portfolio_state_query_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     data = portfolio_service.get_portfolio_state(
         str(_context_value(args, context, "user_id", "default")),
         output_dir=_output_dir(context),
@@ -38,7 +43,10 @@ def portfolio_get_state_adapter(args: dict[str, Any], context: dict[str, Any]) -
     }
 
 
-def portfolio_get_account_summary_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_portfolio_account_summary_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     data = portfolio_service.get_account_summary(
         str(_context_value(args, context, "user_id", "default")),
         output_dir=_output_dir(context),
@@ -54,7 +62,10 @@ def portfolio_get_account_summary_adapter(args: dict[str, Any], context: dict[st
     }
 
 
-def portfolio_get_positions_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_portfolio_positions_query_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     data = portfolio_service.get_current_positions(
         str(_context_value(args, context, "user_id", "default")),
         output_dir=_output_dir(context),
@@ -70,7 +81,10 @@ def portfolio_get_positions_adapter(args: dict[str, Any], context: dict[str, Any
     }
 
 
-def portfolio_get_orders_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_portfolio_orders_query_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     data = portfolio_service.get_current_orders(
         str(_context_value(args, context, "user_id", "default")),
         output_dir=_output_dir(context),
@@ -86,7 +100,9 @@ def portfolio_get_orders_adapter(args: dict[str, Any], context: dict[str, Any]) 
     }
 
 
-PortfolioGetStateAdapter = portfolio_get_state_adapter
-PortfolioGetAccountSummaryAdapter = portfolio_get_account_summary_adapter
-PortfolioGetPositionsAdapter = portfolio_get_positions_adapter
-PortfolioGetOrdersAdapter = portfolio_get_orders_adapter
+__all__ = [
+    "execute_portfolio_account_summary_tool",
+    "execute_portfolio_orders_query_tool",
+    "execute_portfolio_positions_query_tool",
+    "execute_portfolio_state_query_tool",
+]

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agent.tools.stock_analysis_tool import analyze_stock
+from application.use_cases.stock_analysis import analyze_stock
 from agent_control_center_utils import write_agent_fixture
 
 

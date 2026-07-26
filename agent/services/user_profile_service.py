@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from agent.tools.user_profile_tool import query_user_profile
+from application.use_cases.system_queries import read_user_profile
 
 
 class UserProfileService:
@@ -16,7 +16,7 @@ class UserProfileService:
         output_dir: str | Path = "outputs",
         db_path: str | Path | None = None,
     ) -> dict[str, Any]:
-        result = query_user_profile(
+        result = read_user_profile(
             user_id,
             db_path=db_path,
             output_dir=output_dir,

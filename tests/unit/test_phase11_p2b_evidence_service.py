@@ -8,8 +8,6 @@ from agent.mcp.config import build_mcp_context_from_local_config
 from agent.mcp.registry_bridge import default_example_tool_name
 from agent.tool_engine import AGENT_READ, OP_READ, execute_tool, get_tool_registry_v2
 from agent.tools import evidence_adapters
-from agent.tools.stock_news_tool import query_stock_news
-from agent.tools.stock_rag_tool import query_stock_rag
 from database.repositories import NewsRepository
 
 
@@ -70,18 +68,17 @@ def test_p2b_evidence_tools_registered_with_legacy_aliases() -> None:
         for alias in aliases:
             assert registry.get(alias).name == canonical
 
-    assert callable(evidence_adapters.EvidenceSearchNewsAdapter)
-    assert callable(evidence_adapters.EvidenceSearchRagAdapter)
-    assert callable(evidence_adapters.EvidenceGetStockEvidenceAdapter)
-    assert callable(evidence_adapters.EvidenceGetMarketEvidenceAdapter)
-    assert callable(evidence_adapters.EvidenceMcpReadonlyAdapter)
+    assert callable(evidence_adapters.execute_evidence_news_search_tool)
+    assert callable(evidence_adapters.execute_evidence_rag_search_tool)
+    assert callable(evidence_adapters.execute_stock_evidence_tool)
+    assert callable(evidence_adapters.execute_market_evidence_tool)
+    assert callable(evidence_adapters.execute_mcp_readonly_evidence_tool)
 
 
-def test_p2b_stock_news_legacy_wrapper_and_v2_artifact(tmp_path: Path) -> None:
+def test_p2b_stock_news_v2_artifact(tmp_path: Path) -> None:
     db_path = tmp_path / "agent_quant.db"
     _write_news_fixture(db_path)
 
-    legacy = query_stock_news("000001", as_of_date="2026-06-23", db_path=db_path)
     migrated = execute_tool(
         "stock_news",
         {"stock_code": "000001", "as_of_date": "2026-06-23", "limit": 5},
@@ -89,8 +86,6 @@ def test_p2b_stock_news_legacy_wrapper_and_v2_artifact(tmp_path: Path) -> None:
         agent_type=AGENT_READ,
     )
 
-    assert legacy["status"] == "success"
-    assert legacy["events"][0]["news_id"] == "news_1"
     assert migrated.success is True
     assert migrated.metadata["canonical_tool_name"] == "evidence.search_news"
     assert migrated.artifact_id
@@ -99,7 +94,7 @@ def test_p2b_stock_news_legacy_wrapper_and_v2_artifact(tmp_path: Path) -> None:
     assert migrated.data["evidence_count"] == 1
 
 
-def test_p2b_stock_rag_legacy_wrapper_and_empty_safe_return(monkeypatch, tmp_path: Path) -> None:
+def test_p2b_stock_rag_v2_and_empty_safe_return(monkeypatch, tmp_path: Path) -> None:
     def fake_retrieve_stock_context(code: str, query: str, top_k: int = 5, force_rebuild: bool = False):
         return pd.DataFrame(
             [
@@ -117,7 +112,6 @@ def test_p2b_stock_rag_legacy_wrapper_and_empty_safe_return(monkeypatch, tmp_pat
 
     monkeypatch.setattr("rag_retriever.retrieve_stock_context", fake_retrieve_stock_context)
 
-    legacy = query_stock_rag("000001", query="risk", top_k=1, output_dir=tmp_path)
     migrated = execute_tool(
         "rag_search",
         {"stock_code": "000001", "query": "risk", "top_k": 1},
@@ -131,8 +125,6 @@ def test_p2b_stock_rag_legacy_wrapper_and_empty_safe_return(monkeypatch, tmp_pat
         agent_type=AGENT_READ,
     )
 
-    assert legacy["status"] == "success"
-    assert legacy["chunks"][0]["chunk_id"] == "chunk_1"
     assert migrated.success is True
     assert migrated.metadata["canonical_tool_name"] == "evidence.search_rag"
     assert migrated.data["sources"][0]["source_type"] == "rag_chunk"

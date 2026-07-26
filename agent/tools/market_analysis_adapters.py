@@ -1,3 +1,5 @@
+"""Agent-only market tools that adapt arguments to analysis services."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -23,13 +25,6 @@ def _db_path(context: dict[str, Any]) -> str | Path | None:
     return context.get("db_path")
 
 
-def _int_value(value: Any, default: int) -> int:
-    return resolve_requested_top_k(
-        task_top_k=value,
-        tool_default_top_k=default,
-    )
-
-
 def _strip_dataframe(result: dict[str, Any]) -> dict[str, Any]:
     payload = dict(result)
     data = dict(payload.get("data") or {})
@@ -38,7 +33,10 @@ def _strip_dataframe(result: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def market_get_ranking_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_market_ranking_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     return market_analysis_service.get_ranking(
         stock_code=args.get("stock_code"),
         top_k=resolve_requested_top_k(
@@ -52,7 +50,10 @@ def market_get_ranking_adapter(args: dict[str, Any], context: dict[str, Any]) ->
     )
 
 
-def market_analyze_stock_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_market_stock_analysis_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     return market_analysis_service.analyze_stock(
         user_id=str(_context_value(args, context, "user_id", "default")),
         stock_code=str(args.get("stock_code") or ""),
@@ -70,7 +71,10 @@ def market_analyze_stock_adapter(args: dict[str, Any], context: dict[str, Any]) 
     )
 
 
-def market_lookup_stock_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_market_stock_lookup_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     return market_analysis_service.lookup_stock(
         str(args.get("stock_query") or args.get("stock_code") or ""),
         user_id=str(_context_value(args, context, "user_id", "default")),
@@ -78,7 +82,10 @@ def market_lookup_stock_adapter(args: dict[str, Any], context: dict[str, Any]) -
     )
 
 
-def market_compare_stocks_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_market_stock_comparison_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     return market_analysis_service.compare_stocks(
         args.get("stock_codes") or args.get("stock_code") or [],
         user_id=str(_context_value(args, context, "user_id", "default")),
@@ -93,7 +100,10 @@ def market_compare_stocks_adapter(args: dict[str, Any], context: dict[str, Any])
     )
 
 
-def market_signal_summary_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_market_signal_summary_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     return _strip_dataframe(
         market_analysis_service.get_signal_summary(
             output_dir=_output_dir(context),
@@ -104,8 +114,10 @@ def market_signal_summary_adapter(args: dict[str, Any], context: dict[str, Any])
     )
 
 
-MarketGetRankingAdapter = market_get_ranking_adapter
-MarketAnalyzeStockAdapter = market_analyze_stock_adapter
-MarketLookupStockAdapter = market_lookup_stock_adapter
-MarketCompareStocksAdapter = market_compare_stocks_adapter
-MarketSignalSummaryAdapter = market_signal_summary_adapter
+__all__ = [
+    "execute_market_ranking_tool",
+    "execute_market_signal_summary_tool",
+    "execute_market_stock_analysis_tool",
+    "execute_market_stock_comparison_tool",
+    "execute_market_stock_lookup_tool",
+]

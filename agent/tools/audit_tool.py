@@ -8,7 +8,7 @@ from uuid import uuid4
 from database.schemas import json_dumps
 from database.sqlite_store import SQLiteStore
 
-from agent.tools._common import now_text, to_serializable
+from application.use_cases.common import now_text, to_serializable
 
 
 def _audit_dir(output_dir: str | Path, user_id: str) -> Path:
