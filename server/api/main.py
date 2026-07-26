@@ -30,6 +30,7 @@ from server.api.routers.web_backtests import router as web_backtests_router
 from server.api.routers.web_news import router as web_news_router
 from server.api.routers.web_settings import router as web_settings_router
 from server.api.routers.web_monitor import router as web_monitor_router
+from server.api.routers.web_paper_trading import router as web_paper_trading_router
 
 
 def create_app() -> FastAPI:
@@ -76,6 +77,7 @@ def create_app() -> FastAPI:
     app.include_router(web_news_router)
     app.include_router(web_settings_router)
     app.include_router(web_monitor_router)
+    app.include_router(web_paper_trading_router)
     return app
 
 

@@ -130,6 +130,17 @@ def execute_task(
         emit("stage", {"progress": 0.95, "message": "模拟盘更新完成，正在刷新快照"})
         return result
 
+    if task_type == "paper-trading.backfill":
+        from application.web_paper_trading_service import web_paper_trading_service
+
+        emit("stage", {"progress": 0.05, "message": "正在重新校验回填预案"})
+        if is_cancelled():
+            raise InterruptedError("Task cancellation requested")
+        emit("stage", {"progress": 0.12, "message": "正在执行历史模拟盘回填"})
+        result = web_paper_trading_service.commit_proposal(allow_long_running=True, **kwargs)
+        emit("stage", {"progress": 0.97, "message": "回填完成，正在刷新模拟盘快照"})
+        return result
+
     if task_type == "paper-profile.ai-news-adjustment":
         from application.paper_profile_service import run_ai_news_adjustment_from_latest
 

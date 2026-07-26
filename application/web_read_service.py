@@ -91,6 +91,14 @@ class WebReadApplicationService:
         if frame is None or getattr(frame, "empty", True):
             return {"records": [], "total": 0, "offset": int(offset), "limit": int(limit)}
         data = frame.copy()
+        if "pred_score" not in data.columns:
+            data["pred_score"] = None
+        for source_column in ("raw_score", "model_score", "prediction_score", "pred_5d_ret"):
+            if source_column in data.columns:
+                data["pred_score"] = data["pred_score"].where(
+                    data["pred_score"].notna(),
+                    data[source_column],
+                )
         if "rank" in data.columns:
             data = data.sort_values("rank", ascending=True)
         elif "score" in data.columns:

@@ -14,6 +14,8 @@ export interface RankingRecord {
   rank?: number
   score?: number
   pred_score?: number
+  raw_score?: number
+  pred_5d_ret?: number
   up_prob?: number
   date?: string
   prediction_date?: string

@@ -32,11 +32,11 @@ export const useTaskStore = create<TaskState>()(
     }),
     {
       name: 'stock-stage6-task',
+      // Only task recovery metadata is persisted. Business results, event payloads,
+      // balances and positions must never be written to browser localStorage.
       partialize: (state) => ({
         activeTaskId: state.activeTaskId,
         lastSequence: state.lastSequence,
-        events: state.events,
-        task: state.task,
       }),
     },
   ),

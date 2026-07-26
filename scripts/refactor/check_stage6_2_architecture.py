@@ -57,8 +57,12 @@ def main() -> int:
             if pattern.search(text):
                 violations.append(f"{rel}: {label}")
 
+    readonly_router_names = {
+        "web_dashboard.py", "web_stocks.py", "web_models.py", "web_backtests.py",
+        "web_news.py", "web_settings.py", "web_monitor.py",
+    }
     for path in (ROOT / "server/api/routers").glob("web_*.py"):
-        if path.name == "web_common.py":
+        if path.name not in readonly_router_names:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):

@@ -10,6 +10,7 @@ import { BacktestPage } from '../pages/dashboard/BacktestPage'
 import { NewsPage } from '../pages/dashboard/NewsPage'
 import { SettingsPage } from '../pages/dashboard/SettingsPage'
 import { SystemMonitorPage } from '../pages/monitor/SystemMonitorPage'
+import { PaperTradingPage } from '../pages/paper/PaperTradingPage'
 
 export function AppRoutes() {
   return <Routes>
@@ -22,6 +23,7 @@ export function AppRoutes() {
     <Route path="/backtests" element={<BacktestPage />} />
     <Route path="/news" element={<NewsPage />} />
     <Route path="/settings" element={<SettingsPage />} />
+    <Route path="/paper-trading" element={<PaperTradingPage />} />
     <Route path="/monitor" element={<SystemMonitorPage />} />
     <Route path="/platform" element={<HealthPage />} />
     <Route path="/runtime" element={<RuntimePage />} />

@@ -21,6 +21,7 @@ ALLOWED_TASK_TYPES = {
     "dashboard.rolling_update",
     "dashboard.backtest",
     "paper-trading.update",
+    "paper-trading.backfill",
     "paper-profile.ai-news-adjustment",
     "paper-profile.scheduler-manual",
 }

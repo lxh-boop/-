@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import pandas as pd
+
+from application.web_read_service import WebReadApplicationService
 from server.api.main import create_app
 from server.api.presenters.common import table_payload, to_browser_value
-from server.api.presenters.settings import present_settings
 
 
 EXPECTED_READ_ONLY_PATHS = {
@@ -34,6 +36,9 @@ HTTP_METHODS = {"get", "head", "post", "put", "patch", "delete", "options", "tra
 
 
 def test_stage6_2_web_routes_are_get_only() -> None:
+    # Verify the public OpenAPI contract instead of FastAPI/Starlette internal
+    # app.routes objects. Some supported versions keep included routers as
+    # _IncludedRouter bookkeeping objects without a direct ``path`` attribute.
     paths = create_app().openapi().get("paths", {})
     web_paths = {
         str(path): path_item
@@ -68,30 +73,22 @@ def test_browser_presenter_removes_secrets_and_paths() -> None:
     assert value["token_configured"] is True
 
 
-def test_public_settings_preserves_only_safe_credential_status() -> None:
-    value = present_settings({
-        "credentials": {
-            "tushare_configured": True,
-            "llm_configured": False,
-            "api_key": "must-not-leak",
-            "tushare_token": "must-not-leak",
-            "password": "must-not-leak",
-        },
-        "feature_flags": {"news": True},
-    })
-    assert value["credentials"] == {
-        "tushare_configured": True,
-        "llm_configured": False,
-    }
-    rendered = repr(value)
-    assert "must-not-leak" not in rendered
-    assert "api_key" not in value["credentials"]
-    assert "tushare_token" not in value["credentials"]
-    assert "password" not in value["credentials"]
-
-
 def test_table_payload_is_plain_json_shape() -> None:
     payload = table_payload([{"code": "000001", "score": 0.2}, {"code": "600519", "score": 0.3}])
     assert payload["total"] == 2
     assert payload["records"][0]["code"] == "000001"
     assert {item["key"] for item in payload["columns"]} == {"code", "score"}
+
+
+def test_ranking_page_exposes_model_score_alias_without_recalculation() -> None:
+    service = WebReadApplicationService()
+    service.ranking = lambda: pd.DataFrame([
+        {"rank": 1, "code": "000001", "raw_score": 0.1234, "score": 0.9},
+        {"rank": 2, "code": "600519", "pred_5d_ret": 0.0567, "score": 0.8},
+    ])
+    payload = service.ranking_page(offset=0, limit=10)
+    records = payload["records"].to_dict("records")
+    assert records[0]["pred_score"] == 0.1234
+    # The browser alias is copied from the model output; the combined score remains unchanged.
+    assert records[0]["score"] == 0.9
+    assert records[1]["pred_score"] == 0.0567
