@@ -14,12 +14,13 @@ from .capability_contracts import AgentCapabilityCard, WorkerCapability
 
 
 COORDINATOR = "COORDINATOR"
-EVIDENCE_RETRIEVER = "EVIDENCE_RETRIEVER"
+EVIDENCE_RESEARCHER = "EVIDENCE_RESEARCHER"
+MARKET_ANALYST = "MARKET_ANALYST"
 PORTFOLIO_ANALYST = "PORTFOLIO_ANALYST"
 GRAPH_IMPACT_ANALYST = "GRAPH_IMPACT_ANALYST"
-RISK_ANALYST = "RISK_ANALYST"
-STRATEGY_GUARD = "STRATEGY_GUARD"
-REPORT_WRITER = "REPORT_WRITER"
+PORTFOLIO_RISK_ANALYST = "PORTFOLIO_RISK_ANALYST"
+STRATEGY_PROPOSAL_BUILDER = "STRATEGY_PROPOSAL_BUILDER"
+REPORT_COMPOSER = "REPORT_COMPOSER"
 SYSTEM_DIAGNOSTIC = "SYSTEM_DIAGNOSTIC"
 
 
@@ -79,35 +80,34 @@ def _default_cards() -> list[AgentCapabilityCard]:
 
     return [
         AgentCapabilityCard(
-            agent_id=EVIDENCE_RETRIEVER,
-            role=EVIDENCE_RETRIEVER,
-            description="检索和分析金融证据。",
+            agent_id=EVIDENCE_RESEARCHER,
+            role=EVIDENCE_RESEARCHER,
+            description="围绕已识别金融对象研究、分析并登记证据。",
             capabilities=[
                 _capability(
-                    "evidence.retrieve",
-                    "retrieve_evidence",
-                    "检索与目标相关的新闻、公告、研报和知识库证据。",
-                    "需要为已识别金融对象补充事实证据时使用。",
+                    "evidence.research",
+                    "research_evidence",
+                    "研究已识别金融对象的新闻、公告、研报和知识库证据，可按任务需要分析现有证据、检索新证据或登记衍生图谱引用。",
+                    "需要为一个或多个已识别金融对象建立可追踪证据包时使用。",
                     not_for="不负责账户、持仓、组合风险或最终报告。",
                     outputs=("evidence_result", "graph_patch"),
                     side_effect_scope="derived_graph",
                 ),
+            ],
+        ),
+        AgentCapabilityCard(
+            agent_id=MARKET_ANALYST,
+            role=MARKET_ANALYST,
+            description="读取本地市场排名、证券标识和信号摘要并形成分析观察。",
+            capabilities=[
                 _capability(
-                    "evidence.analyze_entity",
-                    "analyze_entity_evidence",
-                    "分析已识别金融对象的证据内容和来源覆盖情况。",
-                    "请求重点是一个或多个金融对象的现有证据时使用。",
-                    not_for="不负责组合比较或风险比较。",
-                    outputs=("evidence_result",),
-                ),
-                _capability(
-                    "evidence.ingest",
-                    "ingest_evidence",
-                    "检索并登记可复用的结构化证据结果。",
-                    "证据需要进入后续影响分析上下文时使用。",
-                    not_for="不修改账户、订单、持仓或策略。",
-                    outputs=("evidence_result", "graph_patch"),
-                    side_effect_scope="derived_graph",
+                    "market.stock_analysis",
+                    "analyze_market_stock",
+                    "分析或比较明确证券对象的本地排名、标识和模型信号；多个对象属于同一市场分析能力，不拆成重复 Worker。",
+                    "用户需要单只或多只证券的只读市场分析、排名定位或模型信号比较时使用。",
+                    not_for="不检索新闻或 RAG 证据，不读取个人账户，不构造或执行交易。",
+                    accepted_dependencies=("evidence_result",),
+                    outputs=("market_analysis",),
                 ),
             ],
         ),
@@ -117,20 +117,11 @@ def _default_cards() -> list[AgentCapabilityCard]:
             description="读取并分析用户当前模拟盘组合。",
             capabilities=[
                 _capability(
-                    "portfolio.load_snapshot",
-                    "load_portfolio_snapshot",
-                    "读取当前账户、现金和持仓并形成权威组合快照。",
-                    "用户请求涉及自己的账户、持仓、现金、仓位或模拟盘时使用。",
-                    not_for="不用于一般市场分析。",
-                    outputs=("portfolio_snapshot",),
-                    side_effect_scope="derived_graph",
-                ),
-                _capability(
-                    "portfolio.analyze",
+                    "portfolio.analysis",
                     "analyze_portfolio",
-                    "读取当前组合并返回持仓结构摘要。",
-                    "用户要求查看或分析自己的当前组合结构时使用。",
-                    not_for="当前不提供候选组合构造或两个方案比较。",
+                    "读取当前账户、现金和持仓，形成权威图谱快照并返回持仓结构摘要。",
+                    "用户请求涉及自己的账户、持仓、现金、仓位或当前组合结构时使用。",
+                    not_for="不用于一般市场分析。",
                     outputs=("portfolio_snapshot", "portfolio_analysis"),
                     side_effect_scope="derived_graph",
                 ),
@@ -142,8 +133,8 @@ def _default_cards() -> list[AgentCapabilityCard]:
             description="分析金融证据到用户持仓之间的可追踪关系。",
             capabilities=[
                 _capability(
-                    "graph.map_evidence_to_holdings",
-                    "map_evidence_to_holdings",
+                    "graph.impact_analysis",
+                    "analyze_graph_impact",
                     "把已验证证据映射到可能受影响的当前持仓。",
                     "已有证据结果和组合快照，需要分析持仓影响时使用。",
                     not_for="不自行检索证据，也不自行读取账户。",
@@ -154,13 +145,13 @@ def _default_cards() -> list[AgentCapabilityCard]:
             ],
         ),
         AgentCapabilityCard(
-            agent_id=RISK_ANALYST,
-            role=RISK_ANALYST,
+            agent_id=PORTFOLIO_RISK_ANALYST,
+            role=PORTFOLIO_RISK_ANALYST,
             description="分析用户当前组合风险。",
             capabilities=[
                 _capability(
-                    "risk.analyze",
-                    "analyze_risk",
+                    "portfolio.risk_analysis",
+                    "analyze_portfolio_risk",
                     "分析当前组合的风险、集中度和风险等级。",
                     "已有组合快照且用户要求分析个人组合风险时使用。",
                     not_for="当前不提供候选方案前后风险比较。",
@@ -171,13 +162,13 @@ def _default_cards() -> list[AgentCapabilityCard]:
             ],
         ),
         AgentCapabilityCard(
-            agent_id=STRATEGY_GUARD,
-            role=STRATEGY_GUARD,
+            agent_id=STRATEGY_PROPOSAL_BUILDER,
+            role=STRATEGY_PROPOSAL_BUILDER,
             description="生成等待独立审批的策略 Proposal。",
             capabilities=[
                 _capability(
-                    "strategy.build_proposal",
-                    "build_proposal",
+                    "strategy.proposal",
+                    "build_strategy_proposal",
                     "根据上游专业结果生成等待审批的策略 Proposal。",
                     "proposal 模式需要形成可审查但未执行的方案时使用。",
                     not_for="不能审批、提交、启用策略或修改持仓。",
@@ -191,13 +182,13 @@ def _default_cards() -> list[AgentCapabilityCard]:
             ],
         ),
         AgentCapabilityCard(
-            agent_id=REPORT_WRITER,
-            role=REPORT_WRITER,
+            agent_id=REPORT_COMPOSER,
+            role=REPORT_COMPOSER,
             description="根据上游标准结果生成最终报告。",
             capabilities=[
                 _capability(
-                    "report.write",
-                    "write_report",
+                    "report.compose",
+                    "compose_report",
                     "把全部相关专业结果汇总为最终回答。",
                     "专业分析任务完成后需要生成用户可读报告时使用。",
                     not_for="不重新读取原始数据，不新增事实或业务结论。",
@@ -216,8 +207,8 @@ def _default_cards() -> list[AgentCapabilityCard]:
             description="检查当前金融图连接状态。",
             capabilities=[
                 _capability(
-                    "system.check_graph_connectivity",
-                    "diagnose_system",
+                    "system.graph_diagnostic",
+                    "diagnose_graph_system",
                     "检查当前金融图运行链路的连接状态。",
                     "用户明确询问金融图连接或可用状态时使用。",
                     not_for="不负责完整系统诊断、修复、配置修改或服务重启。",
@@ -247,6 +238,10 @@ class AgentDirectory:
             str, tuple[AgentCapabilityCard, WorkerCapability]
         ] = {}
         for card in selected_cards:
+            if len(card.capabilities) != 1:
+                raise ValueError(
+                    f"worker_card_requires_exactly_one_capability:{card.agent_id}"
+                )
             for capability in card.capabilities:
                 capability_id = str(capability.capability_id or "").strip()
                 if not capability_id:
@@ -343,11 +338,12 @@ __all__ = [
     "AgentDirectory",
     "ResolvedWorkerCapability",
     "COORDINATOR",
-    "EVIDENCE_RETRIEVER",
+    "EVIDENCE_RESEARCHER",
+    "MARKET_ANALYST",
     "PORTFOLIO_ANALYST",
     "GRAPH_IMPACT_ANALYST",
-    "RISK_ANALYST",
-    "STRATEGY_GUARD",
-    "REPORT_WRITER",
+    "PORTFOLIO_RISK_ANALYST",
+    "STRATEGY_PROPOSAL_BUILDER",
+    "REPORT_COMPOSER",
     "SYSTEM_DIAGNOSTIC",
 ]

@@ -145,7 +145,7 @@ def build_risk_tool_definitions(
             produced_outputs=["risk_analysis"],
             operation_type=OP_READ,
             allowed_agent_types=[AGENT_WORKER],
-            allowed_capability_ids=["risk.analyze"],
+            allowed_capability_ids=["portfolio.risk_analysis"],
             permission_scope=OP_READ,
             visibility=TOOL_VISIBILITY_WORKER_PRIVATE,
             idempotency="read_only",

@@ -6,10 +6,10 @@ import pytest
 
 from agent.collaboration.agent_directory import (
     AgentDirectory,
-    EVIDENCE_RETRIEVER,
+    EVIDENCE_RESEARCHER,
     GRAPH_IMPACT_ANALYST,
     PORTFOLIO_ANALYST,
-    REPORT_WRITER,
+    REPORT_COMPOSER,
 )
 from agent.collaboration.capability_contracts import (
     AgentCapabilityCard,
@@ -99,23 +99,23 @@ def _impact_plan() -> list[dict]:
     return [
         _row(
             "evidence",
-            "evidence.retrieve",
+            "evidence.research",
             outputs=("evidence_result",),
         ),
         _row(
             "portfolio",
-            "portfolio.load_snapshot",
+            "portfolio.analysis",
             outputs=("portfolio_snapshot",),
         ),
         _row(
             "impact",
-            "graph.map_evidence_to_holdings",
+            "graph.impact_analysis",
             dependencies=("evidence", "portfolio"),
             outputs=("impact_paths",),
         ),
         _row(
             "report",
-            "report.write",
+            "report.compose",
             dependencies=("impact",),
             outputs=("report_draft",),
         ),
@@ -175,16 +175,16 @@ def test_main_plans_capabilities_then_runtime_resolves_workers() -> None:
     tasks, metadata, service = _plan(_impact_plan())
 
     assert [task.capability_id for task in tasks] == [
-        "evidence.retrieve",
-        "portfolio.load_snapshot",
-        "graph.map_evidence_to_holdings",
-        "report.write",
+        "evidence.research",
+        "portfolio.analysis",
+        "graph.impact_analysis",
+        "report.compose",
     ]
     assert [task.assigned_agent for task in tasks] == [
-        EVIDENCE_RETRIEVER,
+        EVIDENCE_RESEARCHER,
         PORTFOLIO_ANALYST,
         GRAPH_IMPACT_ANALYST,
-        REPORT_WRITER,
+        REPORT_COMPOSER,
     ]
     assert metadata["selection_basis"] == "worker_capability"
     prompt_payload = json.loads(service.messages[1]["content"])
@@ -194,12 +194,27 @@ def test_main_plans_capabilities_then_runtime_resolves_workers() -> None:
     )
     assert '"agent_id"' not in encoded_catalog
     assert '"task_type"' not in encoded_catalog
-    assert EVIDENCE_RETRIEVER not in encoded_catalog
+    assert EVIDENCE_RESEARCHER not in encoded_catalog
+
+
+def test_worker_cards_have_one_normalized_capability_each() -> None:
+    directory = AgentDirectory()
+    cards = directory.list_cards()
+    capability_ids = [
+        capability.capability_id
+        for card in cards
+        for capability in card.capabilities
+    ]
+
+    assert len(cards) == 8
+    assert len(capability_ids) == 8
+    assert all(len(card.capabilities) == 1 for card in cards)
+    assert len(set(capability_ids)) == len(capability_ids)
 
 
 def test_main_plan_rejects_identity_fields_and_missing_outputs() -> None:
     identity_rows = _impact_plan()
-    identity_rows[0]["assigned_agent"] = EVIDENCE_RETRIEVER
+    identity_rows[0]["assigned_agent"] = EVIDENCE_RESEARCHER
     with pytest.raises(
         CoordinatorPlanningError,
         match="coordinator_plan_exposes_worker_identity",
@@ -219,8 +234,8 @@ def test_main_plan_rejects_identity_fields_and_missing_outputs() -> None:
 
 def test_proposal_mode_requires_and_resolves_proposal_capability() -> None:
     missing_proposal = [
-        _row("portfolio", "portfolio.analyze"),
-        _row("report", "report.write", dependencies=("portfolio",)),
+        _row("portfolio", "portfolio.analysis"),
+        _row("report", "report.compose", dependencies=("portfolio",)),
     ]
     with pytest.raises(
         CoordinatorPlanningError,
@@ -230,16 +245,16 @@ def test_proposal_mode_requires_and_resolves_proposal_capability() -> None:
 
     tasks, metadata, _ = _plan(
         [
-            _row("portfolio", "portfolio.analyze"),
+            _row("portfolio", "portfolio.analysis"),
             _row(
                 "proposal",
-                "strategy.build_proposal",
+                "strategy.proposal",
                 dependencies=("portfolio",),
                 outputs=("proposal",),
             ),
             _row(
                 "report",
-                "report.write",
+                "report.compose",
                 dependencies=("proposal",),
                 outputs=("report_draft",),
             ),
@@ -247,9 +262,9 @@ def test_proposal_mode_requires_and_resolves_proposal_capability() -> None:
         mode="proposal",
     )
     assert [task.capability_id for task in tasks] == [
-        "portfolio.analyze",
-        "strategy.build_proposal",
-        "report.write",
+        "portfolio.analysis",
+        "strategy.proposal",
+        "report.compose",
     ]
     assert metadata["required_plan_outputs"] == ["proposal", "report_draft"]
 
@@ -259,18 +274,18 @@ def test_portfolio_risk_uses_snapshot_output_dependency() -> None:
         [
             _row(
                 "portfolio",
-                "portfolio.load_snapshot",
+                "portfolio.analysis",
                 outputs=("portfolio_snapshot",),
             ),
             _row(
                 "risk",
-                "risk.analyze",
+                "portfolio.risk_analysis",
                 dependencies=("portfolio",),
                 outputs=("risk_analysis",),
             ),
             _row(
                 "report",
-                "report.write",
+                "report.compose",
                 dependencies=("risk",),
                 outputs=("report_draft",),
             ),
@@ -278,9 +293,9 @@ def test_portfolio_risk_uses_snapshot_output_dependency() -> None:
     )
 
     assert [task.capability_id for task in tasks] == [
-        "portfolio.load_snapshot",
-        "risk.analyze",
-        "report.write",
+        "portfolio.analysis",
+        "portfolio.risk_analysis",
+        "report.compose",
     ]
 
 

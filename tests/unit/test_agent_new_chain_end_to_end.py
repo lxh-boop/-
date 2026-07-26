@@ -41,7 +41,7 @@ class ChainLLM:
                     {
                         "task_id": "diagnostic",
                         "capability_id": (
-                            "system.check_graph_connectivity"
+                            "system.graph_diagnostic"
                         ),
                         "objective": "check graph connectivity",
                         "dependency_task_ids": [],
@@ -51,7 +51,7 @@ class ChainLLM:
                     },
                     {
                         "task_id": "report",
-                        "capability_id": "report.write",
+                        "capability_id": "report.compose",
                         "objective": "write the final report",
                         "dependency_task_ids": ["diagnostic"],
                         "required_outputs": ["report_draft"],
@@ -151,8 +151,8 @@ def test_main_capability_plan_executes_worker_private_tool_chain(
     assert public["execution_status"] == "completed"
     assert public["answer"] == "The financial graph is available."
     assert [task.capability_id for task in tasks] == [
-        "system.check_graph_connectivity",
-        "report.write",
+        "system.graph_diagnostic",
+        "report.compose",
     ]
     assert backend.check_connectivity.call_count == 1
     main_prompt = json.dumps(llm.calls[0]["messages"])

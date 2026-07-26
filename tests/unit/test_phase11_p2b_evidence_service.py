@@ -8,6 +8,7 @@ from agent.mcp.config import build_mcp_context_from_local_config
 from agent.mcp.registry_bridge import default_example_tool_name
 from agent.tool_engine import AGENT_READ, OP_READ, execute_tool, get_tool_registry_v2
 from agent.tools import evidence_adapters
+from agent.services.evidence_service import evidence_service
 from database.repositories import NewsRepository
 
 
@@ -50,13 +51,11 @@ def _write_news_fixture(db_path: Path) -> None:
     )
 
 
-def test_p2b_evidence_tools_registered_with_legacy_aliases() -> None:
+def test_p2b_evidence_registry_contains_only_atomic_reads() -> None:
     registry = get_tool_registry_v2()
     expected = {
         "evidence.search_news": ["stock_news", "news_search"],
         "evidence.search_rag": ["stock_rag", "rag_search"],
-        "evidence.get_stock_evidence": [],
-        "evidence.get_market_evidence": [],
         "evidence.invoke_mcp_readonly": [],
     }
 
@@ -78,9 +77,9 @@ def test_p2b_evidence_tools_registered_with_legacy_aliases() -> None:
 
     assert callable(evidence_adapters.execute_evidence_news_search_tool)
     assert callable(evidence_adapters.execute_evidence_rag_search_tool)
-    assert callable(evidence_adapters.execute_stock_evidence_tool)
-    assert callable(evidence_adapters.execute_market_evidence_tool)
     assert callable(evidence_adapters.execute_mcp_readonly_evidence_tool)
+    assert registry.get("evidence.get_stock_evidence") is None
+    assert registry.get("evidence.get_market_evidence") is None
 
 
 def test_p2b_stock_news_v2_artifact(tmp_path: Path) -> None:
@@ -162,18 +161,26 @@ def test_p2b_stock_evidence_merges_news_and_rag_sources(monkeypatch, tmp_path: P
 
     monkeypatch.setattr("rag_retriever.retrieve_stock_context", fake_retrieve_stock_context)
 
-    result = execute_tool(
-        "evidence.get_stock_evidence",
-        {"stock_code": "000001", "query": "profit risk", "top_k": 5},
-        context={"user_id": "u1", "output_dir": tmp_path, "db_path": db_path},
-        agent_type=AGENT_READ,
+    result = evidence_service.get_stock_evidence(
+        "000001",
+        query="profit risk",
+        top_k=5,
+        output_dir=tmp_path,
+        db_path=db_path,
     )
 
-    source_types = {source["source_type"] for source in result.data["sources"]}
-    assert result.success is True
-    assert result.data["evidence_count"] == 2
+    source_types = {
+        source["source_type"]
+        for source in result["data"]["sources"]
+    }
+    assert result["success"] is True
+    assert result["data"]["evidence_count"] == 2
     assert {"news_event", "rag_chunk"} <= source_types
-    assert result.data["not_executed"] is True
+    assert result["data"]["not_executed"] is True
+    assert (
+        result["function_name"]
+        == "evidence_service.get_stock_evidence"
+    )
 
 
 def test_p2b_rag_unavailable_degrades_safely(monkeypatch, tmp_path: Path) -> None:

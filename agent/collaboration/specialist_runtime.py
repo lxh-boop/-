@@ -31,11 +31,12 @@ from .workers import (
     compose_diagnostic_result,
     compose_evidence_result,
     compose_graph_impact_result,
+    compose_market_result,
     compose_portfolio_result,
     compose_risk_result,
-    compose_strategy_guard_result,
+    compose_strategy_proposal_result,
     provided_evidence_result,
-    run_report_writer,
+    run_report_composer,
 )
 from .workers.common import dependency_results as _dependency_results
 from .workers.common import refs_from_dependencies as _refs_from_dependencies
@@ -72,24 +73,22 @@ class SpecialistRuntime:
             tool_executor=self.worker_tool_executor,
         )
         self._tool_composers: dict[str, ResultComposer] = {
-            "evidence.retrieve": compose_evidence_result,
-            "evidence.analyze_entity": compose_evidence_result,
-            "evidence.ingest": compose_evidence_result,
-            "portfolio.load_snapshot": compose_portfolio_result,
-            "portfolio.analyze": compose_portfolio_result,
-            "graph.map_evidence_to_holdings": (
+            "evidence.research": compose_evidence_result,
+            "market.stock_analysis": compose_market_result,
+            "portfolio.analysis": compose_portfolio_result,
+            "graph.impact_analysis": (
                 compose_graph_impact_result
             ),
-            "risk.analyze": compose_risk_result,
-            "strategy.build_proposal": (
-                compose_strategy_guard_result
+            "portfolio.risk_analysis": compose_risk_result,
+            "strategy.proposal": (
+                compose_strategy_proposal_result
             ),
-            "system.check_graph_connectivity": (
+            "system.graph_diagnostic": (
                 compose_diagnostic_result
             ),
         }
         self._reasoning_handlers = {
-            "report.write": self._run_report_writer,
+            "report.compose": self._run_report_composer,
         }
 
     def run(
@@ -258,13 +257,13 @@ class SpecialistRuntime:
         )
         return result
 
-    def _run_report_writer(
+    def _run_report_composer(
         self,
         task: GraphAgentTask,
         dependency_results: dict[str, dict[str, Any]],
         language: str,
     ) -> GraphWorkerResult:
-        return run_report_writer(
+        return run_report_composer(
             self.llm_service,
             task,
             dependency_results,

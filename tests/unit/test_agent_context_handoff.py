@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 from agent.collaboration.agent_directory import (
     PORTFOLIO_ANALYST,
-    REPORT_WRITER,
-    RISK_ANALYST,
+    REPORT_COMPOSER,
+    PORTFOLIO_RISK_ANALYST,
     AgentDirectory,
 )
 from agent.collaboration.context_handoff import MainContextHandoff
@@ -40,7 +40,7 @@ class ContextLLM:
 def _request() -> WorkerContextRequest:
     return WorkerContextRequest(
         source_task_id="risk",
-        source_capability_id="risk.analyze",
+        source_capability_id="portfolio.risk_analysis",
         requirements=[
             MissingContextItem(
                 key="account_scope",
@@ -151,7 +151,7 @@ class PausingSpecialist:
         **_: object,
     ) -> GraphWorkerResult:
         self.calls.append(task.task_id)
-        if task.capability_id == "portfolio.load_snapshot":
+        if task.capability_id == "portfolio.analysis":
             return GraphWorkerResult(
                 task_id=task.task_id,
                 agent_id=task.assigned_agent,
@@ -159,7 +159,7 @@ class PausingSpecialist:
                 focus_refs=[self.portfolio_ref],
                 summary="portfolio ready",
             )
-        if task.capability_id == "risk.analyze":
+        if task.capability_id == "portfolio.risk_analysis":
             if not dict(
                 execution_context.get("resolved_context") or {}
             ).get("account_scope"):
@@ -249,19 +249,19 @@ def test_main_persists_and_resumes_only_waiting_task_and_descendants(
     tasks = [
         _task(
             "portfolio",
-            "portfolio.load_snapshot",
+            "portfolio.analysis",
             PORTFOLIO_ANALYST,
         ),
         _task(
             "risk",
-            "risk.analyze",
-            RISK_ANALYST,
+            "portfolio.risk_analysis",
+            PORTFOLIO_RISK_ANALYST,
             ("portfolio",),
         ),
         _task(
             "report",
-            "report.write",
-            REPORT_WRITER,
+            "report.compose",
+            REPORT_COMPOSER,
             ("risk",),
         ),
     ]

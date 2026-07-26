@@ -196,11 +196,21 @@ class WorkerPlanExecutor:
                 marker in lowered
                 for marker in ("api_key", "password", "secret", "token")
             )
-            memory_backed = (
-                lowered == "account_id"
-                or lowered.endswith("_id")
-                or lowered.endswith("_version")
+            source_policy = str(
+                schema.get("x-context-source") or "user"
+            ).strip().lower()
+            category_by_source = {
+                "dependency": ContextRequestCategory.DEPENDENCY_REQUIRED,
+                "memory": ContextRequestCategory.MEMORY_LOOKUP_REQUIRED,
+                "system_config": ContextRequestCategory.SYSTEM_CONFIG_REQUIRED,
+                "user": ContextRequestCategory.USER_INPUT_REQUIRED,
+            }
+            category = category_by_source.get(
+                source_policy,
+                ContextRequestCategory.USER_INPUT_REQUIRED,
             )
+            if sensitive:
+                category = ContextRequestCategory.SYSTEM_CONFIG_REQUIRED
             missing.append(
                 MissingContextItem(
                     key=str(key),
@@ -217,16 +227,15 @@ class WorkerPlanExecutor:
                         "execution_context",
                         "worker_tool_plan",
                     ],
-                    category=(
-                        ContextRequestCategory.SYSTEM_CONFIG_REQUIRED
-                        if sensitive
-                        else ContextRequestCategory.MEMORY_LOOKUP_REQUIRED
-                        if memory_backed
-                        else ContextRequestCategory.USER_INPUT_REQUIRED
-                    ),
+                    category=category,
                     value_schema=schema,
-                    sensitivity="secret" if sensitive else "normal",
-                    allow_memory_lookup=not sensitive,
+                    sensitivity=str(
+                        schema.get("x-sensitivity")
+                        or ("secret" if sensitive else "normal")
+                    ),
+                    allow_memory_lookup=(
+                        not sensitive and source_policy == "memory"
+                    ),
                 )
             )
         return missing

@@ -51,7 +51,7 @@ def build_diagnostic_tool_definitions(
             operation_type=OP_SYSTEM,
             allowed_agent_types=[AGENT_WORKER],
             allowed_capability_ids=[
-                "system.check_graph_connectivity"
+                "system.graph_diagnostic"
             ],
             permission_scope=OP_SYSTEM,
             visibility=TOOL_VISIBILITY_WORKER_PRIVATE,

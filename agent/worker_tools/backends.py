@@ -58,6 +58,35 @@ class PortfolioToolBackend(Protocol):
     ) -> dict[str, Any]: ...
 
 
+class MarketToolBackend(Protocol):
+    def resolve_stock_query(self, ref: GraphRef) -> str: ...
+
+    def read_ranking(
+        self,
+        *,
+        stock_code: str = "",
+        top_k: int = 20,
+        output_dir: str | Path = "outputs",
+        model_name: str = "",
+    ) -> dict[str, Any]: ...
+
+    def lookup_stock(
+        self,
+        query: str,
+        *,
+        user_id: str,
+        output_dir: str | Path,
+    ) -> dict[str, Any]: ...
+
+    def read_signal_summary(
+        self,
+        *,
+        user_id: str,
+        output_dir: str | Path,
+        sort_by: str = "original_rank",
+    ) -> dict[str, Any]: ...
+
+
 class RiskToolBackend(Protocol):
     def analyze_risk(
         self,
@@ -92,6 +121,7 @@ __all__ = [
     "DiagnosticToolBackend",
     "EvidenceToolBackend",
     "ImpactToolBackend",
+    "MarketToolBackend",
     "PortfolioToolBackend",
     "RiskToolBackend",
 ]

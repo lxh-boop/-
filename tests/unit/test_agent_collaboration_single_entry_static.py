@@ -36,8 +36,8 @@ def test_collaboration_never_constructs_an_independent_model_client():
         assert "LLMService(" not in text, path.name
 
 
-def test_strategy_guard_uses_private_proposal_tool_boundary():
-    worker = _text("agent/collaboration/workers/strategy_guard.py")
+def test_strategy_proposal_uses_private_tool_boundary():
+    worker = _text("agent/collaboration/workers/strategy_proposal.py")
     definitions = _text("agent/worker_tools/proposal.py")
 
     assert "route_agent_query(" not in worker
@@ -45,7 +45,7 @@ def test_strategy_guard_uses_private_proposal_tool_boundary():
     assert "AGENT_MAIN" not in worker
     assert "OP_PROPOSAL" in definitions
     assert "AGENT_WORKER" in definitions
-    assert '"strategy.build_proposal"' in definitions
+    assert '"strategy.proposal"' in definitions
 
 
 def test_public_legacy_entry_files_are_only_facades():

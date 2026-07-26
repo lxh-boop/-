@@ -7,9 +7,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from agent.collaboration.agent_directory import (
-    EVIDENCE_RETRIEVER,
-    REPORT_WRITER,
-    RISK_ANALYST,
+    EVIDENCE_RESEARCHER,
+    REPORT_COMPOSER,
+    PORTFOLIO_RISK_ANALYST,
     SYSTEM_DIAGNOSTIC,
 )
 from agent.collaboration.models import (
@@ -117,9 +117,9 @@ def _run(runtime: SpecialistRuntime, task: GraphAgentTask, dependencies=None):
 def test_evidence_worker_uses_provided_evidence_without_tool_plan() -> None:
     provider = SimpleNamespace()
     task = _task(
-        EVIDENCE_RETRIEVER,
-        "retrieve_evidence",
-        "evidence.retrieve",
+        EVIDENCE_RESEARCHER,
+        "research_evidence",
+        "evidence.research",
         focus_refs=[
             _ref("evidence:1", GraphNodeKind.EVIDENCE, "cause")
         ],
@@ -132,7 +132,7 @@ def test_evidence_worker_uses_provided_evidence_without_tool_plan() -> None:
 
     assert result.status == ResultStatus.COMPLETED
     assert task.status == TaskStatus.COMPLETED
-    assert result.metadata["capability_id"] == "evidence.retrieve"
+    assert result.metadata["capability_id"] == "evidence.research"
     assert result.metadata["tool_plan"]["tool_call_count"] == 0
 
 
@@ -152,9 +152,9 @@ def test_risk_worker_returns_structured_context_request() -> None:
         }
     )
     task = _task(
-        RISK_ANALYST,
-        "analyze_risk",
-        "risk.analyze",
+        PORTFOLIO_RISK_ANALYST,
+        "analyze_portfolio_risk",
+        "portfolio.risk_analysis",
     )
 
     result = _run(
@@ -168,24 +168,27 @@ def test_risk_worker_returns_structured_context_request() -> None:
     assert result.status == ResultStatus.NEED_CONTEXT
     assert task.status == TaskStatus.WAITING_CONTEXT
     assert result.context_request is not None
-    assert result.context_request.source_capability_id == "risk.analyze"
+    assert (
+        result.context_request.source_capability_id
+        == "portfolio.risk_analysis"
+    )
     assert [
         item.key for item in result.context_request.requirements
     ] == ["active_graph_refs"]
 
 
-def test_report_writer_is_a_reasoning_only_terminal_worker() -> None:
+def test_report_composer_is_a_reasoning_only_terminal_worker() -> None:
     llm = FakeLLM(text="汇总结果")
     task = _task(
-        REPORT_WRITER,
-        "write_report",
-        "report.write",
+        REPORT_COMPOSER,
+        "compose_report",
+        "report.compose",
     )
     dependencies = {
         "evidence": {
             "contract_version": "graph_worker_result.v1",
             "task_id": "evidence",
-            "agent_id": EVIDENCE_RETRIEVER,
+            "agent_id": EVIDENCE_RESEARCHER,
             "status": "completed",
             "summary": "evidence ready",
             "confidence": 0.8,
@@ -236,8 +239,8 @@ def test_system_diagnostic_runs_through_private_tool() -> None:
     )
     task = _task(
         SYSTEM_DIAGNOSTIC,
-        "diagnose_system",
-        "system.check_graph_connectivity",
+        "diagnose_graph_system",
+        "system.graph_diagnostic",
     )
 
     result = _run(_runtime(provider, llm_service=llm), task)

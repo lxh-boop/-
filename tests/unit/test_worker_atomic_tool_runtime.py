@@ -10,7 +10,11 @@ from unittest.mock import Mock
 import pytest
 
 from agent.collaboration.agent_directory import AgentDirectory
-from agent.collaboration.models import GraphAgentTask, ResultStatus
+from agent.collaboration.models import (
+    ContextRequestCategory,
+    GraphAgentTask,
+    ResultStatus,
+)
 from agent.collaboration.specialist_runtime import SpecialistRuntime
 from agent.graph.contracts import (
     GraphNodeKind,
@@ -45,6 +49,7 @@ from agent.worker_tools import (
     EVIDENCE_SEARCH_TOOL,
     IMPACT_FIND_PATHS_TOOL,
     IMPACT_SUMMARIZE_PATHS_TOOL,
+    MARKET_READ_RANKING_TOOL,
     PORTFOLIO_MATERIALIZE_SNAPSHOT_TOOL,
     PORTFOLIO_READ_SNAPSHOT_TOOL,
     WorkerToolDirectory,
@@ -147,6 +152,7 @@ def _provider() -> SimpleNamespace:
 def _directory(
     provider=None,
     impact_backend=None,
+    market_backend=None,
 ) -> WorkerToolDirectory:
     backend = provider or _provider()
     registry = build_worker_tool_registry(
@@ -154,6 +160,7 @@ def _directory(
         portfolio_backend=backend,
         risk_backend=backend,
         diagnostic_backend=backend,
+        market_backend=market_backend,
         impact_backend=impact_backend or SimpleNamespace(),
     )
     return build_worker_tool_directory(registry)
@@ -166,7 +173,16 @@ def test_tool_engine_facade_separates_public_and_system_private_tools() -> None:
 
     definitions = get_tool_registry_v2().list()
 
-    assert len(definitions) == 53
+    assert len(definitions) == 48
+    assert {
+        "market.analyze_stock",
+        "market.compare_stocks",
+        "evidence.get_stock_evidence",
+        "evidence.get_market_evidence",
+        "portfolio.design_target_portfolio",
+    }.isdisjoint(
+        definition.name for definition in definitions
+    )
     private_names = {
         definition.name
         for definition in definitions
@@ -188,16 +204,17 @@ def test_tool_engine_facade_separates_public_and_system_private_tools() -> None:
 def test_worker_directory_is_projected_by_capability_not_worker_name() -> None:
     directory = _directory()
 
-    assert directory.allowed_tool_names("evidence.retrieve") == [
+    assert directory.allowed_tool_names("evidence.research") == [
+        EVIDENCE_ANALYZE_ENTITIES_TOOL,
         EVIDENCE_SEARCH_TOOL,
         EVIDENCE_INGEST_TOOL,
     ]
-    assert directory.allowed_tool_names("evidence.analyze_entity") == [
-        EVIDENCE_ANALYZE_ENTITIES_TOOL,
-    ]
-    assert directory.allowed_tool_names("EVIDENCE_RETRIEVER") == []
-    assert directory.allows("evidence.retrieve", EVIDENCE_SEARCH_TOOL)
-    assert not directory.allows("risk.analyze", EVIDENCE_SEARCH_TOOL)
+    assert directory.allowed_tool_names("EVIDENCE_RESEARCHER") == []
+    assert directory.allows("evidence.research", EVIDENCE_SEARCH_TOOL)
+    assert not directory.allows(
+        "portfolio.risk_analysis",
+        EVIDENCE_SEARCH_TOOL,
+    )
     assert all(
         definition.visibility == TOOL_VISIBILITY_WORKER_PRIVATE
         for definition in directory.registry.list()
@@ -216,7 +233,7 @@ def test_private_tool_rejects_another_capability() -> None:
             "user_id": "user-1",
         },
         agent_type=AGENT_WORKER,
-        capability_id="risk.analyze",
+        capability_id="portfolio.risk_analysis",
     )
 
     assert result.success is False
@@ -229,7 +246,7 @@ def test_portfolio_worker_reads_one_atomic_snapshot(tmp_path) -> None:
     directory = _directory(provider)
     executor = ToolExecutor(registry=directory.registry)
 
-    assert directory.allowed_tool_names("portfolio.load_snapshot") == [
+    assert directory.allowed_tool_names("portfolio.analysis") == [
         PORTFOLIO_READ_SNAPSHOT_TOOL,
         PORTFOLIO_MATERIALIZE_SNAPSHOT_TOOL,
     ]
@@ -240,7 +257,7 @@ def test_portfolio_worker_reads_one_atomic_snapshot(tmp_path) -> None:
         {"user_id": "user-1"},
         context={"output_dir": tmp_path},
         agent_type=AGENT_WORKER,
-        capability_id="portfolio.load_snapshot",
+        capability_id="portfolio.analysis",
     )
 
     assert result.success is True
@@ -264,12 +281,81 @@ def test_atomic_evidence_search_does_not_ingest(tmp_path) -> None:
         },
         context={"output_dir": tmp_path},
         agent_type=AGENT_WORKER,
-        capability_id="evidence.retrieve",
+        capability_id="evidence.research",
     )
 
     assert result.success is True
     provider.search_evidence.assert_called_once()
     provider.ingest_evidence.assert_not_called()
+
+
+def test_market_worker_plans_atomic_ranking_read(tmp_path) -> None:
+    market_backend = SimpleNamespace(
+        resolve_stock_query=Mock(
+            side_effect=lambda ref: ref.node_id
+        ),
+        read_ranking=Mock(
+            return_value={
+                "success": True,
+                "data": {
+                    "records": [
+                        {"stock_code": "600519", "rank": 1}
+                    ]
+                },
+            }
+        ),
+        lookup_stock=Mock(),
+        read_signal_summary=Mock(),
+    )
+    directory = _directory(market_backend=market_backend)
+    assert directory.allowed_tool_names("market.stock_analysis") == [
+        MARKET_READ_RANKING_TOOL,
+        "market.lookup_stocks",
+        "market.read_signal_summary",
+    ]
+    binding = AgentDirectory().resolve("market.stock_analysis")
+    runtime = SpecialistRuntime(
+        llm_service=FakeLLM(
+            {
+                "steps": [
+                    {
+                        "step_id": "ranking",
+                        "tool_name": MARKET_READ_RANKING_TOOL,
+                        "objective": "read local ranking",
+                        "dependency_step_ids": [],
+                        "required_outputs": [
+                            "market_observations"
+                        ],
+                    }
+                ]
+            }
+        ),
+        worker_tool_directory=directory,
+    )
+    task = GraphAgentTask(
+        task_id="task-market",
+        run_id="run-1",
+        session_id="session-1",
+        assigned_agent=binding.worker_id,
+        objective="analyze local market ranking",
+        task_type=binding.task_type,
+        user_id="user-1",
+        capability_id=binding.capability_id,
+    )
+
+    result = runtime.run(
+        task,
+        current_user_request="analyze local market ranking",
+        dependency_results={},
+        output_dir=tmp_path,
+        db_path=None,
+        default_top_k=5,
+        language="en",
+    )
+
+    assert result.status == ResultStatus.COMPLETED
+    market_backend.read_ranking.assert_called_once()
+    market_backend.lookup_stock.assert_not_called()
 
 
 def test_evidence_worker_plans_and_executes_search_then_ingest(
@@ -306,11 +392,11 @@ def test_evidence_worker_plans_and_executes_search_then_ingest(
         task_id="task-evidence",
         run_id="run-1",
         session_id="session-1",
-        assigned_agent="EVIDENCE_RETRIEVER",
-        objective="retrieve evidence",
-        task_type="retrieve_evidence",
+        assigned_agent="EVIDENCE_RESEARCHER",
+        objective="research evidence",
+        task_type="research_evidence",
         user_id="user-1",
-        capability_id="evidence.retrieve",
+        capability_id="evidence.research",
         focus_refs=[_object_ref()],
     )
 
@@ -357,7 +443,7 @@ def test_worker_plan_rejects_missing_atomic_dependency() -> None:
                     },
                 ]
             },
-            capability_id="evidence.retrieve",
+            capability_id="evidence.research",
         )
 
 
@@ -414,7 +500,7 @@ def test_impact_worker_plans_atomic_lookup_then_summary(tmp_path) -> None:
         ),
     )
     binding = AgentDirectory().resolve(
-        "graph.map_evidence_to_holdings"
+        "graph.impact_analysis"
     )
     task = GraphAgentTask(
         task_id="task-impact",
@@ -450,12 +536,12 @@ def test_strategy_worker_has_one_proposal_only_private_step() -> None:
     definitions = [
         definition
         for definition in directory.registry.list()
-        if "strategy.build_proposal"
+        if "strategy.proposal"
         in definition.allowed_capability_ids
     ]
 
     assert definitions
-    assert directory.max_steps("strategy.build_proposal") == 1
+    assert directory.max_steps("strategy.proposal") == 1
     assert all(
         definition.operation_type == OP_PROPOSAL
         and definition.allowed_agent_types == [AGENT_WORKER]
@@ -485,7 +571,7 @@ def test_strategy_worker_has_one_proposal_only_private_step() -> None:
                     },
                 ]
             },
-            capability_id="strategy.build_proposal",
+            capability_id="strategy.proposal",
         )
 
 
@@ -508,9 +594,9 @@ def test_missing_proposal_scope_becomes_worker_context_request(
                 }
             ]
         },
-        capability_id="strategy.build_proposal",
+        capability_id="strategy.proposal",
     )
-    binding = AgentDirectory().resolve("strategy.build_proposal")
+    binding = AgentDirectory().resolve("strategy.proposal")
     task = GraphAgentTask(
         task_id="task-proposal",
         run_id="run-1",
@@ -547,13 +633,57 @@ def test_missing_proposal_scope_becomes_worker_context_request(
     )
 
 
+def test_missing_input_source_is_declarative_not_name_heuristic() -> None:
+    missing = WorkerPlanExecutor._missing_required_inputs(
+        {
+            "type": "object",
+            "required": ["account_id", "stock_id", "api_key"],
+            "properties": {
+                "account_id": {
+                    "type": "string",
+                    "description": "已确认账户",
+                    "x-context-source": "memory",
+                },
+                "stock_id": {
+                    "type": "string",
+                    "description": "用户选择的证券",
+                },
+                "api_key": {
+                    "type": "string",
+                    "description": "外部服务密钥",
+                    "x-context-source": "system_config",
+                },
+            },
+        },
+        {},
+    )
+
+    by_key = {item.key: item for item in missing}
+    assert (
+        by_key["account_id"].category
+        == ContextRequestCategory.MEMORY_LOOKUP_REQUIRED
+    )
+    assert by_key["account_id"].allow_memory_lookup is True
+    assert (
+        by_key["stock_id"].category
+        == ContextRequestCategory.USER_INPUT_REQUIRED
+    )
+    assert by_key["stock_id"].allow_memory_lookup is False
+    assert (
+        by_key["api_key"].category
+        == ContextRequestCategory.SYSTEM_CONFIG_REQUIRED
+    )
+    assert by_key["api_key"].sensitivity == "secret"
+    assert by_key["api_key"].allow_memory_lookup is False
+
+
 def test_worker_tools_do_not_import_worker_identity_constants() -> None:
     root = Path(__file__).resolve().parents[2]
     for path in (root / "agent" / "worker_tools").glob("*.py"):
         source = path.read_text(encoding="utf-8")
         assert "agent.collaboration.agent_directory" not in source
-        assert "EVIDENCE_RETRIEVER" not in source
-        assert "RISK_ANALYST" not in source
+        assert "EVIDENCE_RESEARCHER" not in source
+        assert "PORTFOLIO_RISK_ANALYST" not in source
 
 
 def test_coordinator_capability_cards_hide_private_tool_names() -> None:

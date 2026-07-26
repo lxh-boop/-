@@ -175,7 +175,7 @@ def build_impact_tool_definitions(
             "paths": [path.to_dict() for path in paths],
         }
 
-    capability = ["graph.map_evidence_to_holdings"]
+    capability = ["graph.impact_analysis"]
     return [
         ToolDefinition(
             name=IMPACT_FIND_PATHS_TOOL,

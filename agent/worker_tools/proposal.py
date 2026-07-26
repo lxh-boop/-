@@ -15,6 +15,41 @@ from agent.tool_runtime import (
 )
 
 
+_MEMORY_CONTEXT_KEYS = {
+    "account_id",
+    "proposal_id",
+    "proposal_version",
+    "implementation_id",
+    "strategy_id",
+    "strategy_version",
+}
+
+
+def _proposal_input_schema(definition: ToolDefinition) -> dict[str, Any]:
+    input_schema = dict(definition.input_schema or {})
+    properties = {
+        str(key): dict(value or {})
+        for key, value in dict(
+            input_schema.get("properties") or {}
+        ).items()
+    }
+    for key, value in properties.items():
+        if key in _MEMORY_CONTEXT_KEYS:
+            value.setdefault("x-context-source", "memory")
+            value.setdefault(
+                "description",
+                f"当前会话中已确认的 {key}",
+            )
+        elif any(
+            marker in key.lower()
+            for marker in ("api_key", "password", "secret", "token")
+        ):
+            value.setdefault("x-context-source", "system_config")
+            value.setdefault("x-sensitivity", "secret")
+    input_schema["properties"] = properties
+    return input_schema
+
+
 def _proposal_arguments(plan_context: dict[str, Any]) -> dict[str, Any]:
     task = plan_context["task"]
     execution_context = dict(
@@ -69,6 +104,7 @@ def build_proposal_tool_definitions() -> list[ToolDefinition]:
             replace(
                 definition,
                 argument_builder=_proposal_arguments,
+                input_schema=_proposal_input_schema(definition),
                 produced_outputs=list(
                     dict.fromkeys(
                         [
@@ -78,7 +114,7 @@ def build_proposal_tool_definitions() -> list[ToolDefinition]:
                     )
                 ),
                 allowed_agent_types=[AGENT_WORKER],
-                allowed_capability_ids=["strategy.build_proposal"],
+                allowed_capability_ids=["strategy.proposal"],
                 visibility=TOOL_VISIBILITY_WORKER_PRIVATE,
                 legacy_names=[],
                 tags=list(

@@ -33,7 +33,7 @@ def test_session_memory_is_sqlite_persistent_versioned_and_clearable(tmp_path):
     assert ignored.conflict is True
     assert reopened.get("s1", "comparison_targets").value == ["600519", "000858"]
 
-    matches = reopened.search("s1", "股票比较对象", task_id="t1", agent_id="EVIDENCE_RETRIEVER")
+    matches = reopened.search("s1", "股票比较对象", task_id="t1", agent_id="EVIDENCE_RESEARCHER")
     assert matches
     assert matches[0].key == "comparison_targets"
     assert reopened.access_count("s1", "t1") == 1

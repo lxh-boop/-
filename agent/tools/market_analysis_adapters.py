@@ -21,10 +21,6 @@ def _output_dir(context: dict[str, Any]) -> str | Path:
     return context.get("output_dir") or "outputs"
 
 
-def _db_path(context: dict[str, Any]) -> str | Path | None:
-    return context.get("db_path")
-
-
 def _strip_dataframe(result: dict[str, Any]) -> dict[str, Any]:
     payload = dict(result)
     data = dict(payload.get("data") or {})
@@ -50,27 +46,6 @@ def execute_market_ranking_tool(
     )
 
 
-def execute_market_stock_analysis_tool(
-    args: dict[str, Any],
-    context: dict[str, Any],
-) -> Any:
-    return market_analysis_service.analyze_stock(
-        user_id=str(_context_value(args, context, "user_id", "default")),
-        stock_code=str(args.get("stock_code") or ""),
-        as_of_date=args.get("as_of_date"),
-        output_dir=_output_dir(context),
-        db_path=_db_path(context),
-        top_k=resolve_requested_top_k(
-            user_explicit_top_k=context.get("user_explicit_top_k"),
-            task_top_k=args.get("top_k"),
-            request_default_top_k=context.get("default_top_k"),
-            tool_default_top_k=DEFAULT_TOOL_TOP_K,
-        ),
-        include_rag=bool(args.get("include_rag", True)),
-        tool_name="market.analyze_stock",
-    )
-
-
 def execute_market_stock_lookup_tool(
     args: dict[str, Any],
     context: dict[str, Any],
@@ -79,24 +54,6 @@ def execute_market_stock_lookup_tool(
         str(args.get("stock_query") or args.get("stock_code") or ""),
         user_id=str(_context_value(args, context, "user_id", "default")),
         output_dir=_output_dir(context),
-    )
-
-
-def execute_market_stock_comparison_tool(
-    args: dict[str, Any],
-    context: dict[str, Any],
-) -> Any:
-    return market_analysis_service.compare_stocks(
-        args.get("stock_codes") or args.get("stock_code") or [],
-        user_id=str(_context_value(args, context, "user_id", "default")),
-        output_dir=_output_dir(context),
-        db_path=_db_path(context),
-        top_k=resolve_requested_top_k(
-            user_explicit_top_k=context.get("user_explicit_top_k"),
-            task_top_k=args.get("top_k"),
-            request_default_top_k=context.get("default_top_k"),
-            tool_default_top_k=DEFAULT_TOOL_TOP_K,
-        ),
     )
 
 
@@ -117,7 +74,5 @@ def execute_market_signal_summary_tool(
 __all__ = [
     "execute_market_ranking_tool",
     "execute_market_signal_summary_tool",
-    "execute_market_stock_analysis_tool",
-    "execute_market_stock_comparison_tool",
     "execute_market_stock_lookup_tool",
 ]

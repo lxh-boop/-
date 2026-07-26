@@ -111,8 +111,7 @@ def test_phase11_tool_executor_standardizes_outputs_and_validates_inputs(tmp_pat
 
     invalid = execute_tool("stock_analysis", {}, context={"output_dir": tmp_path}, agent_type=AGENT_READ)
     assert invalid.success is False
-    assert invalid.error_type == "input_validation"
-    assert "missing_required:stock_code" in invalid.error_message
+    assert invalid.error_type == "unregistered_tool"
 
 
 def test_phase11_capability_index_uses_unified_tool_registry_read_view() -> None:

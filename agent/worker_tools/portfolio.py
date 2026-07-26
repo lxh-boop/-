@@ -94,8 +94,7 @@ def build_portfolio_tool_definitions(
         )
 
     capabilities = [
-        "portfolio.load_snapshot",
-        "portfolio.analyze",
+        "portfolio.analysis",
     ]
     return [
         ToolDefinition(

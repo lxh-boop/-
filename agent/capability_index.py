@@ -4,7 +4,7 @@ import hashlib
 import json
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from agent.agent_specs import (
@@ -44,15 +44,11 @@ OUTPUTS_BY_TOOL: dict[str, set[str]] = {
     "stock_lookup": {"stock_lookup", "market_evidence", "evidence", "reasons", "limitations"},
     "classic_stock_score": {"stock_lookup", "market_evidence", "evidence", "reasons", "limitations"},
     "classic_ranking": {"market_evidence", "evidence", "candidate_stocks", "signal_summary", "reasons", "limitations"},
-    "market.compare_stocks": {"stock_comparison", "market_evidence", "evidence", "reasons", "limitations"},
     "stock_news": {"market_evidence", "evidence", "news_events", "reasons", "limitations"},
     "stock_rag": {"market_evidence", "evidence", "rag_contexts", "reasons", "limitations"},
     "news_search": {"market_evidence", "evidence", "news_events", "sources", "reasons", "limitations"},
     "rag_search": {"market_evidence", "evidence", "rag_contexts", "sources", "limitations"},
-    "evidence.get_stock_evidence": {"market_evidence", "evidence", "sources", "reasons", "limitations"},
-    "evidence.get_market_evidence": {"market_evidence", "evidence", "sources", "reasons", "limitations"},
     "evidence.invoke_mcp_readonly": {"market_evidence", "evidence", "mcp_sources", "sources", "limitations"},
-    "stock_analysis": {"stock_analysis", "market_evidence", "evidence", "reasons", "limitations"},
     "position_recommendation": {"target_position", "reasons", "limitations"},
     "replacement_recommendation": {"replacement_candidates", "score_comparison", "risk_comparison", "reasons", "limitations"},
     "manual_position_operation_tool": {"operation_preview", "risk_impact", "confirmation_request"},
@@ -85,15 +81,11 @@ ACTION_BY_TOOL: dict[str, set[str]] = {
     "stock_lookup": {"query_stock", "analyze_stock", "explain_previous_plan"},
     "classic_stock_score": {"query_stock", "analyze_stock", "explain_previous_plan"},
     "classic_ranking": {"recommend_portfolio", "recommend_portfolio_adjustment", "explain_previous_plan"},
-    "market.compare_stocks": {"compare_stocks", "analyze_stock", "explain_previous_plan"},
     "stock_news": {"explain_previous_plan", "explain_portfolio_decision"},
     "stock_rag": {"explain_previous_plan", "explain_portfolio_decision"},
     "news_search": {"retrieve_evidence", "explain_previous_plan", "explain_portfolio_decision"},
     "rag_search": {"retrieve_evidence", "explain_previous_plan", "explain_portfolio_decision"},
-    "evidence.get_stock_evidence": {"retrieve_evidence", "explain_previous_plan", "explain_portfolio_decision"},
-    "evidence.get_market_evidence": {"retrieve_evidence", "explain_previous_plan", "explain_portfolio_decision"},
     "evidence.invoke_mcp_readonly": {"retrieve_evidence"},
-    "stock_analysis": {"analyze_stock"},
     "position_recommendation": {"recommend_position"},
     "replacement_recommendation": {"recommend_replacement"},
     "manual_position_operation_tool": {"preview_write_operation"},
@@ -361,7 +353,7 @@ def build_trusted_capability_index(
     ]
     records = [record for record in records if record.enabled and record.allowed_agent_types]
     content_hash = _hash_payload([record.to_dict(agent_view=False) for record in records])
-    generated_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     index_version = f"capidx-{content_hash[:12]}"
     return CapabilityIndex(
         index_version=index_version,

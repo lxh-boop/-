@@ -208,6 +208,7 @@ class EvidenceService:
         warnings: list[str] | None = None,
         errors: list[str] | None = None,
         tool_name: str = "",
+        function_name: str = "",
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         records = list(records or [])
@@ -237,6 +238,7 @@ class EvidenceService:
             "warnings": list(warnings or []),
             "errors": list(errors or []),
             "tool_name": tool_name,
+            "function_name": function_name,
         }
 
     def search_news(
@@ -381,7 +383,7 @@ class EvidenceService:
             warnings=merged["warnings"],
             errors=merged["errors"],
             summary=self.build_evidence_summary(records=merged["records"], stock_code=code, query=query, evidence_type="stock_evidence"),
-            tool_name="evidence.get_stock_evidence",
+            function_name="evidence_service.get_stock_evidence",
             extra={"news": news.get("data") or {}, "rag": rag.get("data") or {}},
         )
 
@@ -423,7 +425,7 @@ class EvidenceService:
                 **self.build_evidence_summary(records=merged["records"], query=query, evidence_type="market_evidence"),
                 "stock_codes": [normalize_stock_code(code) for code in codes if normalize_stock_code(code)],
             },
-            tool_name="evidence.get_market_evidence",
+            function_name="evidence_service.get_market_evidence",
         )
 
     def get_mcp_readonly_evidence(

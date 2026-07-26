@@ -333,10 +333,12 @@ def _deterministic_plan(
 
     if has_compare and len(codes) >= 2:
         tasks = [
-            _task("task_1", "stock_analysis", parameters={"stock_code": codes[0]}),
-            _task("task_2", "stock_analysis", parameters={"stock_code": codes[1]}),
+            _task("task_1", "stock_lookup", parameters={"stock_code": codes[0]}),
+            _task("task_2", "stock_lookup", parameters={"stock_code": codes[1]}),
+            _task("task_3", "stock_rag", parameters={"stock_code": codes[0], "query": text, "top_k": 10}),
+            _task("task_4", "stock_rag", parameters={"stock_code": codes[1], "query": text, "top_k": 10}),
         ]
-        return tasks, _goal(text, action="compare_stocks", objects=["stock"], expected_outputs=["stock_comparison"], requires_external_evidence=True), ""
+        return tasks, _goal(text, action="compare_stocks", objects=["stock"], expected_outputs=["stock_identity", "market_evidence"], requires_external_evidence=True), ""
 
     if has_portfolio and has_risk and not has_advice:
         tasks = [
@@ -373,7 +375,10 @@ def _deterministic_plan(
         return tasks, _goal(text, action="query_market_evidence", objects=["market"], expected_outputs=["market_evidence"], requires_external_evidence=True), ""
 
     if codes:
-        return [_task("task_1", "stock_analysis", parameters={"stock_code": codes[0]})], _goal(text, action="analyze_stock", objects=["stock"], expected_outputs=["stock_analysis"], requires_external_evidence=True), ""
+        return [
+            _task("task_1", "stock_lookup", parameters={"stock_code": codes[0]}),
+            _task("task_2", "stock_rag", parameters={"stock_code": codes[0], "query": text, "top_k": 10}),
+        ], _goal(text, action="analyze_stock", objects=["stock"], expected_outputs=["stock_identity", "market_evidence"], requires_external_evidence=True), ""
 
     return [_task("task_1", "general_help")], _goal(text, action="fallback_intent", objects=["help"], expected_outputs=["help_text"]), ""
 

@@ -1,4 +1,4 @@
-"""Compose proposal-only Strategy-Guard results from private tool observations."""
+"""Compose strategy-proposal results from private atomic-tool observations."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from ..models import GraphAgentTask, GraphWorkerResult, ResultStatus
 from .common import safe_public_value
 
 
-def compose_strategy_guard_result(
+def compose_strategy_proposal_result(
     task: GraphAgentTask,
     execution: WorkerPlanExecution,
 ) -> GraphWorkerResult:
@@ -88,4 +88,4 @@ def compose_strategy_guard_result(
     )
 
 
-__all__ = ["compose_strategy_guard_result"]
+__all__ = ["compose_strategy_proposal_result"]

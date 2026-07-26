@@ -10,7 +10,7 @@ def test_coordinator_views_do_not_expose_internal_task_or_tool_details():
         task_id="task_1",
         run_id="run_1",
         session_id="session_1",
-        assigned_agent="EVIDENCE_RETRIEVER",
+        assigned_agent="EVIDENCE_RESEARCHER",
         objective="分析两只股票",
         task_type="compare_stock_evidence",
         user_id="user_1",
@@ -26,7 +26,7 @@ def test_coordinator_views_do_not_expose_internal_task_or_tool_details():
 
     result = GraphWorkerResult(
         task_id="task_1",
-        agent_id="EVIDENCE_RETRIEVER",
+        agent_id="EVIDENCE_RESEARCHER",
         status=ResultStatus.COMPLETED,
         summary="分析完成",
         metadata={

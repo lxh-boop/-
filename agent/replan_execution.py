@@ -156,60 +156,6 @@ def _result_data(result: dict[str, Any]) -> dict[str, Any]:
     return dict(data) if isinstance(data, dict) else {}
 
 
-def _first_result_data(task_results: dict[str, dict[str, Any]], intents: set[str]) -> tuple[str, dict[str, Any]]:
-    for task_id, result in task_results.items():
-        if str(result.get("intent") or "") in intents and result.get("success"):
-            return str(task_id), _result_data(result)
-    return "", {}
-
-
-def _target_portfolio_tasks(
-    *,
-    round_index: int,
-    task_results: dict[str, dict[str, Any]],
-    user_goal: dict[str, Any],
-) -> list[dict[str, Any]]:
-    state_id, current_portfolio = _first_result_data(
-        task_results,
-        {"portfolio_state", "portfolio.read_snapshot"},
-    )
-    ranking_id, ranking = _first_result_data(task_results, {"ranking", "market.get_ranking"})
-    _, risk = _first_result_data(task_results, {"portfolio_risk", "portfolio.analyze_risk"})
-    if not state_id or not ranking_id:
-        return []
-    design_id = f"replan_{round_index}_target_design"
-    calculate_id = f"replan_{round_index}_target_portfolio"
-    return [
-        {
-            "task_id": design_id,
-            "intent": "portfolio.design_target_portfolio",
-            "parameters": {
-                "current_portfolio": current_portfolio,
-                "ranking": ranking,
-                "risk_report": risk.get("risk_report") or risk.get("risk") or risk,
-                "query": str(user_goal.get("raw_message") or ""),
-                "user_goal": dict(user_goal or {}),
-            },
-            "depends_on": [],
-            "reason": "bounded readonly replan for missing target_portfolio",
-            "capability_status": "executable",
-        },
-        {
-            "task_id": calculate_id,
-            "intent": "portfolio.calculate_target_portfolio",
-            "parameters": {
-                "current_portfolio": current_portfolio,
-                "ranking": ranking,
-                "risk_report": risk.get("risk_report") or risk.get("risk") or risk,
-                "target_design_source": f"${design_id}.target_design",
-            },
-            "depends_on": [design_id],
-            "reason": "calculate readonly target portfolio from replan design",
-            "capability_status": "executable",
-        },
-    ]
-
-
 def build_readonly_replan_tasks(
     *,
     round_index: int,
@@ -219,21 +165,13 @@ def build_readonly_replan_tasks(
 ) -> list[dict[str, Any]]:
     """Create the smallest safe plan for Completion/Critic gaps.
 
-    No task is inferred from free text: target construction has an explicit
-    structured recipe, while all other recovery steps can only refresh an
-    already executed read-only task whose registry contract produces the gap.
+    No task is inferred from free text. Recovery can only refresh an already
+    executed atomic read whose registry contract produces the missing output.
+    Business design is owned by Worker capabilities and is never recreated as
+    a synthetic tool task here.
     """
 
     expected = {str(item) for item in (missing_outputs or []) if str(item).strip()}
-    if "target_portfolio" in expected:
-        tasks = _target_portfolio_tasks(
-            round_index=round_index,
-            task_results=task_results,
-            user_goal=dict(user_goal or {}),
-        )
-        if tasks:
-            return tasks
-
     registry = get_tool_registry_v2()
     for task_id, result in task_results.items():
         intent = str(result.get("intent") or "")

@@ -20,6 +20,9 @@ from agent.worker_tools import (
     build_worker_tool_directory,
     build_worker_tool_registry,
 )
+from agent.worker_tools.application_backends import (
+    ApplicationMarketToolBackend,
+)
 
 from .agent_directory import AgentDirectory
 from .context_handoff import MainContextHandoff
@@ -122,6 +125,9 @@ class AgentCollaborationCoordinator:
         worker_tool_registry = build_worker_tool_registry(
             evidence_backend=provider,
             portfolio_backend=provider,
+            market_backend=ApplicationMarketToolBackend(
+                stock_ref_resolver=provider.provider_symbol,
+            ),
             risk_backend=provider,
             diagnostic_backend=provider,
             impact_backend=GraphImpactService(self.store),

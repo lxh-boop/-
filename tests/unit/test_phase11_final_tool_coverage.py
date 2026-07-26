@@ -107,7 +107,7 @@ def test_final_representative_tools_create_artifacts(tmp_path: Path) -> None:
     context = {"user_id": "u1", "output_dir": output_dir, "db_path": db_path, "session_id": "s_final"}
     results = [
         execute_tool("ranking", {"top_k": 1}, context=context, agent_type=AGENT_READ),
-        execute_tool("stock_analysis", {"user_id": "u1", "stock_code": "600519", "include_rag": False}, context=context, agent_type=AGENT_READ),
+        execute_tool("stock_lookup", {"user_id": "u1", "stock_code": "600519"}, context=context, agent_type=AGENT_READ),
         execute_tool("stock_news", {"stock_code": "600519", "as_of_date": "2026-06-12"}, context=context, agent_type=AGENT_READ),
         execute_tool("portfolio.read_snapshot", {"user_id": "u1"}, context=context, agent_type=AGENT_READ),
         execute_tool("portfolio.analyze_risk", {"user_id": "u1"}, context=context, agent_type=AGENT_READ),

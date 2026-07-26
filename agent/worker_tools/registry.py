@@ -14,6 +14,7 @@ from agent.tool_runtime import (
 from .evidence import build_evidence_tool_definitions
 from .diagnostic import build_diagnostic_tool_definitions
 from .impact import build_impact_tool_definitions
+from .market import build_market_tool_definitions
 from .portfolio import build_portfolio_tool_definitions
 from .proposal import build_proposal_tool_definitions
 from .risk import build_risk_tool_definitions
@@ -21,9 +22,11 @@ from .backends import (
     DiagnosticToolBackend,
     EvidenceToolBackend,
     ImpactToolBackend,
+    MarketToolBackend,
     PortfolioToolBackend,
     RiskToolBackend,
 )
+from .application_backends import ApplicationMarketToolBackend
 
 
 @dataclass(frozen=True)
@@ -118,6 +121,7 @@ def build_worker_tool_registry(
     portfolio_backend: PortfolioToolBackend,
     risk_backend: RiskToolBackend,
     diagnostic_backend: DiagnosticToolBackend,
+    market_backend: MarketToolBackend | None = None,
     impact_backend: ImpactToolBackend | None = None,
 ) -> ToolRegistry:
     """Build private tool definitions against run-scoped dependencies."""
@@ -125,6 +129,9 @@ def build_worker_tool_registry(
     definitions = [
         *build_evidence_tool_definitions(evidence_backend),
         *build_portfolio_tool_definitions(portfolio_backend),
+        *build_market_tool_definitions(
+            market_backend or ApplicationMarketToolBackend()
+        ),
         *build_risk_tool_definitions(risk_backend),
         *build_diagnostic_tool_definitions(diagnostic_backend),
         *build_proposal_tool_definitions(),
@@ -143,18 +150,16 @@ def build_worker_tool_directory(
     max_steps_by_capability: dict[str, int] | None = None,
 ) -> WorkerToolDirectory:
     policy = required_outputs_by_capability or {
-        "evidence.retrieve": ("evidence_results", "ingestion_results"),
-        "evidence.analyze_entity": ("entity_evidence_results",),
-        "evidence.ingest": ("ingestion_results",),
-        "portfolio.load_snapshot": ("portfolio_snapshot",),
-        "portfolio.analyze": ("portfolio_snapshot",),
-        "risk.analyze": ("risk_analysis",),
-        "graph.map_evidence_to_holdings": (
+        "evidence.research": ("evidence_observations",),
+        "market.stock_analysis": ("market_observations",),
+        "portfolio.analysis": ("portfolio_snapshot",),
+        "portfolio.risk_analysis": ("risk_analysis",),
+        "graph.impact_analysis": (
             "impact_paths",
             "impact_summary",
         ),
-        "strategy.build_proposal": ("proposal",),
-        "system.check_graph_connectivity": (
+        "strategy.proposal": ("proposal",),
+        "system.graph_diagnostic": (
             "diagnostic_analysis",
         ),
     }
@@ -169,7 +174,7 @@ def build_worker_tool_directory(
             for capability_id, outputs in policy.items()
         },
         max_steps_by_capability={
-            "strategy.build_proposal": 1,
+            "strategy.proposal": 1,
             **dict(max_steps_by_capability or {}),
         },
     )

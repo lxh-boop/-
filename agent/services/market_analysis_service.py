@@ -460,8 +460,6 @@ class MarketAnalysisService:
         db_path: str | Path | None = None,
         top_k: int = 50,
         include_rag: bool = True,
-        *,
-        tool_name: str = "market.analyze_stock",
     ) -> BusinessResult:
         from application.use_cases.stock_analysis import analyze_stock
 
@@ -551,7 +549,7 @@ class MarketAnalysisService:
                 "not_executed": True,
             },
             "warnings": warnings,
-            "tool_name": "market.compare_stocks",
+            "function_name": "market_analysis_service.compare_stocks",
         }
 
     def _canonical_ranking(self, ranking: pd.DataFrame) -> pd.DataFrame:
