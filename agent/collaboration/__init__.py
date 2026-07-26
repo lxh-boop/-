@@ -13,6 +13,7 @@ from .capability_contracts import (
     WorkerCapability,
 )
 from .models import (
+    ContextRequestCategory,
     GraphAgentTask,
     GraphWorkerResult,
     MemoryUpdate,
@@ -20,6 +21,7 @@ from .models import (
     ResultStatus,
     SessionMemoryItem,
     TaskStatus,
+    WorkerContextRequest,
 )
 
 
@@ -51,6 +53,7 @@ def clear_financial_graph_agent_session(*args: Any, **kwargs: Any):
 __all__ = [
     "AgentCapabilityCard",
     "CapabilityTaskPlan",
+    "ContextRequestCategory",
     "GraphAgentTask",
     "GraphWorkerResult",
     "MemoryUpdate",
@@ -59,6 +62,7 @@ __all__ = [
     "SessionMemoryItem",
     "TaskStatus",
     "WorkerCapability",
+    "WorkerContextRequest",
     "clear_financial_graph_agent_session",
     "execute_control_action",
     "execute_unified_agent_request",

@@ -1,13 +1,17 @@
 from agent.communication.integration import publish_agent_message
 from agent.communication.message_types import MessageType
-from app.handoff_ui import build_handoff_health_summary, build_handoff_safe_summary, format_handoff_caption
+from application.handoff_service import (
+    build_handoff_health_summary,
+    build_handoff_safe_summary,
+    format_handoff_caption,
+)
 
 
-def test_phase17_handoff_ui_summary_from_result_is_safe() -> None:
+def test_worker_handoff_ui_summary_from_result_is_safe() -> None:
     result = {
         "run_id": "run1",
         "orchestration": {
-            "phase17_handoff": {
+            "handoff": {
                 "handoff_available": True,
                 "trace_id": "trace1",
                 "handoff_count": 2,
@@ -23,11 +27,11 @@ def test_phase17_handoff_ui_summary_from_result_is_safe() -> None:
     summary = build_handoff_safe_summary(result, user_id="u1", output_dir="outputs")
     assert summary["handoff_available"] is True
     assert summary["handoff_count"] == 2
-    assert summary["handoff_role_summaries"][0]["db_path"] == "[REDACTED]"
+    assert "db_path" not in summary["handoff_role_summaries"][0]
     assert "Handoff: count=2" in format_handoff_caption(summary)
 
 
-def test_phase17_handoff_health_summary_from_messages(tmp_path) -> None:
+def test_worker_handoff_health_summary_from_messages(tmp_path) -> None:
     publish_agent_message(
         output_dir=tmp_path,
         user_id="u1",
@@ -37,7 +41,7 @@ def test_phase17_handoff_health_summary_from_messages(tmp_path) -> None:
         receiver="EVIDENCE_RETRIEVER",
         message_type=MessageType.HANDOFF_REQUESTED,
         payload={"handoff_id": "h1", "target_role": "EVIDENCE_RETRIEVER", "status": "requested"},
-        payload_schema="phase17.handoff_request.v1",
+        payload_schema="worker.handoff_request.v1",
     )
     publish_agent_message(
         output_dir=tmp_path,
@@ -48,7 +52,7 @@ def test_phase17_handoff_health_summary_from_messages(tmp_path) -> None:
         receiver="COORDINATOR",
         message_type=MessageType.HANDOFF_RESULT,
         payload={"handoff_id": "h1", "target_role": "EVIDENCE_RETRIEVER", "status": "SUCCEEDED", "summary": "ok"},
-        payload_schema="phase17.handoff_result.v1",
+        payload_schema="worker.handoff_result.v1",
     )
 
     summary = build_handoff_safe_summary({"run_id": "run1"}, user_id="u1", output_dir=tmp_path)

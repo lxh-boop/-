@@ -1,9 +1,4 @@
-"""Stable GraphRef provider facade used by the collaboration runtime.
-
-The facade preserves the existing constructor and method signatures while
-delegating evidence, portfolio, and risk work to domain adapters. Provider
-identifiers and service-specific payloads remain private behind this boundary.
-"""
+"""GraphRef backend adapter for registered atomic Worker tools."""
 
 from __future__ import annotations
 
@@ -25,12 +20,7 @@ from .providers import (
 
 @dataclass
 class GraphProviderAdapter:
-    """Compatibility facade for domain-scoped GraphRef provider adapters.
-
-    Public Agents continue to depend on this stable facade. Provider identifiers,
-    existing service payloads, and graph persistence remain private behind the
-    domain adapters.
-    """
+    """Expose narrow domain operations without composite Worker workflows."""
 
     identity: GraphEntityIdentityService
     evidence_ingestion: EvidenceIngestionService
@@ -63,7 +53,15 @@ class GraphProviderAdapter:
             db_path=db_path,
         )
 
-    def retrieve_evidence(
+    def check_connectivity(self) -> dict[str, Any]:
+        self.identity.store.verify_connectivity()
+        return {
+            "success": True,
+            "status": "ok",
+            "graph_id": self.identity.store.graph_id,
+        }
+
+    def search_evidence(
         self,
         refs: list[GraphRef],
         *,
@@ -71,35 +69,55 @@ class GraphProviderAdapter:
         top_k: int,
         output_dir: str | Path,
         db_path: str | Path | None,
-        source_task_id: str,
-        source_agent_id: str,
         as_of_time: str = "",
     ) -> dict[str, Any]:
-        return self._evidence_provider.retrieve_evidence(
+        return self._evidence_provider.search_evidence(
             refs,
             query=query,
             top_k=top_k,
             output_dir=output_dir,
             db_path=db_path,
-            source_task_id=source_task_id,
-            source_agent_id=source_agent_id,
             as_of_time=as_of_time,
         )
 
-    def load_portfolio_snapshot(
+    def ingest_evidence(
+        self,
+        search_results: list[dict[str, Any]],
+        *,
+        source_task_id: str,
+        source_agent_id: str,
+    ) -> dict[str, Any]:
+        return self._evidence_provider.ingest_evidence(
+            search_results,
+            source_task_id=source_task_id,
+            source_agent_id=source_agent_id,
+        )
+
+    def read_portfolio_state(
         self,
         *,
         user_id: str,
         output_dir: str | Path,
         db_path: str | Path | None,
+    ) -> dict[str, Any]:
+        return self._portfolio_provider.read_portfolio_state(
+            user_id=user_id,
+            output_dir=output_dir,
+            db_path=db_path,
+        )
+
+    def materialize_portfolio_snapshot(
+        self,
+        portfolio_payload: dict[str, Any],
+        *,
+        user_id: str,
         as_of_time: str,
         source_task_id: str,
         source_agent_id: str,
     ) -> dict[str, Any]:
-        return self._portfolio_provider.load_portfolio_snapshot(
+        return self._portfolio_provider.materialize_portfolio_snapshot(
+            portfolio_payload,
             user_id=user_id,
-            output_dir=output_dir,
-            db_path=db_path,
             as_of_time=as_of_time,
             source_task_id=source_task_id,
             source_agent_id=source_agent_id,

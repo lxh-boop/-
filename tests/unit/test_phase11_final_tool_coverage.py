@@ -70,20 +70,22 @@ def test_final_write_tools_require_approval_and_mcp_write_is_not_exposed() -> No
 
 
 def test_final_agent_default_path_has_no_read_tool_direct_fallbacks() -> None:
-    multi_task_source = Path("agent/orchestration/multi_task_executor.py").read_text(encoding="utf-8")
+    specialist_source = Path(
+        "agent/collaboration/specialist_runtime.py"
+    ).read_text(encoding="utf-8")
     executor_source = Path("agent/executor.py").read_text(encoding="utf-8")
 
-    forbidden_multi_task_calls = [
+    forbidden_worker_calls = [
         "query_portfolio_state(",
         "query_portfolio_risk(",
         "query_stock_news(",
         "query_stock_rag(",
     ]
-    for marker in forbidden_multi_task_calls:
-        assert marker not in multi_task_source
+    for marker in forbidden_worker_calls:
+        assert marker not in specialist_source
 
     assert "prepare_strategy_change(" not in executor_source
-    assert '"strategy_builder_tool"' in executor_source
+    assert "execute_unified_agent_request(" in executor_source
 
 
 def test_final_representative_tools_create_artifacts(tmp_path: Path) -> None:

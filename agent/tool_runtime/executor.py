@@ -31,6 +31,7 @@ from .contracts import (
     AGENT_READ,
     OP_READ,
     OP_WRITE,
+    TOOL_VISIBILITY_WORKER_PRIVATE,
     ToolDefinition,
     UnifiedToolResult,
 )
@@ -76,6 +77,7 @@ class ToolExecutor:
         context_bundle: Any | None = None,
         tool_context: dict[str, Any] | None = None,
         agent_type: str = AGENT_READ,
+        capability_id: str = "",
         approval_granted: bool = False,
     ) -> UnifiedToolResult:
         requested_name = str(tool_name or "")
@@ -86,6 +88,7 @@ class ToolExecutor:
                 "tool_name": requested_name,
                 "argument_keys": safe_argument_keys(arguments),
                 "agent_type": agent_type,
+                "capability_id": str(capability_id or ""),
                 "approval_granted": approval_granted,
             },
             run_id=str((context or {}).get("run_id") or ""),
@@ -186,6 +189,35 @@ class ToolExecutor:
                 started,
                 canonical_name=canonical_name,
             )
+        if (
+            definition.visibility == TOOL_VISIBILITY_WORKER_PRIVATE
+            and (
+                not str(capability_id or "").strip()
+                or str(capability_id or "").strip()
+                not in set(definition.allowed_capability_ids)
+            )
+        ):
+            publish_tool_event(
+                MessageType.ERROR_RAISED,
+                payload={
+                    "tool_name": requested_name,
+                    "error_type": "unauthorized_worker_capability",
+                },
+                error={
+                    "error_type": "unauthorized_worker_capability",
+                    "error_message": (
+                        "Assigned capability is not allowed to use this private tool."
+                    ),
+                },
+            )
+            return self._failure(
+                requested_name,
+                "unauthorized_worker_capability",
+                "Assigned capability is not allowed to use this private tool.",
+                started_at,
+                started,
+                canonical_name=canonical_name,
+            )
         if agent_type == AGENT_READ and definition.operation_type != OP_READ:
             publish_tool_event(
                 MessageType.ERROR_RAISED,
@@ -256,6 +288,7 @@ class ToolExecutor:
                 "canonical_tool_name": canonical_name,
                 "argument_keys": safe_argument_keys(arguments),
                 "agent_type": agent_type,
+                "capability_id": str(capability_id or ""),
                 "approval_granted": bool(approval_granted),
                 "operation_type": definition.operation_type,
             },

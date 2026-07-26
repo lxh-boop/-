@@ -212,29 +212,6 @@ def test_load_without_unique_reference_asks_user(tmp_path: Path):
     assert result["data"]["need_clarification"] is True
 
 
-def test_task_argument_sources_pass_structured_portfolios():
-    from agent.orchestration.argument_resolver import resolve_task_arguments
-
-    task_results = {
-        "task_1": {"data": {"positions": [{"stock_code": "000001"}]}},
-        "task_2": {"data": {"target_portfolio": {"target_positions": [{"stock_code": "000002"}]}}},
-    }
-    args = resolve_task_arguments(
-        {
-            "intent": "portfolio.compare_portfolios",
-            "parameters": {
-                "current_portfolio_source": "$task_1.data",
-                "target_portfolio_source": "$task_2.data.target_portfolio",
-            },
-        },
-        task_results=task_results,
-        context={"user_id": "u1"},
-        default_top_k=10,
-    )
-    assert args["current_portfolio"]["positions"][0]["stock_code"] == "000001"
-    assert args["target_portfolio"]["target_positions"][0]["stock_code"] == "000002"
-
-
 def test_failed_llm_design_returns_replan_instead_of_asking_user_to_design(tmp_path: Path):
     result = construct_target_portfolio_adapter(
         {

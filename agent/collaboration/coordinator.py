@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -17,12 +16,33 @@ from agent.graph.evidence_ingestion import EvidenceIngestionService
 from agent.graph.portfolio_graph import PortfolioGraphService
 from agent.graph.provider_adapter import GraphProviderAdapter
 from agent.graph.impact_service import GraphImpactService
+from agent.worker_tools import (
+    build_worker_tool_directory,
+    build_worker_tool_registry,
+)
 
 from .agent_directory import AgentDirectory
+from .context_handoff import MainContextHandoff
+from .context_resume import (
+    ContextResumeRuntime,
+    confirmed_memory_values,
+    context_requests,
+    descendant_task_ids,
+    resume_context_snapshot,
+)
 from .control_gateway import ControlGateway
+from .dag_runtime import run_worker_dag
 from .entry_decision import MainEntryDecisionPlanner, RequestMode
-from .models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus
+from .models import (
+    GraphAgentTask,
+    GraphWorkerResult,
+    MissingContextItem,
+    ResultStatus,
+    TaskStatus,
+    WorkerContextRequest,
+)
 from .planner import CoordinatorPlanner
+from .result_assembler import assemble_main_result
 from .session_memory import SessionMemoryStore
 from .specialist_runtime import SpecialistRuntime
 
@@ -83,6 +103,10 @@ class AgentCollaborationCoordinator:
         self.db_path = db_path
         self.llm_service = llm_service
         self.memory = SessionMemoryStore(output_dir=output_dir)
+        self.context_handoff = MainContextHandoff(
+            memory=self.memory,
+            llm_service=llm_service,
+        )
         self.directory = AgentDirectory()
         settings = graph_settings or Neo4jSettings.from_env()
         self.store = Neo4jFinancialGraphStore(settings)
@@ -95,10 +119,18 @@ class AgentCollaborationCoordinator:
             evidence_ingestion=EvidenceIngestionService(validator),
             portfolio_graph=PortfolioGraphService(self.identity, validator),
         )
+        worker_tool_registry = build_worker_tool_registry(
+            evidence_backend=provider,
+            portfolio_backend=provider,
+            risk_backend=provider,
+            diagnostic_backend=provider,
+            impact_backend=GraphImpactService(self.store),
+        )
         self.specialist = SpecialistRuntime(
             llm_service=llm_service,
-            provider=provider,
-            impact_service=GraphImpactService(self.store),
+            worker_tool_directory=build_worker_tool_directory(
+                worker_tool_registry
+            ),
         )
         self.entry = MainEntryDecisionPlanner(llm_service=llm_service)
         self.planner = CoordinatorPlanner(self.directory, llm_service=llm_service)
@@ -221,6 +253,18 @@ class AgentCollaborationCoordinator:
         del decomposition
         context = dict(execution_context or {})
         memory_summary = self.memory.build_summary(session_id, limit=40)
+        resumed = self._resume_waiting_context(
+            query=query,
+            user_id=user_id,
+            session_id=session_id,
+            run_id=run_id,
+            language=language,
+            default_top_k=default_top_k,
+            execution_context=context,
+            memory_summary=memory_summary,
+        )
+        if resumed is not None:
+            return resumed
         decision = self.entry.decide(
             query=query,
             memory_summary=memory_summary,
@@ -300,14 +344,84 @@ class AgentCollaborationCoordinator:
             language=language,
             as_of_time=explicit_as_of,
         )
-        results, batches, timeline = self._run_dag(
+        return self._execute_plan(
+            tasks=tasks,
+            query=query,
+            user_id=user_id,
+            session_id=session_id,
+            run_id=run_id,
+            default_top_k=default_top_k,
+            language=language,
+            execution_context=context,
+            focus_refs=focus_refs,
+            resolution_audit=resolution_audit,
+            plan_meta=plan_meta,
+        )
+
+    def _resume_waiting_context(
+        self,
+        *,
+        query: str,
+        user_id: str,
+        session_id: str,
+        run_id: str,
+        language: str,
+        default_top_k: int,
+        execution_context: dict[str, Any],
+        memory_summary: str,
+    ) -> dict[str, Any] | None:
+        return ContextResumeRuntime(
+            memory=self.memory,
+            handoff=self.context_handoff,
+            execute_plan=self._execute_plan,
+            empty_result=self._empty_result,
+        ).try_resume(
+            query=query,
+            user_id=user_id,
+            session_id=session_id,
+            run_id=run_id,
+            language=language,
+            default_top_k=default_top_k,
+            execution_context=execution_context,
+            memory_summary=memory_summary,
+        )
+
+    def _execute_plan(
+        self,
+        *,
+        tasks: list[GraphAgentTask],
+        query: str,
+        user_id: str,
+        session_id: str,
+        run_id: str,
+        default_top_k: int,
+        language: str,
+        execution_context: dict[str, Any],
+        focus_refs: list[GraphRef],
+        resolution_audit: dict[str, Any],
+        plan_meta: dict[str, Any],
+        initial_results: dict[str, GraphWorkerResult] | None = None,
+    ) -> dict[str, Any]:
+        context = {
+            **execution_context,
+            "session_memory_values": {
+                **confirmed_memory_values(self.memory, session_id),
+                **dict(
+                    execution_context.get("session_memory_values")
+                    or {}
+                ),
+            },
+        }
+        results, batches, timeline = run_worker_dag(
             tasks,
+            specialist=self.specialist,
             query=query,
             output_dir=self.output_dir,
             db_path=self.db_path,
             default_top_k=default_top_k,
             language=language,
             execution_context=context,
+            initial_results=initial_results,
         )
         for result in results.values():
             for update in result.memory_updates:
@@ -323,167 +437,118 @@ class AgentCollaborationCoordinator:
                     confidence=update.confidence,
                 )
 
-        public_results = {task_id: result.safe_for_coordinator() for task_id, result in results.items()}
-        finalizer_task_ids = {
-            task.task_id
-            for task in tasks
-            if task.capability_id
-            and self.directory.resolve(task.capability_id).can_finalize
-        }
-        report = next(
-            (
-                results[task.task_id]
-                for task in tasks
-                if task.task_id in finalizer_task_ids
-                and task.task_id in results
-                and results[task.task_id].summary
-            ),
-            None,
+        pending_context_requests = context_requests(results)
+        memory_values, unresolved_items = (
+            self.context_handoff.memory_values(
+                session_id,
+                pending_context_requests,
+            )
+            if pending_context_requests
+            else ({}, [])
         )
-        answer = report.summary if report and report.summary else self._fallback_answer(results, language)
-        statuses = [result.status for result in results.values()]
-        need_context = [item for result in results.values() for item in result.missing_items if item.blocking]
-        failed = sum(status in {ResultStatus.FAILED, ResultStatus.BLOCKED, ResultStatus.NOT_EXECUTED} for status in statuses)
-        completed = sum(status in {ResultStatus.COMPLETED, ResultStatus.PARTIAL, ResultStatus.PROPOSAL_READY} for status in statuses)
-        execution_status = (
-            "waiting_context" if need_context else
-            "completed" if failed == 0 else
-            "partially_completed" if completed else
-            "failed"
-        )
-        success = completed > 0 and failed == 0 and not need_context
-        question = _clarification_question(need_context, language) if need_context else ""
-        internal_count = len([item for item in timeline if item.get("status") not in {"not_executed"}])
-        return {
-            "success": success,
-            "answer": answer if not question else question,
-            "task_results": public_results,
-            "graph_worker_results": {
-                "contract_version": "graph_worker_results.v1",
-                "items": list(public_results.values()),
-                "task_count": len(public_results),
-                "completed_count": completed,
-                "failed_count": failed,
-                "waiting_context_count": len(need_context),
-            },
-            "tool_calls": [],
-            "internal_tool_call_count": internal_count,
-            "execution_order": [item.task_id for item in tasks if item.task_id in results],
-            "execution_batches": batches,
-            "warnings": [warning for result in results.values() for warning in result.warnings],
-            "errors": [],
-            "execution_status": execution_status,
-            "need_clarification": bool(need_context),
-            "clarification_question": question,
-            "missing_context": [item.to_dict() for item in need_context],
-            "observations": timeline,
-            "replan_audit": [],
-            "replan_count": 0,
-            "invalid_replan_block_count": 0,
-            "replan_limits": {"max_rounds": 2, "delegation_preserved": True},
-            "agent_outputs": public_results,
-            "agent_timeline": timeline,
-            "handoff": {
-                "handoff_available": bool(public_results),
-                "handoff_count": len(public_results),
-                "handoff_refs": [f"worker_result:{task_id}" for task_id in public_results],
-                "safety": {"worker_private_tools": True, "coordinator_tool_visibility": "none"},
-            },
-            "graph_runtime": {
-                "contract_version": "financial_graph_runtime.v1",
-                "graph_id": self.store.graph_id,
-                "task_contract": "graph_agent_task.v1",
-                "result_contract": "graph_worker_result.v1",
-                "focus_refs": [ref.to_dict() for ref in focus_refs],
-                "resolution_audit": resolution_audit,
-                "planner": plan_meta,
-                "legacy_public_protocol_enabled": False,
-            },
-        }
-
-    def _run_dag(
-        self,
-        tasks: list[GraphAgentTask],
-        *,
-        query: str,
-        output_dir: str | Path,
-        db_path: str | Path | None,
-        default_top_k: int,
-        language: str,
-        execution_context: dict[str, Any],
-    ) -> tuple[dict[str, GraphWorkerResult], list[dict[str, Any]], list[dict[str, Any]]]:
-        results: dict[str, GraphWorkerResult] = {}
-        pending = {task.task_id: task for task in tasks}
-        batches: list[dict[str, Any]] = []
-        timeline: list[dict[str, Any]] = []
-        batch_index = 0
-        while pending:
-            ready = [task for task in pending.values() if all(dep in results for dep in task.dependency_task_ids)]
-            if not ready:
-                for task in pending.values():
-                    results[task.task_id] = GraphWorkerResult(
-                        task_id=task.task_id,
-                        agent_id=task.assigned_agent,
-                        status=ResultStatus.NOT_EXECUTED,
-                        focus_refs=task.focus_refs,
-                        summary="任务依赖无法满足。",
-                        warnings=["unresolved_task_dependency"],
-                    )
-                break
-            batch_index += 1
-            batches.append({
-                "batch_index": batch_index,
-                "task_ids": [task.task_id for task in ready],
-                "agents": [task.assigned_agent for task in ready],
-                "capabilities": [task.capability_id for task in ready],
-                "parallel": len(ready) > 1,
-            })
-            max_workers = min(4, len(ready))
-            with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                futures = {
-                    pool.submit(
-                        self.specialist.run,
-                        task,
-                        current_user_request=query,
-                        dependency_results={dep: results[dep].safe_for_coordinator() for dep in task.dependency_task_ids if dep in results},
-                        output_dir=output_dir,
-                        db_path=db_path,
-                        default_top_k=default_top_k,
-                        language=language,
-                        execution_context=execution_context,
-                    ): task
-                    for task in ready
+        if (
+            pending_context_requests
+            and not unresolved_items
+            and memory_values
+            and not context.get("context_auto_resume_attempted")
+        ):
+            root_ids = {
+                request.source_task_id
+                for request in pending_context_requests
+            }
+            rerun_ids = descendant_task_ids(tasks, root_ids)
+            retained = {
+                task_id: result
+                for task_id, result in results.items()
+                if task_id not in rerun_ids
+                and result.status
+                in {
+                    ResultStatus.COMPLETED,
+                    ResultStatus.PARTIAL,
+                    ResultStatus.PROPOSAL_READY,
                 }
-                for future in as_completed(futures):
-                    task = futures[future]
-                    try:
-                        result = future.result()
-                    except Exception as exc:
-                        result = GraphWorkerResult(
-                            task_id=task.task_id,
-                            agent_id=task.assigned_agent,
-                            status=ResultStatus.FAILED,
-                            focus_refs=task.focus_refs,
-                            summary="Worker 执行失败。",
-                            warnings=[f"{type(exc).__name__}:{exc}"],
-                        )
-                    results[task.task_id] = result
-                    timeline.append({
-                        "task_id": task.task_id,
-                        "agent_id": task.assigned_agent,
-                        "capability_id": task.capability_id,
-                        "status": result.status.value,
-                        "summary": result.summary[:500],
-                    })
-                    pending.pop(task.task_id, None)
-        return results, batches, timeline
+            }
+            for task in tasks:
+                if task.task_id in rerun_ids:
+                    task.attempt += 1
+                    task.status = TaskStatus.CREATED
+            return self._execute_plan(
+                tasks=tasks,
+                query=query,
+                user_id=user_id,
+                session_id=session_id,
+                run_id=run_id,
+                default_top_k=default_top_k,
+                language=language,
+                execution_context={
+                    **context,
+                    "context_auto_resume_attempted": True,
+                    "resolved_context": {
+                        **dict(context.get("resolved_context") or {}),
+                        **memory_values,
+                    },
+                },
+                focus_refs=focus_refs,
+                resolution_audit=resolution_audit,
+                plan_meta=plan_meta,
+                initial_results=retained,
+            )
 
-    @staticmethod
-    def _fallback_answer(results: dict[str, GraphWorkerResult], language: str) -> str:
-        summaries = [result.summary for result in results.values() if result.summary]
-        if summaries:
-            return "\n\n".join(summaries)
-        return "目前不能回答，相关数据链路尚未返回结果。" if language != "en" else "The system cannot answer because the required data path returned no result."
+        if pending_context_requests and unresolved_items:
+            request_id = pending_context_requests[0].request_id
+            source_task_id = pending_context_requests[0].source_task_id
+            task_by_id = {task.task_id: task for task in tasks}
+            anchor_source = task_by_id.get(source_task_id) or tasks[0]
+            anchor = GraphAgentTask.from_dict(anchor_source.to_dict())
+            anchor.metadata["resume_state"] = {
+                "query": query,
+                "default_top_k": default_top_k,
+                "language": language,
+                "tasks": [task.to_dict() for task in tasks],
+                "results": {
+                    task_id: result.to_dict()
+                    for task_id, result in results.items()
+                },
+                "context_requests": [
+                    request.to_dict()
+                    for request in pending_context_requests
+                ],
+                "focus_refs": [
+                    ref.to_dict() for ref in focus_refs
+                ],
+                "resolution_audit": resolution_audit,
+                "plan_meta": plan_meta,
+                "execution_context": resume_context_snapshot(
+                    context
+                ),
+                "resolved_context": memory_values,
+            }
+            self.memory.register_waiting_task(
+                anchor,
+                [item.key for item in unresolved_items],
+            )
+            question = self.context_handoff.clarification_question(
+                unresolved_items,
+                language=language,
+            )
+        else:
+            request_id = ""
+            question = ""
+
+        return assemble_main_result(
+            tasks=tasks,
+            results=results,
+            batches=batches,
+            timeline=timeline,
+            directory=self.directory,
+            language=language,
+            question=question,
+            request_id=request_id,
+            graph_id=self.store.graph_id,
+            focus_refs=focus_refs,
+            resolution_audit=resolution_audit,
+            plan_meta=plan_meta,
+        )
 
     @staticmethod
     def _empty_result(*, answer: str, success: bool, status: str, warnings: list[str] | None = None) -> dict[str, Any]:

@@ -6,7 +6,6 @@ from agent.capability_index import CapabilityIndexRepository
 from agent.mcp.config import build_mcp_context_from_local_config
 from agent.mcp.discovery import reset_discovery_cache
 from agent.mcp.registry_bridge import default_example_tool_name
-from agent.orchestration.multi_task_executor import _execute_single, execute_multi_intent_plan
 from agent.tool_engine import AGENT_MAIN, AGENT_READ, OP_READ, OP_SYSTEM, execute_tool, get_tool_registry_v2
 
 
@@ -95,45 +94,6 @@ def test_python_sandbox_v2_blocks_business_state_writes(tmp_path) -> None:
     assert "sandbox_security_rejected" in ",".join(blocked.errors)
 
 
-def test_scheduler_and_report_aliases_execute_through_v2(tmp_path) -> None:
-    scheduler = _execute_single(
-        "scheduler_status",
-        {},
-        output_dir=tmp_path / "outputs",
-        db_path=tmp_path / "agent.db",
-        default_top_k=10,
-        execution_context={"user_id": "u1", "root": str(tmp_path)},
-    )
-    report = _execute_single(
-        "report_latest",
-        {},
-        output_dir=tmp_path / "outputs",
-        db_path=tmp_path / "agent.db",
-        default_top_k=10,
-        execution_context={"user_id": "u1"},
-    )
-
-    assert scheduler["success"] is True
-    assert scheduler["tool_engine"]["canonical_tool_name"] == "system.scheduler_status"
-    assert scheduler["artifact_id"]
-    assert report["success"] is True
-    assert report["tool_engine"]["canonical_tool_name"] == "report.list_latest"
-
-
-def test_multi_task_scheduler_uses_v2_system_tool(tmp_path) -> None:
-    result = execute_multi_intent_plan(
-        {"tasks": [{"task_id": "task_1", "intent": "scheduler_status", "parameters": {}, "depends_on": []}]},
-        user_id="u1",
-        output_dir=tmp_path / "outputs",
-        db_path=tmp_path / "agent.db",
-        context={"user_id": "u1", "root": str(tmp_path)},
-    )
-
-    assert result["success"] is True
-    assert result["tool_calls"][0]["tool_name"] == "scheduler_status"
-    assert result["task_results"]["task_1"]["success"] is True
-
-
 def test_mcp_readonly_bridge_executes_and_blocks_unsafe_write(tmp_path) -> None:
     output_dir = tmp_path / "outputs"
     _ranking_fixture(output_dir)
@@ -157,23 +117,6 @@ def test_mcp_readonly_bridge_executes_and_blocks_unsafe_write(tmp_path) -> None:
     assert result.data["mcp_canonical_tool"] == default_example_tool_name()
     assert blocked.success is False
     assert "mcp_readonly_tool_not_allowed" in blocked.errors
-
-
-def test_dynamic_mcp_intent_goes_through_v2_bridge_in_multi_task(tmp_path) -> None:
-    output_dir = tmp_path / "outputs"
-    _ranking_fixture(output_dir)
-    name = default_example_tool_name()
-    result = execute_multi_intent_plan(
-        {"tasks": [{"task_id": "task_mcp", "intent": name, "parameters": {"query": "stable portfolio", "top_k": 1}}]},
-        user_id="u1",
-        output_dir=output_dir,
-        db_path=tmp_path / "agent.db",
-        context=_mcp_context(),
-    )
-
-    assert result["success"] is True
-    assert result["tool_calls"][0]["tool_name"] == name
-    assert result["task_results"]["task_mcp"]["data"]["v2_bridge_tool_name"] == "mcp.readonly.invoke"
 
 
 def test_capability_index_exposes_p1b_tools() -> None:

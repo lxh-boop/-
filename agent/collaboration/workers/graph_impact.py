@@ -1,106 +1,100 @@
-"""Execute portfolio-impact path analysis from upstream graph results.
-
-The executor requires a cause/evidence anchor and a portfolio snapshot reference,
-then queries validated graph paths. It does not retrieve evidence, load portfolio
-state, infer missing identities, or create portfolio changes.
-"""
+"""Compose Impact-Worker results from atomic-tool observations."""
 
 from __future__ import annotations
 
-from typing import Any
+from agent.graph.contracts import GraphNodeKind, GraphPathRef, refs_from
+from agent.worker_planning.executor import WorkerPlanExecution
 
-from agent.graph.contracts import GraphNodeKind, refs_from
-from agent.graph.impact_service import GraphImpactService
-
-from ..models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus
-from .common import refs_from_dependencies, safe_public_value
+from ..models import GraphAgentTask, GraphWorkerResult, ResultStatus
+from .common import safe_public_value
 
 
-def run_graph_impact(
-    impact_service: GraphImpactService,
+def compose_graph_impact_result(
     task: GraphAgentTask,
-    dependency_results: dict[str, dict[str, Any]],
+    execution: WorkerPlanExecution,
 ) -> GraphWorkerResult:
-    causes = [
-        ref
-        for ref in task.focus_refs + task.context_refs
-        if ref.node_kind in {GraphNodeKind.EVIDENCE, GraphNodeKind.ASSERTION}
-        or (
-            ref.node_kind == GraphNodeKind.OBJECT
-            and ref.role in {"cause", "focus", "event"}
-        )
-    ]
-    causes.extend(
-        refs_from_dependencies(
-            dependency_results,
-            kinds={GraphNodeKind.EVIDENCE, GraphNodeKind.ASSERTION},
-        )
-    )
-    causes = refs_from([ref.to_dict() for ref in causes])
-    portfolio_candidates = [
-        ref
-        for ref in task.focus_refs + task.context_refs
-        if ref.node_kind == GraphNodeKind.OBJECT
-        and ref.role in {"impact_target", "portfolio", "focus"}
-        and "portfolio" in ref.node_id.lower()
-    ]
-    portfolio_candidates.extend(
-        refs_from_dependencies(dependency_results, kinds={GraphNodeKind.OBJECT})
-    )
-    portfolio_ref = next(
-        (ref for ref in portfolio_candidates if "portfolio" in ref.node_id.lower()),
-        None,
-    )
-    missing: list[MissingContextItem] = []
-    if not causes:
-        missing.append(
-            MissingContextItem(
-                key="cause_graph_ref",
-                description="缺少新闻、事件或声明原因锚点。",
-                expected_format="Evidence/Assertion/Event GraphRef",
-                searched_sources=["task refs", "dependency results"],
-            )
-        )
-    if portfolio_ref is None:
-        missing.append(
-            MissingContextItem(
-                key="portfolio_snapshot_ref",
-                description="缺少当前用户组合快照。",
-                expected_format="PortfolioSnapshot GraphRef",
-                searched_sources=["task refs", "dependency results"],
-            )
-        )
-    if missing:
+    if execution.missing_items:
         return GraphWorkerResult(
             task_id=task.task_id,
             agent_id=task.assigned_agent,
             status=ResultStatus.NEED_CONTEXT,
             focus_refs=task.focus_refs,
-            summary="影响路径分析缺少必要图锚点。",
-            missing_items=missing,
+            summary="影响路径分析缺少必要上下文。",
+            missing_items=execution.missing_items,
+            warnings=execution.warnings,
         )
-    paths = impact_service.find_paths(
-        cause_refs=causes,
-        portfolio_ref=portfolio_ref,
-        as_of_time=task.as_of_time,
+    paths: list[GraphPathRef] = []
+    summary: dict = {}
+    for result in execution.step_results.values():
+        paths.extend(
+            GraphPathRef(**dict(item))
+            for item in result.data.get("paths") or []
+            if isinstance(item, dict)
+        )
+        if isinstance(result.data.get("summary"), dict):
+            summary = dict(result.data["summary"])
+    unique_paths = {
+        path.path_id: path for path in paths
+    }
+    paths = list(unique_paths.values())
+    if not summary:
+        summary = {
+            "holding_count": len(
+                {path.end_ref.node_id for path in paths}
+            ),
+            "path_count": len(paths),
+        }
+    evidence_refs = refs_from(
+        [
+            path.start_ref.to_dict()
+            for path in paths
+            if path.start_ref.node_kind == GraphNodeKind.EVIDENCE
+        ]
     )
-    summary = impact_service.summarize_paths(paths)
     return GraphWorkerResult(
         task_id=task.task_id,
         agent_id=task.assigned_agent,
-        status=ResultStatus.COMPLETED if paths else ResultStatus.PARTIAL,
-        focus_refs=[*causes, portfolio_ref],
-        summary=(
-            f"已找到 {len(paths)} 条可追踪影响路径，涉及 {summary.get('holding_count', 0)} 个持仓。"
-            if paths
-            else "当前权威图和证据图中未找到新闻到持仓的可验证路径。"
+        status=(
+            ResultStatus.COMPLETED
+            if execution.success and paths
+            else ResultStatus.PARTIAL
+            if execution.success
+            else ResultStatus.FAILED
         ),
-        findings=[{"kind": "portfolio_impact_paths", **safe_public_value(summary)}],
-        graph_path_refs=paths,
-        evidence_refs=[
-            ref for ref in causes if ref.node_kind == GraphNodeKind.EVIDENCE
+        focus_refs=task.focus_refs,
+        summary=(
+            f"已找到 {len(paths)} 条可追踪影响路径，"
+            f"涉及 {summary.get('holding_count', 0)} 个持仓。"
+            if paths
+            else "当前权威图中未找到可验证的影响路径。"
+        ),
+        findings=[
+            {
+                "kind": "portfolio_impact_paths",
+                **safe_public_value(summary),
+            }
         ],
-        confidence=max((path.confidence for path in paths), default=0.0),
-        warnings=[] if paths else ["no_validated_impact_path"],
-        metadata={"produced_refs": [portfolio_ref.to_dict()]},
+        graph_path_refs=paths,
+        evidence_refs=evidence_refs,
+        confidence=max(
+            (path.confidence for path in paths),
+            default=0.0,
+        ),
+        warnings=(
+            execution.warnings
+            if paths
+            else [
+                *execution.warnings,
+                "no_validated_impact_path",
+            ]
+        ),
+        metadata={
+            "tool_plan": {
+                "ordered_step_ids": execution.ordered_step_ids,
+                "tool_call_count": execution.tool_call_count,
+            }
+        },
     )
+
+
+__all__ = ["compose_graph_impact_result"]

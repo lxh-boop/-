@@ -1,162 +1,160 @@
-"""Execute evidence-domain Worker tasks through private atomic tools.
-
-The Worker consumes resolved object or evidence GraphRefs, chooses one
-allowlisted evidence capability, and consumes its normalized result. Provider
-dependencies, registration metadata, and graph persistence remain behind the
-private tool boundary.
-"""
+"""Compose Evidence-Worker results from private atomic-tool observations."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from agent.graph.contracts import GraphNodeKind, refs_from
-from agent.tool_runtime import ToolExecutor
-from agent.worker_tools import (
-    EVIDENCE_ANALYZE_ENTITIES_TOOL,
-    EVIDENCE_RETRIEVE_TOOL,
-)
+from agent.worker_planning.executor import WorkerPlanExecution
 
-from ..models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus
+from ..models import GraphAgentTask, GraphWorkerResult, ResultStatus
 from .common import safe_public_value
 
 
-def run_evidence(
-    tool_executor: ToolExecutor,
+def provided_evidence_result(
     task: GraphAgentTask,
-    query: str,
-    output_dir: str | Path,
-    db_path: str | Path | None,
-    default_top_k: int,
-) -> GraphWorkerResult:
+) -> GraphWorkerResult | None:
     evidence_refs = [
         ref
         for ref in task.focus_refs + task.context_refs
         if ref.node_kind == GraphNodeKind.EVIDENCE
     ]
-    object_refs = [ref for ref in task.focus_refs if ref.node_kind == GraphNodeKind.OBJECT]
-    if evidence_refs and not object_refs:
-        return GraphWorkerResult(
-            task_id=task.task_id,
-            agent_id=task.assigned_agent,
-            status=ResultStatus.COMPLETED,
-            focus_refs=task.focus_refs,
-            summary="已使用指定新闻或证据节点作为分析原因锚点。",
-            evidence_refs=evidence_refs,
-            findings=[
-                {
-                    "kind": "provided_evidence",
-                    "evidence_refs": [ref.to_dict() for ref in evidence_refs],
-                }
+    object_refs = [
+        ref
+        for ref in task.focus_refs
+        if ref.node_kind == GraphNodeKind.OBJECT
+    ]
+    if not evidence_refs or object_refs:
+        return None
+    return GraphWorkerResult(
+        task_id=task.task_id,
+        agent_id=task.assigned_agent,
+        status=ResultStatus.COMPLETED,
+        focus_refs=task.focus_refs,
+        summary="已使用指定证据节点作为分析依据。",
+        evidence_refs=evidence_refs,
+        findings=[
+            {
+                "kind": "provided_evidence",
+                "evidence_refs": [
+                    ref.to_dict() for ref in evidence_refs
+                ],
+            }
+        ],
+        confidence=1.0,
+        metadata={
+            "produced_refs": [
+                ref.to_dict() for ref in evidence_refs
             ],
-            confidence=1.0,
-            metadata={"produced_refs": [ref.to_dict() for ref in evidence_refs]},
-        )
-    if not object_refs:
+            "tool_plan": {
+                "execution_mode": "provided_graph_context",
+                "tool_call_count": 0,
+            },
+        },
+    )
+
+
+def compose_evidence_result(
+    task: GraphAgentTask,
+    execution: WorkerPlanExecution,
+) -> GraphWorkerResult:
+    if execution.missing_items:
         return GraphWorkerResult(
             task_id=task.task_id,
             agent_id=task.assigned_agent,
             status=ResultStatus.NEED_CONTEXT,
             focus_refs=task.focus_refs,
-            summary="缺少已解析的金融对象或指定证据。",
-            missing_items=[
-                MissingContextItem(
-                    key="focus_graph_ref",
-                    description="需要明确分析对象或指定新闻的 GraphRef。",
-                    expected_format="唯一对象、新闻、公告或研报",
-                    reason="Worker 不允许从自由文本重新猜测权威金融实体。",
-                    searched_sources=["task.focus_refs", "task.context_refs"],
-                )
-            ],
+            summary="证据分析缺少必要的业务上下文。",
+            missing_items=execution.missing_items,
+            warnings=execution.warnings,
         )
-    analyze_task_types = {
-        "analyze_entity_evidence",
-        "compare_entity_evidence",
-    }
-    tool_name = (
-        EVIDENCE_ANALYZE_ENTITIES_TOOL
-        if task.task_type in analyze_task_types
-        else EVIDENCE_RETRIEVE_TOOL
-    )
-    arguments = {
-        "object_refs": [ref.to_dict() for ref in object_refs],
-        "user_id": task.user_id,
-    }
-    if tool_name == EVIDENCE_RETRIEVE_TOOL:
-        arguments.update(
+
+    results: list[dict] = []
+    evidence_refs = []
+    ingestion_results: list[dict] = []
+    tool_observations: list[dict] = []
+    for step_id, tool_result in execution.step_results.items():
+        tool_observations.append(
             {
-                "query": query or task.objective,
-                "top_k": max(1, min(int(default_top_k or 20), 100)),
-                "source_task_id": task.task_id,
-                "source_agent_id": task.assigned_agent,
-                "as_of_time": task.as_of_time,
+                "step_id": step_id,
+                "tool_name": tool_result.tool_name,
+                "success": tool_result.success,
+                "artifact_id": tool_result.artifact_id,
+                "error_type": tool_result.error_type,
             }
         )
-    tool_result = tool_executor.execute(
-        tool_name,
-        arguments,
-        context={
-            "user_id": task.user_id,
-            "conversation_id": task.session_id,
-            "session_id": task.session_id,
-            "run_id": task.run_id,
-            "task_id": task.task_id,
-            "agent_role": task.assigned_agent,
-            "output_dir": output_dir,
-            "db_path": db_path,
-        },
-        agent_type=task.assigned_agent,
-    )
-    analysis = dict(tool_result.data or {})
-    analysis.update(
+        results.extend(
+            dict(item)
+            for item in tool_result.data.get("results") or []
+            if isinstance(item, dict)
+        )
+        evidence_refs.extend(
+            refs_from(tool_result.data.get("evidence_refs") or [])
+        )
+        ingestion_results.extend(
+            dict(item)
+            for item in tool_result.data.get("ingestion_results") or []
+            if isinstance(item, dict)
+        )
+    findings = [
         {
-            "success": tool_result.success,
-            "message": tool_result.message,
-            "warnings": list(tool_result.warnings or []),
-            "errors": list(tool_result.errors or []),
+            "kind": "entity_evidence_result",
+            "focus_ref": safe_public_value(item.get("focus_ref")),
+            "success": bool(item.get("success")),
+            "message": str(item.get("message") or "")[:1200],
+            "record_count": len(item.get("records") or []),
+            "source_count": len(item.get("sources") or []),
+            "data_summary": safe_public_value(item.get("data") or {}),
         }
-    )
-    produced_evidence = refs_from(analysis.get("evidence_refs") or [])
-    success = bool(analysis.get("success"))
-    findings = []
-    for item in analysis.get("results") or []:
-        if not isinstance(item, dict):
-            continue
-        findings.append(
-            {
-                "kind": "entity_evidence_result",
-                "focus_ref": safe_public_value(item.get("focus_ref")),
-                "success": bool(item.get("success")),
-                "message": str(item.get("message") or "")[:1200],
-                "record_count": len(item.get("records") or []),
-                "source_count": len(item.get("sources") or []),
-                "data_summary": safe_public_value(item.get("data") or {}),
-            }
-        )
+        for item in results
+    ]
     return GraphWorkerResult(
         task_id=task.task_id,
         agent_id=task.assigned_agent,
-        status=ResultStatus.COMPLETED if success else ResultStatus.FAILED,
-        focus_refs=object_refs,
-        summary="已完成金融对象证据读取并写入可追踪金融图。" if success else "未获得可用的金融证据。",
+        status=(
+            ResultStatus.COMPLETED
+            if execution.success
+            else ResultStatus.FAILED
+        ),
+        focus_refs=task.focus_refs,
+        summary=(
+            "已完成证据工具计划。"
+            if execution.success
+            else "证据工具计划执行失败。"
+        ),
         findings=findings,
-        confidence=0.85 if success else 0.0,
-        evidence_refs=produced_evidence,
-        warnings=[
-            str(item)
-            for item in [
-                *(analysis.get("warnings") or []),
-                *(analysis.get("errors") or []),
-            ]
-            if str(item).strip()
-        ],
+        confidence=0.85 if execution.success else 0.0,
+        evidence_refs=refs_from(
+            [ref.to_dict() for ref in evidence_refs]
+        ),
+        warnings=list(
+            dict.fromkeys(
+                [
+                    *execution.warnings,
+                    *[
+                        warning
+                        for result in execution.step_results.values()
+                        for warning in [
+                            *result.warnings,
+                            *result.errors,
+                        ]
+                    ],
+                ]
+            )
+        ),
         metadata={
-            "produced_refs": [ref.to_dict() for ref in produced_evidence],
-            "ingestion_results": safe_public_value(analysis.get("ingestion_results") or []),
-            "tool_execution": {
-                "tool_name": tool_result.tool_name,
-                "artifact_id": tool_result.artifact_id,
-                "error_type": tool_result.error_type,
+            "produced_refs": [
+                ref.to_dict() for ref in evidence_refs
+            ],
+            "ingestion_results": safe_public_value(ingestion_results),
+            "tool_plan": {
+                "ordered_step_ids": execution.ordered_step_ids,
+                "tool_call_count": execution.tool_call_count,
+                "observations": tool_observations,
             },
         },
     )
+
+
+__all__ = [
+    "compose_evidence_result",
+    "provided_evidence_result",
+]

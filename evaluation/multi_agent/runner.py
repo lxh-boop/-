@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 from agent.executor import run_agent_request
-from agent.orchestration.multi_task_executor import execute_multi_intent_plan
 from evaluation.multi_agent.exporter import export_benchmark
 from evaluation.multi_agent.fixtures import write_benchmark_fixture
 from evaluation.multi_agent.metrics import (
@@ -45,15 +44,18 @@ def _run_direct_path(
     db_path: Path,
     top_k: int,
 ) -> dict[str, Any]:
-    return execute_multi_intent_plan(
-        {"tasks": scenario.tasks},
+    return run_agent_request(
+        scenario.query,
         user_id=user_id,
         output_dir=output_dir,
         db_path=db_path,
-        default_top_k=top_k,
+        top_k=top_k,
         session_id=f"benchmark_{scenario.scenario_id}_direct",
-        language="en",
-        context={"benchmark_mode": DIRECT_MODE},
+        reply_language="en",
+        decomposition_context={
+            "benchmark_mode": DIRECT_MODE,
+            "benchmark_scenario_id": scenario.scenario_id,
+        },
     )
 
 

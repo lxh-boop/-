@@ -126,6 +126,25 @@ class ResultStatus(str, Enum):
         return cls.FAILED
 
 
+class ContextRequestCategory(str, Enum):
+    USER_INPUT_REQUIRED = "user_input_required"
+    DEPENDENCY_REQUIRED = "dependency_required"
+    MEMORY_LOOKUP_REQUIRED = "memory_lookup_required"
+    AMBIGUOUS_REFERENCE = "ambiguous_reference"
+    SYSTEM_CONFIG_REQUIRED = "system_config_required"
+    APPROVAL_REQUIRED = "approval_required"
+
+    @classmethod
+    def from_value(cls, value: Any) -> "ContextRequestCategory":
+        if isinstance(value, cls):
+            return value
+        text = str(value or cls.USER_INPUT_REQUIRED.value).strip().lower()
+        for item in cls:
+            if item.value == text:
+                return item
+        return cls.USER_INPUT_REQUIRED
+
+
 @dataclass
 class MissingContextItem:
     key: str
@@ -135,6 +154,13 @@ class MissingContextItem:
     searched_sources: list[str] = field(default_factory=list)
     blocking: bool = True
     graph_refs: list[GraphRef] = field(default_factory=list)
+    category: ContextRequestCategory | str = (
+        ContextRequestCategory.USER_INPUT_REQUIRED
+    )
+    value_schema: dict[str, Any] = field(default_factory=dict)
+    candidates: list[dict[str, Any]] = field(default_factory=list)
+    sensitivity: str = "normal"
+    allow_memory_lookup: bool = True
 
     def __post_init__(self) -> None:
         self.key = str(self.key or "").strip()
@@ -144,12 +170,57 @@ class MissingContextItem:
         self.searched_sources = _str_list(self.searched_sources, limit=30)
         self.blocking = bool(self.blocking)
         self.graph_refs = refs_from(self.graph_refs)
+        self.category = ContextRequestCategory.from_value(self.category)
+        self.value_schema = dict(self.value_schema or {})
+        self.candidates = _dict_list(self.candidates, limit=30)
+        self.sensitivity = str(self.sensitivity or "normal").strip().lower()
+        self.allow_memory_lookup = bool(self.allow_memory_lookup)
 
     def to_dict(self) -> dict[str, Any]:
         return _plain(self)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "MissingContextItem":
+        return cls(**dict(value or {}))
+
+
+@dataclass
+class WorkerContextRequest:
+    """Structured Worker-to-Main request for context the Worker cannot infer."""
+
+    source_task_id: str
+    source_capability_id: str
+    requirements: list[MissingContextItem]
+    request_id: str = field(default_factory=lambda: new_id("context"))
+    resume_policy: str = "resume_task_and_descendants"
+    attempt: int = 1
+
+    def __post_init__(self) -> None:
+        self.request_id = str(self.request_id or new_id("context"))
+        self.source_task_id = str(self.source_task_id or "").strip()
+        self.source_capability_id = str(
+            self.source_capability_id or ""
+        ).strip()
+        self.requirements = [
+            item
+            if isinstance(item, MissingContextItem)
+            else MissingContextItem.from_dict(item)
+            for item in list(self.requirements or [])[:50]
+            if isinstance(item, (MissingContextItem, dict))
+        ]
+        self.resume_policy = str(
+            self.resume_policy or "resume_task_and_descendants"
+        )
+        try:
+            self.attempt = max(1, int(self.attempt))
+        except (TypeError, ValueError):
+            self.attempt = 1
+
+    def to_dict(self) -> dict[str, Any]:
+        return _plain(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "WorkerContextRequest":
         return cls(**dict(value or {}))
 
 
@@ -279,6 +350,7 @@ class GraphWorkerResult:
     graph_patch_ref: str = ""
     warnings: list[str] = field(default_factory=list)
     missing_items: list[MissingContextItem] = field(default_factory=list)
+    context_request: WorkerContextRequest | None = None
     memory_updates: list[MemoryUpdate] = field(default_factory=list)
     suggested_next_capabilities: list[str] = field(default_factory=list)
     artifact_refs: list[dict[str, Any]] = field(default_factory=list)
@@ -311,6 +383,13 @@ class GraphWorkerResult:
             for item in list(self.missing_items or [])[:50]
             if isinstance(item, (MissingContextItem, dict))
         ]
+        if self.context_request is not None and not isinstance(
+            self.context_request,
+            WorkerContextRequest,
+        ):
+            self.context_request = WorkerContextRequest.from_dict(
+                dict(self.context_request)
+            )
         self.memory_updates = [
             item if isinstance(item, MemoryUpdate) else MemoryUpdate.from_dict(item)
             for item in list(self.memory_updates or [])[:100]
@@ -329,7 +408,8 @@ class GraphWorkerResult:
             key: value
             for key, value in self.metadata.items()
             if key in {
-                "task_type", "attempt", "partial_reason", "proposal_id", "plan_id",
+                "task_type", "capability_id", "attempt", "partial_reason",
+                "proposal_id", "plan_id",
                 "requires_approval", "graph_view_id", "duration_ms",
             }
         }
@@ -348,6 +428,11 @@ class GraphWorkerResult:
             "graph_patch_ref": self.graph_patch_ref,
             "warnings": list(self.warnings[:12]),
             "missing_items": [item.to_dict() for item in self.missing_items[:12]],
+            "context_request": (
+                self.context_request.to_dict()
+                if self.context_request is not None
+                else None
+            ),
             "artifact_refs": [_compact(item, max_depth=3) for item in self.artifact_refs[:20]],
             "metadata": _compact(safe_metadata, max_depth=3),
         }

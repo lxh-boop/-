@@ -610,6 +610,57 @@ class SessionMemoryStore:
                 (now_text(), str(new_run_id or ""), str(new_run_id or ""), str(waiting_id or "")),
             )
 
+    def update_waiting_task(
+        self,
+        waiting_id: str,
+        *,
+        task: GraphAgentTask,
+        missing_keys: list[str],
+    ) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "UPDATE session_waiting_tasks SET task_json=?, missing_keys_json=?, "
+                "attempt=?, updated_at=? WHERE waiting_id=? AND status='waiting_context'",
+                (
+                    _dumps(task.to_dict()),
+                    _dumps(
+                        list(
+                            dict.fromkeys(
+                                str(item)
+                                for item in missing_keys
+                                if str(item).strip()
+                            )
+                        )
+                    ),
+                    task.attempt,
+                    now_text(),
+                    str(waiting_id or ""),
+                ),
+            )
+
+    def cancel_waiting_tasks(
+        self,
+        session_id: str,
+        *,
+        status: str = "cancelled",
+    ) -> int:
+        normalized = (
+            str(status or "cancelled").strip().lower().replace(" ", "_")
+        )
+        if normalized not in {"cancelled", "superseded"}:
+            raise ValueError("invalid_waiting_task_terminal_status")
+        with self._lock, self._connect() as connection:
+            count = connection.execute(
+                "UPDATE session_waiting_tasks SET status=?, updated_at=? "
+                "WHERE session_id=? AND status='waiting_context'",
+                (
+                    normalized,
+                    now_text(),
+                    str(session_id or ""),
+                ),
+            ).rowcount
+        return int(count or 0)
+
     def clear_session(self, session_id: str, *, hard: bool = True) -> dict[str, int]:
         session = str(session_id or "")
         with self._lock, self._connect() as connection:

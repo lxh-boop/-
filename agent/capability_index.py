@@ -416,44 +416,6 @@ def _record_from_unified_tool(definition: ToolDefinition) -> CapabilityRecord:
     )
 
 
-def _workflow_records() -> list[CapabilityRecord]:
-    content = {
-        "workflow": "readonly_target_portfolio_allocation",
-        "tools": ["portfolio_state", "portfolio_risk", "ranking"],
-        "outputs": ["target_portfolio_allocation", "target_portfolio", "current_vs_target"],
-    }
-    return [
-        CapabilityRecord(
-            capability_id="workflow:readonly_target_portfolio_allocation",
-            name="readonly_target_portfolio_allocation",
-            description="Combine portfolio state, risk and ranking evidence into a read-only target portfolio allocation.",
-            supported_goal_actions=[
-                "generate_target_portfolio_allocation",
-                "recommend_portfolio",
-                "recommend_portfolio_adjustment",
-            ],
-            supported_objects=["current_portfolio", "market_evidence"],
-            required_inputs=["portfolio_state", "portfolio_risk", "ranking"],
-            optional_inputs=[],
-            produced_outputs=["target_portfolio_allocation", "target_portfolio", "current_vs_target", "reasons", "limitations"],
-            read_or_write="read",
-            tool_or_workflow="workflow",
-            registered_tool_names=["portfolio_state", "portfolio_risk", "ranking"],
-            allowed_agent_types=[SUPERVISOR, PORTFOLIO_ANALYSIS, REPORTING],
-            permission_scope="read",
-            requires_approval=False,
-            runtime_policy={"concurrency_safe": True, "uses_existing_task_outputs": True},
-            fallback_capabilities=["tool:ranking", "tool:stock_news", "tool:stock_rag"],
-            implementation_files=["agent.orchestration.result_aggregator"],
-            version="1",
-            test_status="passed",
-            enabled=True,
-            sensitivity="normal",
-            content_hash=_hash_payload(content),
-        )
-    ]
-
-
 def build_trusted_capability_index(
     *,
     include_mcp: bool = False,
@@ -462,7 +424,6 @@ def build_trusted_capability_index(
     """Trusted builder: builds an index from registered tools and allowlists only."""
 
     records = [_record_from_unified_tool(definition) for definition in get_tool_registry_v2().list()]
-    records.extend(_workflow_records())
     records = [record for record in records if record.enabled and record.allowed_agent_types]
     content_hash = _hash_payload([record.to_dict(agent_view=False) for record in records])
     generated_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")

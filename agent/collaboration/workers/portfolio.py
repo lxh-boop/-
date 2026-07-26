@@ -1,65 +1,95 @@
-"""Execute the portfolio-snapshot Worker task.
-
-The executor asks the provider facade for the current user's authoritative
-portfolio snapshot, returns portfolio and holding GraphRefs, and records reusable
-session context. It does not calculate risk or create trading proposals.
-"""
+"""Compose Portfolio-Worker results from atomic-tool observations."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from agent.graph.contracts import GraphRef, refs_from
-from agent.graph.provider_adapter import GraphProviderAdapter
+from agent.worker_planning.executor import WorkerPlanExecution
 
-from ..models import GraphAgentTask, GraphWorkerResult, MemoryUpdate, ResultStatus
+from ..models import (
+    GraphAgentTask,
+    GraphWorkerResult,
+    MemoryUpdate,
+    ResultStatus,
+)
 from .common import safe_public_value
 
 
-def run_portfolio(
-    provider: GraphProviderAdapter,
+def compose_portfolio_result(
     task: GraphAgentTask,
-    output_dir: str | Path,
-    db_path: str | Path | None,
+    execution: WorkerPlanExecution,
 ) -> GraphWorkerResult:
-    raw = provider.load_portfolio_snapshot(
-        user_id=task.user_id,
-        output_dir=output_dir,
-        db_path=db_path,
-        as_of_time=task.as_of_time,
-        source_task_id=task.task_id,
-        source_agent_id=task.assigned_agent,
+    if execution.missing_items:
+        return GraphWorkerResult(
+            task_id=task.task_id,
+            agent_id=task.assigned_agent,
+            status=ResultStatus.NEED_CONTEXT,
+            focus_refs=task.focus_refs,
+            summary="组合读取缺少必要的业务上下文。",
+            missing_items=execution.missing_items,
+            warnings=execution.warnings,
+        )
+    snapshot = next(
+        (
+            result.data
+            for result in execution.step_results.values()
+            if isinstance(result.data.get("portfolio_ref"), dict)
+        ),
+        {},
     )
-    if not raw.get("success"):
+    if not execution.success or not snapshot:
         return GraphWorkerResult(
             task_id=task.task_id,
             agent_id=task.assigned_agent,
             status=ResultStatus.FAILED,
             focus_refs=task.focus_refs,
-            summary=str(raw.get("message") or "无法读取当前组合。"),
-            warnings=[str(item) for item in raw.get("warnings") or []],
+            summary="无法读取并生成当前组合快照。",
+            warnings=list(
+                dict.fromkeys(
+                    [
+                        *execution.warnings,
+                        *[
+                            error
+                            for result in execution.step_results.values()
+                            for error in result.errors
+                        ],
+                    ]
+                )
+            ),
         )
-    portfolio_ref = GraphRef.from_dict(dict(raw["portfolio_ref"]))
-    holding_refs = refs_from(raw.get("holding_refs") or [])
+    portfolio_ref = GraphRef.from_dict(dict(snapshot["portfolio_ref"]))
+    holding_refs = refs_from(snapshot.get("holding_refs") or [])
+    unresolved = list(snapshot.get("unresolved_positions") or [])
     produced = [portfolio_ref, *holding_refs]
     return GraphWorkerResult(
         task_id=task.task_id,
         agent_id=task.assigned_agent,
-        status=ResultStatus.PARTIAL if raw.get("unresolved_positions") else ResultStatus.COMPLETED,
+        status=(
+            ResultStatus.PARTIAL
+            if unresolved
+            else ResultStatus.COMPLETED
+        ),
         focus_refs=[portfolio_ref],
-        summary="已读取当前组合，并生成 Neo4j 组合快照。",
+        summary="已读取当前组合并生成可追踪图谱快照。",
         findings=[
             {
                 "kind": "portfolio_snapshot",
                 "portfolio_ref": portfolio_ref.to_dict(),
-                "holding_refs": [ref.to_dict() for ref in holding_refs],
+                "holding_refs": [
+                    ref.to_dict() for ref in holding_refs
+                ],
                 "holding_count": len(holding_refs),
-                "unresolved_position_count": len(raw.get("unresolved_positions") or []),
-                "portfolio_summary": safe_public_value(raw.get("portfolio") or {}),
+                "unresolved_position_count": len(unresolved),
+                "portfolio_summary": safe_public_value(
+                    snapshot.get("portfolio") or {}
+                ),
             }
         ],
-        confidence=1.0 if not raw.get("unresolved_positions") else 0.75,
-        warnings=["portfolio_contains_unresolved_positions"] if raw.get("unresolved_positions") else [],
+        confidence=1.0 if not unresolved else 0.75,
+        warnings=(
+            ["portfolio_contains_unresolved_positions"]
+            if unresolved
+            else []
+        ),
         memory_updates=[
             MemoryUpdate(
                 key="active_graph_refs",
@@ -72,7 +102,16 @@ def run_portfolio(
             )
         ],
         metadata={
-            "produced_refs": [ref.to_dict() for ref in produced],
-            "unresolved_positions": safe_public_value(raw.get("unresolved_positions") or []),
+            "produced_refs": [
+                ref.to_dict() for ref in produced
+            ],
+            "unresolved_positions": safe_public_value(unresolved),
+            "tool_plan": {
+                "ordered_step_ids": execution.ordered_step_ids,
+                "tool_call_count": execution.tool_call_count,
+            },
         },
     )
+
+
+__all__ = ["compose_portfolio_result"]

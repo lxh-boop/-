@@ -36,12 +36,16 @@ def test_collaboration_never_constructs_an_independent_model_client():
         assert "LLMService(" not in text, path.name
 
 
-def test_strategy_guard_never_calls_old_router():
-    text = _text("agent/collaboration/workers/strategy_guard.py")
-    assert "from agent.router import route_agent_query" not in text
-    assert "route_agent_query(" not in text
-    assert "OP_PROPOSAL" in text
-    assert "approval_granted=False" in text
+def test_strategy_guard_uses_private_proposal_tool_boundary():
+    worker = _text("agent/collaboration/workers/strategy_guard.py")
+    definitions = _text("agent/worker_tools/proposal.py")
+
+    assert "route_agent_query(" not in worker
+    assert "execute_tool_legacy_dict" not in worker
+    assert "AGENT_MAIN" not in worker
+    assert "OP_PROPOSAL" in definitions
+    assert "AGENT_WORKER" in definitions
+    assert '"strategy.build_proposal"' in definitions
 
 
 def test_public_legacy_entry_files_are_only_facades():
@@ -76,9 +80,10 @@ def test_deprecated_action_fields_are_not_reintroduced():
 
 def test_agent_dags_reuse_the_shared_validator():
     capability_validator = _text("agent/collaboration/capability_plan_validator.py")
-    multi_task_executor = _text("agent/orchestration/multi_task_executor.py")
+    worker_validator = _text("agent/worker_planning/validator.py")
+    dag_runtime = _text("agent/collaboration/dag_runtime.py")
 
     assert "DagValidator" in capability_validator
-    assert "DagValidator" in multi_task_executor
+    assert "DagValidator" in worker_validator
     assert "def _validate_dependencies" not in capability_validator
-    assert "def _topological_order" not in multi_task_executor
+    assert "def _topological_order" not in dag_runtime

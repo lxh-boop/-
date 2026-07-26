@@ -334,6 +334,24 @@ class GraphPathRef:
     explanation: str = ""
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "start_ref",
+            (
+                self.start_ref
+                if isinstance(self.start_ref, GraphRef)
+                else GraphRef.from_dict(dict(self.start_ref or {}))
+            ),
+        )
+        object.__setattr__(
+            self,
+            "end_ref",
+            (
+                self.end_ref
+                if isinstance(self.end_ref, GraphRef)
+                else GraphRef.from_dict(dict(self.end_ref or {}))
+            ),
+        )
         object.__setattr__(self, "path_id", _clean_text(self.path_id, limit=400))
         object.__setattr__(self, "path_type", _clean_text(self.path_type or "semantic", limit=160))
         object.__setattr__(self, "assertion_ids", _clean_str_list(self.assertion_ids, limit=100))

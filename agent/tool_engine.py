@@ -1673,7 +1673,3 @@ def execute_tool(
         agent_type=agent_type,
         approval_granted=approval_granted,
     )
-
-
-def execute_tool_legacy_dict(*args: Any, **kwargs: Any) -> dict[str, Any]:
-    return execute_tool(*args, **kwargs).to_legacy_dict()

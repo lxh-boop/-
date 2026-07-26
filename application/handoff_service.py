@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.communication import MessageStore
-from agent.handoff import HandoffSanitizer
+from agent.context.context_sanitizer import ContextSanitizer
 
 
 HANDOFF_MESSAGE_TYPES = {
@@ -26,9 +26,13 @@ def build_handoff_safe_summary(
     runtime = data.get("runtime") if isinstance(data.get("runtime"), dict) else {}
     selected_run_id = str(run_id or data.get("run_id") or runtime.get("run_id") or "")
     orchestration = data.get("orchestration") if isinstance(data.get("orchestration"), dict) else {}
-    summary = orchestration.get("phase17_handoff") if isinstance(orchestration.get("phase17_handoff"), dict) else {}
+    summary = (
+        orchestration.get("handoff")
+        if isinstance(orchestration.get("handoff"), dict)
+        else {}
+    )
     if summary:
-        safe = HandoffSanitizer().sanitize_for_ui(
+        safe = ContextSanitizer().sanitize_for_ui(
             {
                 "handoff_available": bool(summary.get("handoff_available")),
                 "run_id": selected_run_id or summary.get("run_id") or "",
@@ -131,7 +135,7 @@ def _handoff_summary_from_messages(run_id: str, *, user_id: str, output_dir: str
                 "summary": str(payload.get("summary") or payload.get("reason") or "")[:240],
             }
         )
-    safe_rows = HandoffSanitizer().sanitize_for_ui(rows)
+    safe_rows = ContextSanitizer().sanitize_for_ui(rows)
     return {
         "handoff_available": bool(rows),
         "run_id": run_id,

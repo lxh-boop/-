@@ -8,7 +8,6 @@ from agent.capability_index import (
     CapabilityIndexRepository,
     build_trusted_capability_index,
 )
-from agent.orchestration.multi_task_executor import execute_multi_intent_plan
 
 
 def test_capability_index_view_filters_by_agent_allowlist_and_hides_implementation_files() -> None:
@@ -114,30 +113,6 @@ def test_artifact_store_finds_reusable_artifact_in_same_scope(tmp_path: Path) ->
 
     assert reusable is not None
     assert reusable["artifact_id"] == ref["artifact_id"]
-
-
-def test_same_run_artifact_cache_reduces_duplicate_tool_calls(tmp_path: Path) -> None:
-    decomposition = {
-        "tasks": [
-            {"task_id": "task_1", "intent": "scheduler_status", "parameters": {}, "depends_on": []},
-            {"task_id": "task_2", "intent": "scheduler_status", "parameters": {}, "depends_on": ["task_1"]},
-        ]
-    }
-
-    result = execute_multi_intent_plan(
-        decomposition,
-        user_id="u1",
-        output_dir=tmp_path,
-        db_path=tmp_path / "agent.db",
-        session_id="conv_1",
-        context={"user_id": "u1", "run_id": "run_1"},
-    )
-
-    assert result["success"] is True
-    assert result["artifact_metrics"]["artifact_lookup_count"] == 2
-    assert result["artifact_metrics"]["artifact_reuse_count"] == 1
-    assert result["task_results"]["task_2"]["execution_mode"] == "artifact_reuse"
-    assert len(result["tool_calls"]) == 1
 
 
 def test_supervisor_read_view_returns_small_relevant_candidate_set() -> None:

@@ -24,12 +24,12 @@ def test_reflection_write_detection_is_structural_not_natural_language():
 
 
 def test_v2_tool_permission_audit_accepts_canonical_llm_planned_tools():
-    source = _read("agent/orchestration/multi_task_executor.py")
-    function = source.split("def _tool_permission_errors", 1)[1].split(
-        "def _semantic_observer_trigger_reasons",
-        1,
-    )[0]
+    validator = _read("agent/worker_planning/validator.py")
+    executor = _read("agent/worker_planning/executor.py")
 
-    assert "get_tool_registry_v2" in function
-    assert "v2_definition.operation_type != OP_READ" in function
-    assert "_validate_v2_call_arguments" in source
+    assert "WorkerPlanValidator" in validator
+    assert "worker_write_tool_forbidden" in validator
+    assert "allowed_capability_ids" in _read(
+        "agent/tool_runtime/contracts.py"
+    )
+    assert "capability_id=task.capability_id" in executor

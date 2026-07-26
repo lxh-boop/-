@@ -480,7 +480,7 @@ def failure_record(row: dict[str, Any]) -> dict[str, Any] | None:
         stage, code_path = "intent_understanding", "agent/intent_decomposition/llm_decomposer.py:decompose_with_llm"
         evidence.append("Actual UserGoal action does not overlap the benchmark gold action.")
     elif (score.get("tool") or {}).get("selection", {}).get("f1", 0) < 1:
-        stage, code_path = "tool_selection", "agent/orchestration/multi_task_executor.py"
+        stage, code_path = "tool_selection", "agent/worker_planning/planner.py"
         evidence.append("Planned/executed capabilities do not cover the required read-only capability set.")
     elif not score.get("chain_complete"):
         stage, code_path = "completion_contract", "agent/executor.py:run_agent_request"
