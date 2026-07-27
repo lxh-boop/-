@@ -47,6 +47,19 @@ def _int(value: Any, default: int, *, minimum: int = 0) -> int:
         return max(minimum, int(default))
 
 
+def _prefix_99_timeout_seconds(value: Any, default: int) -> int:
+    """Normalize one LLM timeout to the user's long-running local-model policy.
+
+    Existing values that already start with ``99`` are kept unchanged. Legacy
+    values such as 120 become 99120 instead of silently retaining the old short
+    timeout.
+    """
+
+    timeout = _int(value, default, minimum=1)
+    text = str(timeout)
+    return timeout if text.startswith("99") else int(f"99{text}")
+
+
 @dataclass(frozen=True, slots=True)
 class ModelProfile:
     profile_id: str
@@ -64,8 +77,12 @@ class ModelProfile:
 
     @property
     def endpoint_scope(self) -> str:
-        url = self.base_url.lower()
-        return "loopback" if "127.0.0.1" in url or "localhost" in url else "remote"
+        host = str(urlsplit(self.base_url).hostname or "").strip().lower()
+        return (
+            "loopback"
+            if host in {"127.0.0.1", "localhost", "::1", "host.docker.internal"}
+            else "remote"
+        )
 
     @property
     def public_dict(self) -> dict[str, Any]:
@@ -132,14 +149,26 @@ def build_model_profile(
 ) -> ModelProfile:
     """Build one immutable profile; credentials are referenced, never copied."""
 
-    timeout = _int(config.get("llm_request_timeout_seconds"), 120, minimum=5)
+    timeout = _prefix_99_timeout_seconds(
+        config.get("llm_request_timeout_seconds"),
+        120,
+    )
     if mode == "local":
         model_name = _text(config.get("llm_local_model")) or DEFAULT_LOCAL_LLM_MODEL
         if not _OLLAMA_MODEL.fullmatch(model_name):
             raise ValueError("本地模型名称不合法。")
         deployment_override = _safe_base_url(os.environ.get("STOCK_LOCAL_LLM_BASE_URL")).rstrip("/")
         configured_base = _safe_base_url(config.get("llm_local_base_url")).rstrip("/")
-        base_url = deployment_override or configured_base or DEFAULT_LOCAL_LLM_BASE_URL
+        default_base = DEFAULT_LOCAL_LLM_BASE_URL.rstrip("/")
+        # Compose maps the default host-side loopback endpoint to
+        # host.docker.internal. A user-entered non-default endpoint remains an
+        # explicit override.
+        configured_host = str(urlsplit(configured_base).hostname or "").strip().lower()
+        configured_is_host_loopback = configured_host in {"127.0.0.1", "localhost", "::1"}
+        if configured_base and configured_base != default_base and not (deployment_override and configured_is_host_loopback):
+            base_url = configured_base
+        else:
+            base_url = deployment_override or configured_base or default_base
         provider_id = DEFAULT_LOCAL_LLM_PROVIDER
         return ModelProfile(
             profile_id=_profile_id(

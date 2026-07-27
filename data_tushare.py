@@ -6,7 +6,6 @@ from datetime import datetime, time as datetime_time, timedelta
 
 import numpy as np
 import pandas as pd
-import tushare as ts
 
 from config import EPS, START_DATE
 
@@ -16,29 +15,45 @@ from universe import get_stock_pool
 A_SHARE_DAILY_DATA_READY_TIME = datetime_time(hour=15, minute=30)
 
 
+def _tushare_module():
+    try:
+        import tushare as tushare_module
+    except ImportError as exc:
+        raise RuntimeError("当前环境缺少 tushare 包，请先安装项目依赖。") from exc
+    return tushare_module
+
+
 def get_token(token: str | None = None) -> str:
     if token and token.strip():
         return token.strip()
 
-    env_token = os.environ.get("TUSHARE_TOKEN", "").strip()
+    try:
+        from local_config import load_local_config
 
+        saved_token = str(load_local_config().get("tushare_token") or "").strip()
+    except Exception:
+        saved_token = ""
+    if saved_token:
+        return saved_token
+
+    env_token = os.environ.get("TUSHARE_TOKEN", "").strip()
     if env_token:
         return env_token
 
     raise RuntimeError(
-        "没有找到 Tushare Token。请在 APP 页面填写，或设置环境变量 TUSHARE_TOKEN。"
+        "没有找到 Tushare Token。请在系统设置中填写，或设置环境变量 TUSHARE_TOKEN。"
     )
 
 
 def init_tushare(token: str | None = None):
     token = get_token(token)
-    ts.set_token(token)
+    _tushare_module().set_token(token)
     return token
 
 
 def init_tushare_pro(token: str | None = None):
     token = init_tushare(token)
-    return ts.pro_api(token)
+    return _tushare_module().pro_api(token)
 
 
 def validate_tushare_token(token: str) -> tuple[bool, str]:
@@ -542,7 +557,7 @@ def fetch_one_stock_tushare(
 
     for attempt in range(1, max_retries + 1):
         try:
-            df = ts.pro_bar(
+            df = _tushare_module().pro_bar(
                 ts_code=ts_code,
                 asset="E",
                 adj="qfq",

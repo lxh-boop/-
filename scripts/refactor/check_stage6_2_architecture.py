@@ -32,7 +32,7 @@ def main() -> int:
         "direct CSV access": re.compile(r"read_csv|\.csv[\"']", re.I),
         "direct SQLite access": re.compile(r"sqlite|database_path|db_path", re.I),
         "server path": re.compile(r"[A-Za-z]:\\"),
-        "secret field": re.compile(r"llm_api_key|tushare_token|password|confirmation_token", re.I),
+        "secret field": re.compile(r"llm_api_key|tushare_token|confirmation_token|password\s*[:=]", re.I),
         "write HTTP method": re.compile(r"httpClient\.(post|put|patch|delete)|fetch\([^\n]+method\s*:\s*[\"'](POST|PUT|PATCH|DELETE)", re.I),
     }
     checked = 0
@@ -43,23 +43,25 @@ def main() -> int:
         text = path.read_text(encoding="utf-8", errors="replace")
         rel = path.relative_to(ROOT).as_posix()
         for label, pattern in forbidden.items():
-            if label == "write HTTP method" and rel not in {
-                "frontend/src/api/webApi.ts",
-                "frontend/src/api/dashboardApi.ts",
-                "frontend/src/api/stockApi.ts",
-                "frontend/src/api/modelApi.ts",
-                "frontend/src/api/backtestApi.ts",
-                "frontend/src/api/newsApi.ts",
-                "frontend/src/api/settingsApi.ts",
-                "frontend/src/api/monitorApi.ts",
-            }:
-                continue
+            if label == "write HTTP method":
+                if rel == "frontend/src/api/settingsApi.ts":
+                    continue
+                if rel not in {
+                    "frontend/src/api/webApi.ts",
+                    "frontend/src/api/dashboardApi.ts",
+                    "frontend/src/api/stockApi.ts",
+                    "frontend/src/api/modelApi.ts",
+                    "frontend/src/api/backtestApi.ts",
+                    "frontend/src/api/newsApi.ts",
+                    "frontend/src/api/monitorApi.ts",
+                }:
+                    continue
             if pattern.search(text):
                 violations.append(f"{rel}: {label}")
 
     readonly_router_names = {
         "web_dashboard.py", "web_stocks.py", "web_models.py", "web_backtests.py",
-        "web_news.py", "web_settings.py", "web_monitor.py",
+        "web_news.py", "web_monitor.py",
     }
     for path in (ROOT / "server/api/routers").glob("web_*.py"):
         if path.name not in readonly_router_names:

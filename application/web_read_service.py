@@ -86,11 +86,71 @@ class WebReadApplicationService:
             "feature_flags": local_cfg.get("feature_flags", {}),
         }
 
+    @staticmethod
+    def _normalized_code_series(series: Any) -> Any:
+        text = series.astype(str).str.strip()
+        extracted = text.str.extract(r"(\d{6})", expand=False)
+        return extracted.where(extracted.notna(), text).str.zfill(6)
+
+    @staticmethod
+    def _normalized_date_series(series: Any) -> Any:
+        import pandas as pd
+
+        text = series.astype(str).str.strip()
+        digits = text.str.replace(r"[^0-9]", "", regex=True).str.slice(0, 8)
+        is_compact_date = digits.str.len() == 8
+        compact = (
+            digits.str.slice(0, 4)
+            + "-"
+            + digits.str.slice(4, 6)
+            + "-"
+            + digits.str.slice(6, 8)
+        )
+        parsed = pd.to_datetime(text.where(~is_compact_date), errors="coerce").dt.strftime("%Y-%m-%d")
+        return compact.where(is_compact_date, parsed)
+
+    def load_signal_ohlc_data(self) -> Any:
+        from application.dashboard_service import dashboard_service
+
+        return dashboard_service.load_latest_raw_data()
+
+    def _attach_signal_date_ohlc(self, ranking: Any) -> Any:
+        data = ranking.copy()
+        for column in ("open", "high", "low", "close"):
+            if column in data.columns:
+                data = data.drop(columns=[column])
+            data[column] = None
+        data["ohlc_available"] = False
+        if "code" not in data.columns or "date" not in data.columns:
+            return data
+
+        raw = self.load_signal_ohlc_data()
+        required = {"code", "date", "open", "high", "low", "close"}
+        if raw is None or getattr(raw, "empty", True) or not required.issubset(set(raw.columns)):
+            return data
+
+        market = raw.loc[:, ["code", "date", "open", "high", "low", "close"]].copy()
+        market["_signal_code"] = self._normalized_code_series(market["code"])
+        market["_signal_date"] = self._normalized_date_series(market["date"])
+        market = market.drop_duplicates(["_signal_code", "_signal_date"], keep="last")
+        market = market.drop(columns=["code", "date"])
+
+        data["_signal_code"] = self._normalized_code_series(data["code"])
+        data["_signal_date"] = self._normalized_date_series(data["date"])
+        data = data.drop(columns=["open", "high", "low", "close", "ohlc_available"]).merge(
+            market,
+            how="left",
+            on=["_signal_code", "_signal_date"],
+            validate="many_to_one",
+        )
+        data["ohlc_available"] = data[["open", "high", "low", "close"]].notna().all(axis=1)
+        return data.drop(columns=["_signal_code", "_signal_date"])
+
     def ranking_page(self, *, offset: int = 0, limit: int = 100) -> dict[str, Any]:
         frame = self.ranking()
         if frame is None or getattr(frame, "empty", True):
             return {"records": [], "total": 0, "offset": int(offset), "limit": int(limit)}
-        data = frame.copy()
+        data = self._attach_signal_date_ohlc(frame)
         if "pred_score" not in data.columns:
             data["pred_score"] = None
         for source_column in ("raw_score", "model_score", "prediction_score", "pred_5d_ret"):
@@ -331,49 +391,9 @@ class WebReadApplicationService:
         return None
 
     def public_settings(self) -> dict[str, Any]:
-        import config
-        from local_config import load_local_config
+        from application.web_settings_service import web_settings_service
 
-        cfg = load_local_config()
-        mode = self._text(cfg.get("llm_mode") or "api")
-        model = self._text(
-            cfg.get("llm_local_model") if mode == "local" else cfg.get("llm_api_model")
-        )
-        base_url = self._text(
-            cfg.get("llm_local_base_url") if mode == "local" else cfg.get("llm_api_base_url")
-        )
-        api_key_configured = bool(self._text(cfg.get("llm_api_key"))) if mode == "api" else True
-        return {
-            "universe": self._text(getattr(config, "UNIVERSE", "")),
-            "model_backend": self._text(cfg.get("model_backend")),
-            "model_version": self._text(cfg.get("model_version") or "latest"),
-            "default_topk": int(getattr(config, "TOPK", 10) or 10),
-            "current_user_id": self._text(cfg.get("current_user_id") or "default"),
-            "feature_flags": {
-                "news": bool(getattr(config, "ENABLE_NEWS_FEATURES", False)),
-                "rag": bool(getattr(config, "ENABLE_RAG", False)),
-                "llm_explainer": bool(getattr(config, "ENABLE_LLM_EXPLAINER", False)),
-            },
-            "credentials": {
-                "tushare_configured": bool(self._text(cfg.get("tushare_token"))),
-                "llm_configured": bool(model and base_url and api_key_configured),
-            },
-            "llm": {
-                "mode": mode,
-                "provider": self._text(cfg.get("llm_api_provider")) if mode == "api" else "ollama",
-                "model": model,
-                "endpoint_configured": bool(base_url),
-                "profile_id": self._text(
-                    cfg.get("llm_local_profile_id") if mode == "local" else cfg.get("llm_api_profile_id")
-                ),
-            },
-            "scheduler": {
-                "enabled": bool(cfg.get("auto_retrain_enabled")),
-                "hour": int(cfg.get("auto_retrain_hour") or 0),
-                "minute": int(cfg.get("auto_retrain_minute") or 0),
-            },
-            "read_only": True,
-        }
+        return web_settings_service.public_settings()
 
     def monitor_summary(self, *, user_id: str = "default") -> dict[str, Any]:
         from application.system_monitor_service import build_system_monitor_snapshot

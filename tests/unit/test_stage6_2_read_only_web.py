@@ -35,7 +35,7 @@ EXPECTED_READ_ONLY_PATHS = {
 HTTP_METHODS = {"get", "head", "post", "put", "patch", "delete", "options", "trace"}
 
 
-def test_stage6_2_web_routes_are_get_only() -> None:
+def test_stage6_2_web_routes_keep_read_contract_with_settings_write_extension() -> None:
     # Verify the public OpenAPI contract instead of FastAPI/Starlette internal
     # app.routes objects. Some supported versions keep included routers as
     # _IncludedRouter bookkeeping objects without a direct ``path`` attribute.
@@ -53,7 +53,10 @@ def test_stage6_2_web_routes_are_get_only() -> None:
         path_item = web_paths[path]
         methods = {str(key).lower() for key in path_item if str(key).lower() in HTTP_METHODS}
         assert methods, f"no HTTP method found for {path}"
-        assert methods <= {"get", "head"}, f"write method exposed by {path}: {sorted(methods)}"
+        if path == "/api/v1/web/settings":
+            assert methods == {"get", "put"}, methods
+        else:
+            assert methods <= {"get", "head"}, f"write method exposed by {path}: {sorted(methods)}"
 
 
 def test_browser_presenter_removes_secrets_and_paths() -> None:
@@ -92,3 +95,22 @@ def test_ranking_page_exposes_model_score_alias_without_recalculation() -> None:
     # The browser alias is copied from the model output; the combined score remains unchanged.
     assert records[0]["score"] == 0.9
     assert records[1]["pred_score"] == 0.0567
+
+
+def test_ranking_page_joins_signal_date_ohlc() -> None:
+    service = WebReadApplicationService()
+    service.ranking = lambda: pd.DataFrame([
+        {"rank": 1, "code": "000001", "date": "2026-07-24", "raw_score": 0.1},
+        {"rank": 2, "code": "600519.SH", "date": "20260724", "raw_score": 0.2},
+    ])
+    service.load_signal_ohlc_data = lambda: pd.DataFrame([
+        {"code": "000001.SZ", "date": "20260724", "open": 10.1, "high": 10.8, "low": 9.9, "close": 10.5},
+        {"code": "600519", "date": "2026-07-24", "open": 1500.0, "high": 1520.0, "low": 1490.0, "close": 1512.0},
+    ])
+
+    records = service.ranking_page(offset=0, limit=10)["records"].to_dict("records")
+    assert records[0]["open"] == 10.1
+    assert records[0]["close"] == 10.5
+    assert bool(records[0]["ohlc_available"]) is True
+    assert records[1]["high"] == 1520.0
+    assert records[1]["low"] == 1490.0

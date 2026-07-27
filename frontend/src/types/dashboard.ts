@@ -17,6 +17,11 @@ export interface RankingRecord {
   raw_score?: number
   pred_5d_ret?: number
   up_prob?: number
+  open?: number
+  high?: number
+  low?: number
+  close?: number
+  ohlc_available?: boolean
   date?: string
   prediction_date?: string
   [key: string]: unknown
