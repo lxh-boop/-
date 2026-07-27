@@ -23,6 +23,7 @@ from .control_gateway import ControlGateway
 from .entry_decision import MainEntryDecisionPlanner, RequestMode
 from .models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus
 from .planner import CoordinatorPlanner
+from .runtime_services import CollaborationRuntimeServices
 from .session_memory import SessionMemoryStore
 from .specialist_runtime import SpecialistRuntime
 
@@ -78,10 +79,12 @@ class AgentCollaborationCoordinator:
         db_path: str | Path | None,
         llm_service: LLMService,
         graph_settings: Neo4jSettings | None = None,
+        runtime_services: CollaborationRuntimeServices | None = None,
     ) -> None:
         self.output_dir = output_dir
         self.db_path = db_path
         self.llm_service = llm_service
+        self.runtime_services = runtime_services
         self.memory = SessionMemoryStore(output_dir=output_dir)
         self.directory = AgentDirectory()
         settings = graph_settings or Neo4jSettings.from_env()
@@ -219,6 +222,12 @@ class AgentCollaborationCoordinator:
         execution_context: dict[str, Any] | None,
     ) -> dict[str, Any]:
         del decomposition
+        if self.runtime_services is not None:
+            self.runtime_services.validate_identity(
+                run_id=run_id,
+                user_id=user_id,
+                session_id=session_id,
+            )
         context = dict(execution_context or {})
         memory_summary = self.memory.build_summary(session_id, limit=40)
         decision = self.entry.decide(
@@ -300,6 +309,8 @@ class AgentCollaborationCoordinator:
             language=language,
             as_of_time=explicit_as_of,
         )
+        if self.runtime_services is not None:
+            self.runtime_services.register_tasks(tasks)
         results, batches, timeline = self._run_dag(
             tasks,
             query=query,
@@ -382,6 +393,10 @@ class AgentCollaborationCoordinator:
                 "focus_refs": [ref.to_dict() for ref in focus_refs],
                 "resolution_audit": resolution_audit,
                 "planner": plan_meta,
+                "runtime_persistence": {
+                    "agent_steps_connected": self.runtime_services is not None,
+                    "runtime_layer": "worker_dag",
+                },
                 "legacy_public_protocol_enabled": False,
             },
         }
@@ -406,7 +421,7 @@ class AgentCollaborationCoordinator:
             ready = [task for task in pending.values() if all(dep in results for dep in task.dependency_task_ids)]
             if not ready:
                 for task in pending.values():
-                    results[task.task_id] = GraphWorkerResult(
+                    result = GraphWorkerResult(
                         task_id=task.task_id,
                         agent_id=task.assigned_agent,
                         status=ResultStatus.NOT_EXECUTED,
@@ -414,6 +429,9 @@ class AgentCollaborationCoordinator:
                         summary="任务依赖无法满足。",
                         warnings=["unresolved_task_dependency"],
                     )
+                    results[task.task_id] = result
+                    if self.runtime_services is not None:
+                        self.runtime_services.record_result(task, result)
                 break
             batch_index += 1
             batches.append({
@@ -423,6 +441,10 @@ class AgentCollaborationCoordinator:
                 "parallel": len(ready) > 1,
             })
             max_workers = min(4, len(ready))
+            if self.runtime_services is not None:
+                for task in ready:
+                    self.runtime_services.mark_ready(task)
+                    self.runtime_services.mark_running(task)
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {
                     pool.submit(
@@ -452,6 +474,8 @@ class AgentCollaborationCoordinator:
                             warnings=[f"{type(exc).__name__}:{exc}"],
                         )
                     results[task.task_id] = result
+                    if self.runtime_services is not None:
+                        self.runtime_services.record_result(task, result)
                     timeline.append({
                         "task_id": task.task_id,
                         "agent_id": task.assigned_agent,

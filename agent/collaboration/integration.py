@@ -5,10 +5,13 @@ from typing import Any
 
 from core.llm import LLMService
 
+from agent.runtime import AgentRuntimeRecorder
+
 from .control_gateway import ControlGateway
 from .coordinator import AgentCollaborationCoordinator
 from .entry_decision import EntryDecision, RequestMode
 from .llm_runtime import require_run_llm_service
+from .runtime_services import CollaborationRuntimeServices
 from .session_memory import SessionMemoryStore
 
 
@@ -85,14 +88,33 @@ def execute_unified_agent_request(
     run_id: str = "",
     language: str = "zh",
     llm_service: LLMService | None = None,
+    runtime_recorder: AgentRuntimeRecorder | None = None,
     context: dict[str, Any] | None = None,
     decomposition: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    binding = require_run_llm_service(llm_service=llm_service, run_id=run_id)
+    effective_recorder = runtime_recorder or AgentRuntimeRecorder(
+        user_id=str(user_id or "default"),
+        goal=str(query or ""),
+        db_path=db_path,
+        session_id=str(session_id or f"session_{user_id}"),
+        run_id=str(run_id or "") or None,
+    )
+    effective_run_id = effective_recorder.run_id
+    binding = require_run_llm_service(
+        llm_service=llm_service,
+        run_id=effective_run_id,
+    )
+    runtime_services = CollaborationRuntimeServices.from_recorder(
+        effective_recorder,
+        user_id=str(user_id or "default"),
+        session_id=str(session_id or f"session_{user_id}"),
+        strict=True,
+    )
     coordinator = AgentCollaborationCoordinator(
         output_dir=output_dir,
         db_path=db_path,
         llm_service=binding.service,
+        runtime_services=runtime_services,
     )
     try:
         result = coordinator.execute(
@@ -101,7 +123,7 @@ def execute_unified_agent_request(
             user_id=str(user_id or "default"),
             default_top_k=max(1, min(int(default_top_k or 50), 100)),
             session_id=str(session_id or f"session_{user_id}"),
-            run_id=str(run_id or ""),
+            run_id=effective_run_id,
             language=str(language or "zh"),
             execution_context=dict(context or {}),
         )

@@ -209,6 +209,7 @@ def run_agent_request(
             run_id=runtime.run_id,
             language=language,
             llm_service=llm_service,
+            runtime_recorder=runtime,
             context=context,
         )
     except Exception as exc:
