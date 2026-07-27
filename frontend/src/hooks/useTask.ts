@@ -18,7 +18,7 @@ export function useDiagnosticTask() {
         owner_id: ownerId,
         session_id: sessionId,
         metadata: { surface: 'react-stage6-1' },
-        timeout_seconds: 30,
+        timeout_seconds: 9930,
         max_retries: 0,
       })
     },

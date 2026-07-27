@@ -1,0 +1,19 @@
+{
+  "version": "6.6",
+  "resource": "/api/v1/web/settings",
+  "methods": {
+    "GET": "Return public runtime configuration and boolean credential status.",
+    "PUT": "Persist confirmed local/API LLM and Tushare overrides to local_app_config.json."
+  },
+  "write_requirements": [
+    "request_id",
+    "idempotency_key",
+    "confirmed=true"
+  ],
+  "secret_semantics": {
+    "blank": "preserve current local override or environment default",
+    "clear_flag": "remove only the local override",
+    "response": "never return credential values"
+  },
+  "ranking_price_semantics": "open/high/low/close are joined by stock code and signal date"
+}

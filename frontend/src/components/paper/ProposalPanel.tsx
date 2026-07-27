@@ -31,7 +31,7 @@ export function ProposalPanel({ userId, proposals }: { userId: string; proposals
           kwargs: { user_id:userId, plan_id:proposal.plan_id, confirmation_text:text, ...meta },
           owner_id:userId, session_id:sessionId,
           metadata:{surface:'react-stage6-3',operation:'paper-backfill-commit'},
-          timeout_seconds:7200, max_retries:0,
+          timeout_seconds:997200, max_retries:0,
         })
         setTask(task)
         return { task_id: task.task_id }

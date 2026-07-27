@@ -27,7 +27,7 @@ class TaskSubmitRequest(BaseModel):
     owner_id: str = ""
     session_id: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
-    timeout_seconds: int = 600
+    timeout_seconds: int = 99600
     max_retries: int = 0
 
 

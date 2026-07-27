@@ -677,7 +677,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_SYSTEM,
             allowed_agent_types=[AGENT_MAIN],
             permission_scope=OP_SYSTEM,
-            runtime_policy={"max_attempts": 1, "tool_timeout_seconds": 10},
+            runtime_policy={"max_attempts": 1, "tool_timeout_seconds": 9910},
             legacy_names=["python_sandbox_analysis"],
         ),
         ToolDefinition(

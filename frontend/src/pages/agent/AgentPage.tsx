@@ -191,7 +191,7 @@ export function AgentPage() {
           user_message_id: messageId,
           query_preview: question.slice(0, 160),
         },
-        timeout_seconds: 900,
+        timeout_seconds: 99900,
         max_retries: 0,
       })
       return task

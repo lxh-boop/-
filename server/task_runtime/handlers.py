@@ -26,7 +26,7 @@ def _llm_settings_from_descriptor(descriptor: dict[str, Any] | None, secrets: di
         "llm_local_base_url": descriptor.get("base_url"),
         "llm_local_model": descriptor.get("model"),
         "llm_local_disable_thinking": descriptor.get("disable_thinking", False),
-        "llm_request_timeout_seconds": descriptor.get("request_timeout_seconds", 120),
+        "llm_request_timeout_seconds": descriptor.get("request_timeout_seconds", 99120),
         "llm_max_retries": descriptor.get("max_retries", 0),
     }
     return resolve_active_llm_settings(

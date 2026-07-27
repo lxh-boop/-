@@ -44,9 +44,9 @@ export function PaperTaskActions({ profileComplete }: { profileComplete: boolean
     onError: (error) => message.error(String(error)),
   })
   const actions: Action[] = [
-    { taskType:'paper-trading.update', title:'更新 AI 模拟盘', description:'基于已有最新排名和新闻证据更新模拟盘，不重新训练模型。', kwargs:{user_id:userId,top_k:50,dry_run:false,paper_trading_enabled:true,sync_kwargs:{}}, timeout:1800 },
-    { taskType:'paper-profile.ai-news-adjustment', title:'运行新闻调整', description:'执行新闻/RAG 评分调整并刷新可用结果。', kwargs:{user_id:userId,top_k:50,paper_trading_enabled:false,dry_run:false}, timeout:1800 },
-    { taskType:'paper-profile.scheduler-manual', title:'手动运行调度器', description:'以当前用户触发一次后台调度任务。', kwargs:{user_id:userId,all_users:false,force:false,dry_run:false}, timeout:1800 },
+    { taskType:'paper-trading.update', title:'更新 AI 模拟盘', description:'基于已有最新排名和新闻证据更新模拟盘，不重新训练模型。', kwargs:{user_id:userId,top_k:50,dry_run:false,paper_trading_enabled:true,sync_kwargs:{}}, timeout:991800 },
+    { taskType:'paper-profile.ai-news-adjustment', title:'运行新闻调整', description:'执行新闻/RAG 评分调整并刷新可用结果。', kwargs:{user_id:userId,top_k:50,paper_trading_enabled:false,dry_run:false}, timeout:991800 },
+    { taskType:'paper-profile.scheduler-manual', title:'手动运行调度器', description:'以当前用户触发一次后台调度任务。', kwargs:{user_id:userId,all_users:false,force:false,dry_run:false}, timeout:991800 },
   ]
   return <PaperSectionCard sectionKey="task-actions" title="长任务与恢复" extra={<Tag>Task API + SSE</Tag>}>
     {!profileComplete ? <Alert type="warning" showIcon message="请先补全用户画像和模拟资金，再更新模拟盘。" style={{marginBottom:16}} /> : null}

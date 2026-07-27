@@ -75,7 +75,7 @@ class ToolSpec:
     has_side_effect: bool | None = None
     concurrency_safe: bool | None = None
     idempotent: bool | None = None
-    timeout_seconds: int = 30
+    timeout_seconds: int = 9930
     retry_policy: dict[str, Any] = field(
         default_factory=lambda: {"max_attempts": 1, "backoff_seconds": 0.0}
     )
@@ -248,7 +248,7 @@ def _spec(
     input_schema: dict[str, Any] | None = None,
     output_schema: dict[str, Any] | None = None,
     category: str | None = None,
-    timeout_seconds: int = 30,
+    timeout_seconds: int = 9930,
     retry_policy: dict[str, Any] | None = None,
     result_retention: str = "summary",
 ) -> ToolSpec:
@@ -315,7 +315,7 @@ def get_tool_registry(
         _spec("capital_management_preview", ToolPermission.PREVIEW, "Preview a paper capital flow.", preview_capital_change, True, input_schema=_schema_for("user_id", "flow_type", "amount", "effective_date", "output_dir", "db_path", "session_id", required=["user_id", "flow_type", "amount"]), result_retention="full"),
         _spec("capital_management_execute", ToolPermission.WRITE, "Execute a confirmed paper capital flow.", execute_confirmed_capital_plan, True, input_schema=_schema_for("user_id", "plan_id", "confirmation_token", "output_dir", "db_path", "session_id", required=["user_id", "plan_id", "confirmation_token"]), result_retention="full"),
         _spec("scheduler_status", ToolPermission.READ, "Read scheduler status and latest log tail.", query_scheduler_status, input_schema=_schema_for("output_dir")),
-        _spec("python_sandbox_analysis", ToolPermission.READ, "Run limited read-only Python analysis over an explicit task snapshot.", run_python_sandbox_analysis, input_schema=_schema_for("code", "snapshot", "snapshot_id", "timeout_seconds", "max_output_chars", required=["code"]), category=ToolCategory.READ_ANALYSIS, timeout_seconds=10, retry_policy={"max_attempts": 1, "backoff_seconds": 0.0}, result_retention="summary"),
+        _spec("python_sandbox_analysis", ToolPermission.READ, "Run limited read-only Python analysis over an explicit task snapshot.", run_python_sandbox_analysis, input_schema=_schema_for("code", "snapshot", "snapshot_id", "timeout_seconds", "max_output_chars", required=["code"]), category=ToolCategory.READ_ANALYSIS, timeout_seconds=9910, retry_policy={"max_attempts": 1, "backoff_seconds": 0.0}, result_retention="summary"),
         _spec("backfill_preview", ToolPermission.PREVIEW, "Preview paper-trading backfill.", preview_backfill, True, input_schema=_schema_for("user_id", "start_date", "end_date", "output_dir", "db_path", "session_id", required=["user_id", "start_date"]), result_retention="full"),
         _spec("backfill_execute", ToolPermission.WRITE, "Execute confirmed paper-trading backfill.", execute_confirmed_backfill_plan, True, input_schema=_schema_for("user_id", "plan_id", "confirmation_token", "output_dir", "db_path", "session_id", required=["user_id", "plan_id", "confirmation_token"]), result_retention="full"),
         _spec("report", ToolPermission.READ, "List latest generated reports.", query_latest_reports, input_schema=_schema_for("output_dir")),

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import json
@@ -124,7 +124,7 @@ def task_list(api_url: str, user_id: str, conversation_id: str) -> list[dict[str
     return list(data or []) if isinstance(data, list) else []
 
 
-def wait_for_task(api_url: str, user_id: str, conversation_id: str, known: set[str], timeout: int = 45) -> dict[str, Any]:
+def wait_for_task(api_url: str, user_id: str, conversation_id: str, known: set[str], timeout: int = 9945) -> dict[str, Any]:
     deadline = time.time() + timeout
     while time.time() < deadline:
         rows = task_list(api_url, user_id, conversation_id)
@@ -135,21 +135,27 @@ def wait_for_task(api_url: str, user_id: str, conversation_id: str, known: set[s
     return {}
 
 
-def wait_terminal(api_url: str, task_id: str, timeout: int = 420) -> dict[str, Any]:
-    deadline = time.time() + timeout
+def wait_terminal(api_url: str, task_id: str, timeout: int = 99420) -> dict[str, Any]:
+    started = time.time()
+    deadline = started + timeout
     last: dict[str, Any] = {}
     while time.time() < deadline:
         ok, payload, _ = request_json(api_url, f"/api/v1/tasks/{quote(task_id)}")
         data = data_of(payload) if ok else None
         if isinstance(data, dict):
             last = data
+            task_timeout = int(data.get("timeout_seconds") or 0)
+            if task_timeout > 0:
+                # The default remains 420 -> 99,420 as requested, but a task
+                # with a longer own timeout must not outlive the acceptance wait.
+                deadline = max(deadline, started + task_timeout + 9960)
             if str(data.get("status") or "") in TERMINAL:
                 return data
         time.sleep(1.0)
     return last
 
 
-def wait_finalized_message(api_url: str, user_id: str, conversation_id: str, task_id: str, timeout: int = 90) -> dict[str, Any]:
+def wait_finalized_message(api_url: str, user_id: str, conversation_id: str, task_id: str, timeout: int = 9990) -> dict[str, Any]:
     deadline = time.time() + timeout
     while time.time() < deadline:
         for item in messages(api_url, user_id, conversation_id):
@@ -159,7 +165,7 @@ def wait_finalized_message(api_url: str, user_id: str, conversation_id: str, tas
     return {}
 
 
-def wait_acknowledged(api_url: str, task_id: str, timeout: int = 60) -> dict[str, Any]:
+def wait_acknowledged(api_url: str, task_id: str, timeout: int = 9960) -> dict[str, Any]:
     deadline = time.time() + timeout
     last: dict[str, Any] = {}
     while time.time() < deadline:
@@ -173,7 +179,7 @@ def wait_acknowledged(api_url: str, task_id: str, timeout: int = 60) -> dict[str
     return last
 
 
-def read_sse(api_url: str, task_id: str, timeout: int = 30) -> tuple[bool, str]:
+def read_sse(api_url: str, task_id: str, timeout: int = 9930) -> tuple[bool, str]:
     events: list[str] = []
     try:
         with requests.get(
@@ -478,19 +484,131 @@ def main() -> int:
                     page.screenshot(path=str(shots / "05_agent_task.png"), full_page=True)
 
                     if task_id:
-                        terminal = wait_terminal(args.api_url, task_id)
-                        terminal_status = str(terminal.get("status") or "")
-                        record(results, "Agent task reaches an explicit terminal state", terminal_status in TERMINAL, f"status={terminal_status}; message={terminal.get('message')}")
-                        sse_ok, sse_detail = read_sse(args.api_url, task_id)
-                        record(results, "Agent task SSE emits task-complete", sse_ok, sse_detail)
-                        assistant = wait_finalized_message(args.api_url, user_id, test_conversation_id, task_id)
-                        record(results, "Terminal Agent result is saved idempotently on the server", bool(assistant), f"message_id={assistant.get('message_id')}; run_id={assistant.get('run_id')}")
-                        acknowledged = wait_acknowledged(args.api_url, task_id)
-                        record(results, "Task is acknowledged after final message persistence", bool(acknowledged.get("acknowledged_at")), f"acknowledged_at={acknowledged.get('acknowledged_at')}")
-                        public_request = terminal.get("request") if isinstance(terminal.get("request"), dict) else {}
-                        public_text = json.dumps(public_request, ensure_ascii=False).lower()
-                        leaked = [item for item in ("output_dir", "base_url", "api_key", "confirmation_token", "credential") if item in public_text]
-                        record(results, "Task REST result redacts server-owned request fields", not leaked, f"leaked={leaked}")
+                        # Local models can legitimately use most of the task's
+                        # 99,900-second timeout. Keeping the Agent page mounted for
+                        # the entire run also keeps UI polling active and can
+                        # exhaust Headless Chrome network resources. Navigate
+                        # away, wait through the REST contract, then return and
+                        # verify task recovery/finalization through the UI.
+                        page.goto(
+                            f"{args.url}/dashboard",
+                            wait_until="domcontentloaded",
+                            timeout=120_000,
+                        )
+                        wait_page(page, "首页 / 预测排名")
+
+                        terminal = wait_terminal(
+                            args.api_url,
+                            task_id,
+                            timeout=99420,
+                        )
+                        terminal_status = str(
+                            terminal.get("status") or ""
+                        )
+                        record(
+                            results,
+                            "Agent task reaches an explicit terminal state",
+                            terminal_status in TERMINAL,
+                            (
+                                f"status={terminal_status}; "
+                                f"message={terminal.get('message')}"
+                            ),
+                        )
+                        sse_ok, sse_detail = read_sse(
+                            args.api_url,
+                            task_id,
+                            timeout=9960,
+                        )
+                        record(
+                            results,
+                            "Agent task SSE emits task-complete",
+                            sse_ok,
+                            sse_detail,
+                        )
+
+                        page.goto(
+                            f"{args.url}/agent",
+                            wait_until="domcontentloaded",
+                            timeout=120_000,
+                        )
+                        resumed, resume_detail = wait_page(
+                            page,
+                            "AI Agent",
+                        )
+                        conversation_locator = page.locator(
+                            f'[data-conversation-id="{test_conversation_id}"]'
+                        )
+                        conversation_visible = (
+                            conversation_locator.count() == 1
+                        )
+                        if conversation_visible:
+                            conversation_locator.click()
+                        record(
+                            results,
+                            "Terminal task is recoverable after leaving the Agent page",
+                            resumed and conversation_visible,
+                            (
+                                f"{resume_detail}; "
+                                f"conversation_present={conversation_visible}"
+                            ),
+                        )
+
+                        assistant = wait_finalized_message(
+                            args.api_url,
+                            user_id,
+                            test_conversation_id,
+                            task_id,
+                            timeout=99150,
+                        )
+                        record(
+                            results,
+                            "Terminal Agent result is saved idempotently on the server",
+                            bool(assistant),
+                            (
+                                f"message_id={assistant.get('message_id')}; "
+                                f"run_id={assistant.get('run_id')}"
+                            ),
+                        )
+                        acknowledged = wait_acknowledged(
+                            args.api_url,
+                            task_id,
+                            timeout=9990,
+                        )
+                        record(
+                            results,
+                            "Task is acknowledged after final message persistence",
+                            bool(acknowledged.get("acknowledged_at")),
+                            (
+                                "acknowledged_at="
+                                f"{acknowledged.get('acknowledged_at')}"
+                            ),
+                        )
+                        public_request = (
+                            terminal.get("request")
+                            if isinstance(terminal.get("request"), dict)
+                            else {}
+                        )
+                        public_text = json.dumps(
+                            public_request,
+                            ensure_ascii=False,
+                        ).lower()
+                        leaked = [
+                            item
+                            for item in (
+                                "output_dir",
+                                "base_url",
+                                "api_key",
+                                "confirmation_token",
+                                "credential",
+                            )
+                            if item in public_text
+                        ]
+                        record(
+                            results,
+                            "Task REST result redacts server-owned request fields",
+                            not leaked,
+                            f"leaked={leaked}",
+                        )
 
                     page.reload(wait_until="domcontentloaded", timeout=120_000)
                     refreshed, refresh_detail = wait_page(page, "AI Agent")

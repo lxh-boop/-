@@ -93,7 +93,7 @@ def main() -> int:
                     if current.get("status") not in {"queued", "running", "cancelling"}:
                         return
                     elapsed = time.monotonic() - heartbeat_started
-                    timeout_seconds = max(1, int(current.get("timeout_seconds") or 600))
+                    timeout_seconds = max(1, int(current.get("timeout_seconds") or 99600))
                     current_progress = float(current.get("progress") or 0)
                     inferred = min(0.9, max(current_progress, elapsed / timeout_seconds * 0.85))
                     store.update(args.task_id, progress=inferred)
