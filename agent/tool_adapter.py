@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from app.services.file_loader import safe_read_csv, safe_read_json
+from application.support.file_loader import safe_read_csv, safe_read_json
 from config import (
     BACKTEST_METRICS_PATH,
     MARKET_CONTEXT_FEATURE_CACHE_PATH,

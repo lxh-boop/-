@@ -238,7 +238,7 @@ def write_report(output: Path, results: list[dict[str, Any]], console_errors: li
     passed = sum(1 for item in results if item["success"])
     failed = len(results) - passed
     payload = {
-        "stage": "6.4",
+        "stage": "6.5",
         "passed": passed,
         "failed": failed,
         "results": results,
@@ -250,7 +250,7 @@ def write_report(output: Path, results: list[dict[str, Any]], console_errors: li
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     lines = [
-        "# Stage 6.4 Browser Acceptance",
+        "# Stage 6.5 Browser Acceptance",
         "",
         f"- Passed: {passed}",
         f"- Failed: {failed}",
@@ -275,7 +275,6 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:3000")
     parser.add_argument("--api-url", default="http://127.0.0.1:8010")
-    parser.add_argument("--streamlit-url", default="http://127.0.0.1:8501")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--headed", action="store_true")
     args = parser.parse_args()
@@ -296,10 +295,22 @@ def main() -> int:
         record(results, "FastAPI health", False, f"{type(exc).__name__}: {exc}")
 
     try:
-        response = requests.get(f"{args.streamlit_url}/_stcore/health", timeout=30)
-        record(results, "Streamlit comparison baseline remains healthy", response.status_code == 200, f"status={response.status_code}")
+        response = requests.get(f"{args.url}/healthz", timeout=30)
+        record(results, "React production health", response.status_code == 200, f"status={response.status_code}")
     except Exception as exc:
-        record(results, "Streamlit comparison baseline remains healthy", False, f"{type(exc).__name__}: {exc}")
+        record(results, "React production health", False, f"{type(exc).__name__}: {exc}")
+
+    try:
+        response = requests.get(f"{args.url}/api/v1/health", timeout=30)
+        payload = response.json() if response.content else {}
+        record(
+            results,
+            "Nginx same-origin API proxy",
+            response.status_code == 200 and payload.get("success") is True,
+            f"status={response.status_code}; success={payload.get('success')}",
+        )
+    except Exception as exc:
+        record(results, "Nginx same-origin API proxy", False, f"{type(exc).__name__}: {exc}")
 
     try:
         openapi = requests.get(f"{args.api_url}/openapi.json", timeout=60).json()
@@ -333,6 +344,17 @@ def main() -> int:
             page.on("console", lambda item: console_errors.append(format_console_message(item)) if item.type == "error" else None)
             page.on("pageerror", lambda error: console_errors.append(str(error)))
             try:
+                route_checks = [
+                    ("/dashboard", "首页 / 预测排名", "01_dashboard.png"),
+                    ("/paper-trading", "AI 模拟盘", "02_paper_trading.png"),
+                    ("/monitor", "系统监控", "03_system_monitor.png"),
+                ]
+                for route, heading, screenshot_name in route_checks:
+                    page.goto(f"{args.url}{route}", wait_until="domcontentloaded", timeout=120_000)
+                    route_ready, route_detail = wait_page(page, heading)
+                    record(results, f"Production route renders: {route}", route_ready, route_detail)
+                    page.screenshot(path=str(shots / screenshot_name), full_page=True)
+
                 page.goto(f"{args.url}/agent", wait_until="domcontentloaded", timeout=120_000)
                 ready, detail = wait_page(page, "AI Agent")
                 body = page.locator("body").inner_text()
@@ -340,7 +362,7 @@ def main() -> int:
                 missing = [item for item in required if item not in body]
                 record(results, "React AI Agent page renders", ready and not missing, f"{detail}; missing={missing}")
                 record(results, "Agent page shows current system user", f"当前用户：{user_id}" in body, f"user_id={user_id}")
-                page.screenshot(path=str(shots / "01_agent.png"), full_page=True)
+                page.screenshot(path=str(shots / "04_agent.png"), full_page=True)
 
                 before_ids = {str(item.get("conversation_id") or "") for item in sessions(args.api_url, user_id)}
                 page.get_by_test_id("agent-create-session").click()
@@ -359,7 +381,7 @@ def main() -> int:
                     item = page.locator(f'[data-conversation-id="{test_conversation_id}"]')
                     item.wait_for(state="visible", timeout=30_000)
                     item.click()
-                    rename_title = f"Stage64验收-{int(time.time())}"
+                    rename_title = f"Stage65验收-{int(time.time())}"
                     renamed = False
                     rename_detail = ""
                     try:
@@ -371,22 +393,43 @@ def main() -> int:
                         rename_input = modal.locator("input")
                         rename_input.fill(rename_title)
 
-                        # Ant Design may expose the primary button text with
-                        # inserted spacing in Windows Chrome accessibility trees.
-                        # Prefer the stable primary-button selector, then Enter.
-                        primary = modal.locator(".ant-modal-footer .ant-btn-primary")
-                        if primary.count():
-                            primary.first.click(force=True, timeout=20_000)
-                            rename_detail = "submitted by primary button"
+                        # The input is controlled by React. Immediately forcing a
+                        # click can hit the primary button while it is still
+                        # disabled, which dispatches no onOk event and therefore
+                        # sends no PATCH request. Wait for the real enabled state
+                        # and use a normal click.
+                        primary = modal.locator(
+                            ".ant-modal-footer .ant-btn-primary"
+                        ).first
+                        enabled_deadline = time.time() + 10
+                        while (
+                            primary.count()
+                            and time.time() < enabled_deadline
+                            and not primary.is_enabled()
+                        ):
+                            page.wait_for_timeout(100)
+
+                        if primary.count() and primary.is_enabled():
+                            primary.click(timeout=20_000)
+                            rename_detail = (
+                                "submitted by enabled primary button"
+                            )
                         else:
                             rename_input.press("Enter")
-                            rename_detail = "submitted by Enter"
+                            rename_detail = (
+                                "primary button not enabled; submitted by Enter"
+                            )
 
+                        # submitRename closes the modal synchronously. If the
+                        # click did not reach React, Enter is a safe one-time
+                        # fallback with the same title.
                         try:
-                            modal.wait_for(state="hidden", timeout=20_000)
+                            modal.wait_for(state="hidden", timeout=5_000)
                         except Exception:
-                            dismissed, dismiss_detail = dismiss_modal(page)
-                            rename_detail += f"; modal_cleanup={dismissed}:{dismiss_detail}"
+                            if modal.is_visible():
+                                rename_input.press("Enter")
+                                rename_detail += "; retried by Enter"
+                            modal.wait_for(state="hidden", timeout=10_000)
 
                         deadline = time.time() + 20
                         while time.time() < deadline:
@@ -432,7 +475,7 @@ def main() -> int:
                     except Exception:
                         task_panel_seen = bool(task_id)
                     record(results, "Agent task progress panel is available", task_panel_seen, f"task_id={task_id}")
-                    page.screenshot(path=str(shots / "02_agent_task.png"), full_page=True)
+                    page.screenshot(path=str(shots / "05_agent_task.png"), full_page=True)
 
                     if task_id:
                         terminal = wait_terminal(args.api_url, task_id)
@@ -453,7 +496,7 @@ def main() -> int:
                     refreshed, refresh_detail = wait_page(page, "AI Agent")
                     selected = page.locator(f'[data-conversation-id="{test_conversation_id}"]').count() == 1
                     record(results, "Agent route and conversation survive refresh", refreshed and selected, f"{refresh_detail}; selected_session_present={selected}")
-                    page.screenshot(path=str(shots / "03_agent_refresh.png"), full_page=True)
+                    page.screenshot(path=str(shots / "06_agent_refresh.png"), full_page=True)
 
                 run_conversation, run_id = find_run_session(args.api_url, user_id, preferred=test_conversation_id)
                 if run_id:
@@ -465,7 +508,7 @@ def main() -> int:
                         markers = ["计划与步骤", "工具调用", "Message Trace", "Reflection / Critic", "Handoff", "ReAct / Replan", "Memory 安全摘要"]
                         missing = [item for item in markers if item not in run_body]
                         record(results, "Run detail exposes Trace/Handoff/Reflection/Replan safe panels", not missing, f"run_id={run_id}; missing={missing}")
-                        page.screenshot(path=str(shots / "04_agent_run_details.png"), full_page=True)
+                        page.screenshot(path=str(shots / "07_agent_run_details.png"), full_page=True)
                     else:
                         record(results, "Run detail exposes Trace/Handoff/Reflection/Replan safe panels", False, f"run conversation not in UI: {run_conversation}")
                 else:

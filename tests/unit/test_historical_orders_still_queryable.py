@@ -1,4 +1,4 @@
-from app.classic_services import load_daily_order_snapshot
+from application.paper_profile_service import load_daily_order_snapshot
 from strategy_position_test_utils import (
     create_position_preview,
     position_service,

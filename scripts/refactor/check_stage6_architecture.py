@@ -43,17 +43,19 @@ def main() -> int:
             violations.append(f"nginx SSE/API marker missing: {marker}")
 
     overlay = ROOT / "docker-compose.react-preview.yml"
-    if not overlay.exists():
-        violations.append("docker-compose.react-preview.yml missing")
-    else:
+    compose = ROOT / "docker-compose.yml"
+    if overlay.exists():
         text = overlay.read_text(encoding="utf-8")
         if "react-preview:" not in text:
             violations.append("react-preview service missing")
-        if "streamlit:" in text or "api:" in text.replace("react-preview:", ""):
-            # depends_on/api references are allowed; service declarations are not.
-            service_lines = [line for line in text.splitlines() if line.startswith("  ") and not line.startswith("    ") and line.strip().endswith(":" )]
-            if set(line.strip() for line in service_lines) != {"react-preview:"}:
-                violations.append(f"overlay modifies existing services: {service_lines}")
+    elif not compose.exists():
+        violations.append("neither preview overlay nor production compose exists")
+    else:
+        text = compose.read_text(encoding="utf-8")
+        if "  frontend:" not in text:
+            violations.append("production frontend service missing")
+        if "  streamlit:" in text or "  react-preview:" in text:
+            violations.append("retired frontend service remains in production compose")
 
     report = {"stage": "6.1", "checked_frontend_files": checked, "violation_count": len(violations), "violations": violations}
     print(json.dumps(report, ensure_ascii=False, indent=2))

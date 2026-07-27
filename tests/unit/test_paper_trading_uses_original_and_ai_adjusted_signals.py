@@ -1,6 +1,6 @@
 import pandas as pd
 
-from app.classic_services import run_paper_trading_from_latest
+from application.paper_profile_service import run_paper_trading_from_latest
 from database.repositories import UserRepository
 
 

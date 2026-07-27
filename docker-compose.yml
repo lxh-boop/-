@@ -2,7 +2,7 @@ name: stock_daily_app
 
 services:
   api:
-    image: stock-daily-app-api:stage5
+    image: stock-daily-app-api:stage6-5
     build:
       context: .
       dockerfile: Dockerfile.compose
@@ -14,10 +14,10 @@ services:
     environment:
       AGENT_API_HOST: 0.0.0.0
       AGENT_API_PORT: "8010"
-      STOCK_APP_DEPLOYMENT_MODE: compose
+      STOCK_APP_DEPLOYMENT_MODE: compose-react
       STOCK_AGENT_TASK_DB: /app/runtime/task_runtime.sqlite3
       STOCK_AGENT_MAX_CONCURRENT_TASKS: ${STOCK_AGENT_MAX_CONCURRENT_TASKS:-4}
-      STOCK_AGENT_CORS_ORIGINS: ${STOCK_AGENT_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:8501,http://127.0.0.1:8501}
+      STOCK_AGENT_CORS_ORIGINS: ${STOCK_AGENT_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       STOCK_LOCAL_LLM_BASE_URL: ${STOCK_LOCAL_LLM_BASE_URL:-http://host.docker.internal:11434/v1}
       NEO4J_URI: ${NEO4J_URI:-bolt://host.docker.internal:7687}
       QLIB_PROVIDER_URI: ${QLIB_PROVIDER_URI:-/app/data/qlib}
@@ -64,56 +64,22 @@ services:
       start_period: 90s
     stop_grace_period: 30s
 
-  streamlit:
-    image: stock-daily-app-streamlit:stage5
+  frontend:
+    image: stock-daily-app-frontend:stage6-5
     build:
-      context: .
-      dockerfile: Dockerfile.compose
-      target: streamlit
+      context: ./frontend
+      dockerfile: Dockerfile
     init: true
     restart: unless-stopped
-    environment:
-      STOCK_APP_DEPLOYMENT_MODE: compose
-      STOCK_AGENT_API_URL: http://api:8010
-      STOCK_AGENT_API_TIMEOUT_SECONDS: ${STOCK_AGENT_API_TIMEOUT_SECONDS:-600}
-      STREAMLIT_SERVER_ADDRESS: 0.0.0.0
-      STREAMLIT_SERVER_PORT: "8501"
-      STREAMLIT_SERVER_HEADLESS: "true"
-      STREAMLIT_SERVER_FILE_WATCHER_TYPE: none
-      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
-      PYTHONUNBUFFERED: "1"
     depends_on:
       api:
         condition: service_healthy
     ports:
-      - "${STOCK_APP_WEB_PORT:-8501}:8501"
-    volumes:
-      - type: bind
-        source: ./data
-        target: /app/data
-      - type: bind
-        source: ./models
-        target: /app/models
-      - type: bind
-        source: ./outputs
-        target: /app/outputs
-      - type: bind
-        source: ./logs
-        target: /app/logs
-      - type: bind
-        source: ./runtime
-        target: /app/runtime
-      - type: bind
-        source: ./local_app_config.json
-        target: /app/local_app_config.json
+      - "${STOCK_APP_WEB_PORT:-3000}:80"
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=5); assert r.status == 200"
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/healthz"]
       interval: 10s
-      timeout: 6s
+      timeout: 5s
       retries: 12
-      start_period: 60s
-    stop_grace_period: 20s
+      start_period: 20s
+    stop_grace_period: 10s

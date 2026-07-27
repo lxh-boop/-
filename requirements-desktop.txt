@@ -1,4 +1,3 @@
-# Desktop packaging/runtime additions.
-# Install together with requirements.txt when building Windows installer.
+# Thin Windows launcher for the production React deployment.
 pywebview
 pyinstaller

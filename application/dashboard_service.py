@@ -16,8 +16,8 @@ import pandas as pd
 import config as app_config
 from agent.mcp.config import build_mcp_context_from_local_config, mcp_sdk_version
 from agent.mcp.discovery import discover_mcp_tools, reset_discovery_cache
-from app.services.backtest_display import build_display_date_options, is_prediction_only_date
-from app.services.model_search_results import (
+from application.support.backtest_display import build_display_date_options, is_prediction_only_date
+from application.support.model_search_results import (
     BACKTEST_DISCLAIMER,
     BACKTEST_MASTER_TABLE_PATH,
     MODEL_CANDIDATES_PATH,

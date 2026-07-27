@@ -55,8 +55,8 @@ export function AppLayout({ children }: { children: ReactNode }) {
         <Header className="app-header">
           <Space size="large" wrap>
             <div>
-              <Typography.Title level={4} style={{ margin: 0 }}>阶段 6.4 React 预览</Typography.Title>
-              <Typography.Text type="secondary">AI Agent、会话、Trace 与任务恢复 · Streamlit 对照基线保留</Typography.Text>
+              <Typography.Title level={4} style={{ margin: 0 }}>A股每日股票评分系统</Typography.Title>
+              <Typography.Text type="secondary">React 正式版 · FastAPI、Task Runtime 与多 Agent 工作台</Typography.Text>
             </div>
             <ApiStatus health={health.data} />
           </Space>

@@ -1,7 +1,7 @@
 import pandas as pd
 import os
 
-from app.classic_services import list_daily_position_snapshot_dates, run_paper_trading_from_latest
+from application.paper_profile_service import list_daily_position_snapshot_dates, run_paper_trading_from_latest
 from database.repositories import UserRepository
 
 

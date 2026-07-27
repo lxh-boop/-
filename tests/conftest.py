@@ -75,7 +75,7 @@ def pytest_collection_modifyitems(config, items):
 
         if any(token in path_text or token in name for token in ["external", "live_api", "tushare", "network_api"]):
             item.add_marker(pytest.mark.external)
-        if any(token in path_text or token in name for token in ["playwright", "streamlit_smoke", "starts_on_temp_port"]):
+        if any(token in path_text or token in name for token in ["playwright", "starts_on_temp_port"]):
             item.add_marker(pytest.mark.e2e)
             item.add_marker(pytest.mark.slow)
         if any(token in path_text or token in name for token in ["slow", "timeout", "long_running"]):

@@ -1,6 +1,6 @@
 import pandas as pd
 
-from app.classic_services import format_classic_ranking_for_display, load_classic_ranking_with_ai_adjustment
+from application.paper_profile_service import format_classic_ranking_for_display, load_classic_ranking_with_ai_adjustment
 
 
 def test_classic_ranking_merges_original_and_ai_adjustment(tmp_path) -> None:

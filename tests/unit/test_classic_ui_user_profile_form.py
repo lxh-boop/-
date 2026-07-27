@@ -1,4 +1,4 @@
-from app.classic_services import get_classic_user_profile_form_options
+from application.paper_profile_service import get_classic_user_profile_form_options
 
 
 def test_classic_user_profile_form_options_exist() -> None:

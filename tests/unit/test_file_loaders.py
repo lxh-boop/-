@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from app.services.file_loader import safe_read_csv, safe_read_json
+from application.support.file_loader import safe_read_csv, safe_read_json
 
 
 def test_safe_read_csv_missing_file(tmp_path):

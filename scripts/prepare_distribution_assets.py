@@ -59,10 +59,8 @@ def main() -> int:
     print("=" * 80)
 
     required = [
-        root / "app.py",
         root / "desktop_launcher.py",
         root / "stock_daily_app.spec",
-        root / ".streamlit" / "config.toml",
         migrations,
         resources,
     ]
@@ -98,8 +96,7 @@ def main() -> int:
 
     print("[Package Resources]")
     print(json.dumps({
-        "app_script": "app.py",
-        "streamlit_config": ".streamlit/config.toml",
+        "frontend_runtime": "external production React service on port 3000",
         "database_migrations": "database/migrations",
         "database_seed": "database/seed",
         "resources": "resources",

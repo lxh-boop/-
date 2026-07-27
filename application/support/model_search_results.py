@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from app.services.file_loader import safe_read_csv, safe_read_json
+from application.support.file_loader import safe_read_csv, safe_read_json
 from core.config.paths import (
     BACKTEST_MASTER_TABLE_PATH,
     MODEL_CANDIDATES_PATH,

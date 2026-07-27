@@ -34,31 +34,8 @@ RUN mkdir -p /app/data /app/models /app/outputs /app/logs /app/runtime /app/exte
 
 ENV AGENT_API_HOST=0.0.0.0 \
     AGENT_API_PORT=8010 \
-    STOCK_APP_DEPLOYMENT_MODE=compose \
+    STOCK_APP_DEPLOYMENT_MODE=compose-react \
     STOCK_AGENT_TASK_DB=/app/runtime/task_runtime.sqlite3
 
 EXPOSE 8010
 CMD ["python", "-u", "run_agent_api.py"]
-
-FROM runtime-base AS streamlit-deps
-
-COPY requirements-compose-streamlit.txt ./
-RUN python -m pip install --upgrade pip \
-    && python -m pip install -r requirements-compose-streamlit.txt
-
-FROM runtime-base AS streamlit
-
-COPY --from=streamlit-deps /usr/local /usr/local
-COPY . /app
-RUN mkdir -p /app/data /app/models /app/outputs /app/logs /app/runtime
-
-ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0 \
-    STREAMLIT_SERVER_PORT=8501 \
-    STREAMLIT_SERVER_HEADLESS=true \
-    STREAMLIT_SERVER_FILE_WATCHER_TYPE=none \
-    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
-    STOCK_APP_DEPLOYMENT_MODE=compose \
-    STOCK_AGENT_API_URL=http://api:8010
-
-EXPOSE 8501
-CMD ["python", "-u", "-m", "streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true", "--server.fileWatcherType=none", "--browser.gatherUsageStats=false"]

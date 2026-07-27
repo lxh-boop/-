@@ -8,6 +8,16 @@
 > 项目根目录：`D:\stock_daily_app`  
 > 项目仅用于研究、分析和模拟盘，不连接真实交易。
 
+
+## 当前生产入口（Stage 6.5）
+
+```text
+React / Nginx：http://127.0.0.1:3000
+FastAPI：http://127.0.0.1:8010
+```
+
+生产环境通过 `docker-compose.yml` 启动 `frontend + api`。旧 Streamlit 页面、旧 Python Client 和 8501 端口已下线；数据、模型、输出、日志和数据库继续使用宿主机目录挂载，不会写入镜像。
+
 ---
 
 ## 1. 项目定位
@@ -26,7 +36,7 @@
 系统采用以下整体方案：
 
 ```text
-前端页面
+React / Nginx 正式前端
    ↓ HTTP / SSE
 FastAPI 接口层
    ↓
@@ -386,40 +396,31 @@ Docker 主要解决：
 
 ## 5. 当前前端状态
 
-当前稳定调用链路：
+阶段 6.5 完成后，正式调用链路统一为：
 
 ```text
-Streamlit
-   ↓ HTTP / SSE
+React / Nginx
+   ↓ REST / SSE（同源 /api 反向代理）
 FastAPI
    ↓
 Application Service / Task Runtime
 ```
 
-React 前端正在按阶段迁移：
-
-```text
-React Preview
-   ↓ REST / SSE
-FastAPI
-```
-
-迁移原则：
+边界原则：
 
 - React 只调用 FastAPI；
 - React 不直接访问 SQLite、Neo4j、文件系统、模型或 Agent Runtime；
-- 迁移期保留 Streamlit 作为功能对照基线；
-- React 不复制第二套业务规则；
-- 接口合同冻结后再迁移页面；
-- 最终只保留一条正式前端调用路径。
+- Nginx 负责 SPA 路由、健康检查和 `/api` 反向代理；
+- 业务规则只保留在 Application Service 与领域层；
+- 长任务继续复用冻结的 Task API、SSE 状态和恢复语义；
+- Streamlit、旧 Python HTTP Client 和 8501 端口已下线。
 
-默认开发端口以当前 `docker-compose.yml` 为准，迁移期常用配置为：
+默认端口以当前 `docker-compose.yml` 为准：
 
 | 服务 | 默认端口 | 状态 |
 |---|---:|---|
-| FastAPI | `8010` | 后端服务 |
-| Streamlit | `8501` | 当前基线页面 |
-| React Preview | `3000` | 前端迁移预览 |
+| FastAPI | `8010` | 正式后端服务 |
+| React / Nginx | `3000` | 正式前端 |
 
 ---
 
@@ -470,7 +471,6 @@ FastAPI
 
 ### 前端
 
-- Streamlit
 - React
 - TypeScript
 - Vite
@@ -544,8 +544,7 @@ stock_daily_app/
 │  ├─ daily_update/
 │  ├─ prediction/
 │  └─ paper_trading/
-├─ frontend/                       # React Preview
-├─ app/                            # Streamlit 基线页面
+├─ frontend/                       # React 正式前端与 Nginx 配置
 ├─ models/
 ├─ data/
 ├─ outputs/
@@ -652,7 +651,7 @@ docker compose down -v
 以当前 Compose 配置为准：
 
 ```text
-Streamlit:     http://localhost:8501
+React:         http://localhost:3000
 React Preview: http://localhost:3000
 FastAPI:       http://localhost:8010
 API Docs:      http://localhost:8010/docs
@@ -774,16 +773,16 @@ http://api:8010
 - 混合 RAG 检索与重排序；
 - 模拟盘审批写入闭环；
 - Runtime Trace 和审计记录；
-- Streamlit 基线页面。
+- React 正式工作台、Nginx 同源代理和 SPA 路由；
+- Agent 长任务的 SSE 进度、取消、刷新恢复和确认；
+- 模拟盘受保护写操作与二次确认；
+- Streamlit 与旧 Python HTTP Client 下线。
 
-### 迁移与完善中
+### 后续完善
 
-- React 只读页面逐步替换；
-- Agent 长任务在 React 端的恢复与取消体验；
-- 模拟盘和写操作页面迁移；
-- 最终下线 Streamlit 正式入口；
 - 更完整的集成测试、压测和部署文档；
-- 多用户环境下的认证、隔离和权限细化。
+- 多用户环境下的认证、隔离和权限细化；
+- Agent 业务能力与回答覆盖范围继续扩充。
 
 README 只描述已确认的能力。具体完成状态以当前分支、测试报告和运行结果为准。
 

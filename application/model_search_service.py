@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.services.model_search_results import (
+from application.support.model_search_results import (
     BACKTEST_DISCLAIMER,
     BACKTEST_MASTER_TABLE_PATH,
     MODEL_CANDIDATES_PATH,

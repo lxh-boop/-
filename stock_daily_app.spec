@@ -47,7 +47,6 @@ root_modules = [
 ]
 
 project_packages = [
-    "app",
     "agent",
     "core",
     "database",
@@ -76,15 +75,11 @@ if include_optional_ml:
     hiddenimports += collect_submodules("model_zoo.adapters")
 
 hiddenimports += [
-    "streamlit.runtime.scriptrunner.magic_funcs",
-    "streamlit.web.cli",
     "webview",
     "webview.platforms.edgechromium",
 ]
 
 datas = [
-    ("app.py", "."),
-    (".streamlit/config.toml", ".streamlit"),
 ]
 
 for directory in [
@@ -106,10 +101,8 @@ for source_dir, target_dir in [
     if path.exists():
         datas.append((str(path), target_dir))
 
-datas += collect_data_files("streamlit")
 datas += collect_data_files("plotly")
 datas += collect_data_files("rfc3987_syntax")
-datas += copy_metadata("streamlit")
 
 excludes = [
     "tests",

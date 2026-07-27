@@ -1,6 +1,6 @@
 import json
 
-from app.classic_services import load_classic_user_context, save_classic_user_context, user_output_dir
+from application.paper_profile_service import load_classic_user_context, save_classic_user_context, user_output_dir
 from database.repositories import UserRepository
 
 

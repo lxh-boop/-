@@ -13,7 +13,7 @@ export function HealthPage() {
       <div>
         <Typography.Title level={2}>React 基础设施与公共合同</Typography.Title>
         <Typography.Paragraph type="secondary">
-          当前 React 仅作为阶段 6.1 预览入口；正式 Streamlit 服务保持不变。后端并行重构必须继续兼容已冻结的 HTTP、Task 和 SSE 合同。
+          React 已成为正式前端入口。所有页面通过 Nginx 同源代理调用 FastAPI，并继续遵守已冻结的 HTTP、Task 和 SSE 合同。
         </Typography.Paragraph>
       </div>
       <Row gutter={[16, 16]}>
@@ -32,8 +32,8 @@ export function HealthPage() {
       <Alert
         type="info"
         showIcon
-        message="并行重构边界"
-        description="React 分支只新增 frontend、contracts/stage6 和 stage6 测试；Agent、Application Service、数据库、RAG 与 Task Runtime 继续由后端分支负责。"
+        message="生产运行边界"
+        description="浏览器只访问公开 API，不读取数据库、模型文件或服务器路径；长任务继续由 Task Runtime 执行并通过 SSE 恢复。"
       />
     </Space>
   )
