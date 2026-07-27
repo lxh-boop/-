@@ -1,0 +1,115 @@
+import { Collapse, Descriptions, Empty, List, Space, Spin, Table, Tag, Typography } from 'antd'
+import { useQuery } from '@tanstack/react-query'
+import { agentApi } from '../../api/agentApi'
+
+function JsonBlock({ value }: { value: unknown }) {
+  return <pre className="agent-json-block">{JSON.stringify(value ?? {}, null, 2)}</pre>
+}
+
+export function AgentRunPanel({ userId, runId }: { userId: string; runId: string }) {
+  const run = useQuery({
+    queryKey: ['web', 'agent', 'run', userId, runId],
+    queryFn: () => agentApi.run(userId, runId),
+    enabled: Boolean(runId),
+  })
+  const trace = useQuery({
+    queryKey: ['web', 'agent', 'trace', userId, runId],
+    queryFn: () => agentApi.trace(userId, runId),
+    enabled: Boolean(runId),
+  })
+  const reflection = useQuery({
+    queryKey: ['web', 'agent', 'reflection', userId, runId],
+    queryFn: () => agentApi.reflection(userId, runId),
+    enabled: Boolean(runId),
+  })
+  const handoff = useQuery({
+    queryKey: ['web', 'agent', 'handoff', userId, runId],
+    queryFn: () => agentApi.handoff(userId, runId),
+    enabled: Boolean(runId),
+  })
+  const react = useQuery({
+    queryKey: ['web', 'agent', 'react', userId, runId],
+    queryFn: () => agentApi.react(userId, runId),
+    enabled: Boolean(runId),
+  })
+  const memory = useQuery({
+    queryKey: ['web', 'agent', 'memory', userId, runId],
+    queryFn: () => agentApi.memory(userId, runId),
+    enabled: Boolean(runId),
+  })
+
+  if (!runId) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="选择一条包含 run_id 的回答查看运行详情" />
+  if (run.isLoading) return <Spin />
+
+  const data = run.data
+  const runInfo = data?.run ?? {}
+  const steps = data?.steps ?? []
+  const tools = data?.tool_calls ?? []
+  const sources = data?.sources ?? []
+
+  return <Space direction="vertical" size="middle" style={{ width: '100%' }} data-testid="agent-run-details">
+    <Descriptions bordered size="small" column={2}>
+      <Descriptions.Item label="Run ID">{String(runInfo.run_id ?? runId)}</Descriptions.Item>
+      <Descriptions.Item label="状态"><Tag>{String(runInfo.status ?? '-')}</Tag></Descriptions.Item>
+      <Descriptions.Item label="目标" span={2}>{String(runInfo.goal ?? '-')}</Descriptions.Item>
+      <Descriptions.Item label="步骤">{data?.counts.steps ?? steps.length}</Descriptions.Item>
+      <Descriptions.Item label="工具调用">{data?.counts.tool_calls ?? tools.length}</Descriptions.Item>
+    </Descriptions>
+    <Collapse
+      defaultActiveKey={['steps']}
+      items={[
+        {
+          key: 'steps',
+          label: `计划与步骤（${steps.length}）`,
+          children: <Table
+            size="small"
+            rowKey={(row) => String(row.step_id ?? Math.random())}
+            dataSource={steps}
+            pagination={false}
+            columns={[
+              { title: '步骤', dataIndex: 'step_id', width: 150 },
+              { title: '意图', dataIndex: 'intent' },
+              { title: '状态', dataIndex: 'status', width: 110 },
+              { title: '观察摘要', dataIndex: 'observation' },
+            ]}
+          />,
+        },
+        {
+          key: 'tools',
+          label: `工具调用（${tools.length}）`,
+          children: <Table
+            size="small"
+            rowKey={(row) => String(row.tool_call_id ?? Math.random())}
+            dataSource={tools}
+            pagination={false}
+            columns={[
+              { title: '工具', dataIndex: 'tool_name' },
+              { title: '步骤', dataIndex: 'step_id' },
+              { title: '状态', dataIndex: 'status' },
+              { title: '错误', dataIndex: 'error_type' },
+            ]}
+          />,
+        },
+        {
+          key: 'sources',
+          label: `证据来源（${sources.length}）`,
+          children: <List
+            dataSource={sources}
+            locale={{ emptyText: '暂无证据来源' }}
+            renderItem={(item) => <List.Item>
+              <List.Item.Meta
+                title={`${String(item.source_type ?? '')} · ${String(item.title ?? '')}`}
+                description={String(item.snippet ?? '')}
+              />
+            </List.Item>}
+          />,
+        },
+        { key: 'trace', label: 'Message Trace', children: trace.isLoading ? <Spin /> : <JsonBlock value={trace.data ?? trace.error} /> },
+        { key: 'reflection', label: 'Reflection / Critic', children: reflection.isLoading ? <Spin /> : <JsonBlock value={reflection.data ?? reflection.error} /> },
+        { key: 'handoff', label: 'Handoff', children: handoff.isLoading ? <Spin /> : <JsonBlock value={handoff.data ?? handoff.error} /> },
+        { key: 'react', label: 'ReAct / Replan', children: react.isLoading ? <Spin /> : <JsonBlock value={react.data ?? react.error} /> },
+        { key: 'memory', label: 'Memory 安全摘要', children: memory.isLoading ? <Spin /> : <JsonBlock value={memory.data ?? memory.error} /> },
+      ]}
+    />
+  </Space>
+}

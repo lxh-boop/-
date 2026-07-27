@@ -1,0 +1,64 @@
+{
+  "contract_version": "stage6.4",
+  "prefix": "/api/v1/web/agent",
+  "session_routes": [
+    "GET /sessions",
+    "POST /sessions",
+    "GET /sessions/{conversation_id}",
+    "PATCH /sessions/{conversation_id}",
+    "DELETE /sessions/{conversation_id}",
+    "GET /sessions/{conversation_id}/messages",
+    "POST /sessions/{conversation_id}/messages",
+    "POST /sessions/{conversation_id}/finalize-task",
+    "GET /sessions/{conversation_id}/strategy-proposal"
+  ],
+  "run_routes": [
+    "GET /runs/{run_id}",
+    "GET /runs/{run_id}/trace",
+    "GET /runs/{run_id}/reflection",
+    "GET /runs/{run_id}/handoff",
+    "GET /runs/{run_id}/react",
+    "GET /runs/{run_id}/memory"
+  ],
+  "protected_action_routes": [
+    "GET /pending-actions",
+    "POST /pending-actions/{plan_id}/confirm",
+    "POST /pending-actions/{plan_id}/reject"
+  ],
+  "execution": {
+    "submit": "POST /api/v1/tasks",
+    "task_type": "agent.run",
+    "events": "GET /api/v1/tasks/{task_id}/events",
+    "terminal_acknowledge": "POST /api/v1/tasks/{task_id}/acknowledge"
+  },
+  "required_features": [
+    "conversation create rename soft-delete and switch",
+    "message history pagination",
+    "task_id refresh recovery",
+    "SSE reconnect and event de-duplication",
+    "cancel and interrupted states",
+    "server-side final answer persistence",
+    "Trace Handoff Reflection Critic ReAct and Replan safe views",
+    "pending action protected confirmation",
+    "strategy proposal read-only draft"
+  ],
+  "browser_storage_allowed": [
+    "owner_id",
+    "selected conversation_id",
+    "active task_id",
+    "last_event_id",
+    "route",
+    "non-sensitive filters"
+  ],
+  "browser_storage_forbidden": [
+    "task result",
+    "task event payload",
+    "answer history",
+    "raw tool result",
+    "confirmation token",
+    "LLM credential",
+    "Tushare token",
+    "database path",
+    "server path"
+  ]
+}

@@ -11,6 +11,7 @@ import { NewsPage } from '../pages/dashboard/NewsPage'
 import { SettingsPage } from '../pages/dashboard/SettingsPage'
 import { SystemMonitorPage } from '../pages/monitor/SystemMonitorPage'
 import { PaperTradingPage } from '../pages/paper/PaperTradingPage'
+import { AgentPage } from '../pages/agent/AgentPage'
 
 export function AppRoutes() {
   return <Routes>
@@ -24,6 +25,7 @@ export function AppRoutes() {
     <Route path="/news" element={<NewsPage />} />
     <Route path="/settings" element={<SettingsPage />} />
     <Route path="/paper-trading" element={<PaperTradingPage />} />
+    <Route path="/agent" element={<AgentPage />} />
     <Route path="/monitor" element={<SystemMonitorPage />} />
     <Route path="/platform" element={<HealthPage />} />
     <Route path="/runtime" element={<RuntimePage />} />

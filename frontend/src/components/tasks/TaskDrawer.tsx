@@ -10,10 +10,9 @@ import { TaskStatusTag } from './TaskStatusTag'
 
 export function TaskDrawer({ open, onClose, task, events }: { open: boolean; onClose: () => void; task: TaskRecord | null; events: TaskEvent[] }) {
   const ownerId = useSessionStore((state) => state.ownerId)
-  const sessionId = useSessionStore((state) => state.sessionId)
   const setTask = useTaskStore((state) => state.setTask)
   const clear = useTaskStore((state) => state.clear)
-  const recent = useQuery({ queryKey: ['task-center', ownerId, sessionId], queryFn: () => listTasks({ owner_id: ownerId, session_id: sessionId, limit: 30 }), enabled: open, refetchInterval: open ? 3000 : false })
+  const recent = useQuery({ queryKey: ['task-center', ownerId], queryFn: () => listTasks({ owner_id: ownerId, limit: 30 }), enabled: open, refetchInterval: open ? 3000 : false })
   const acknowledge = useMutation({
     mutationFn: acknowledgeTask,
     onSuccess: async (record) => {
