@@ -2,35 +2,25 @@
   "project": "supervisor-worker-runtime-upgrade",
   "branch": "codex/backend-agent-boundary-refactor",
   "baseline_commit": "47be09c199190fc46446a1ff84911a626ec17c45",
-  "status": "phase_01_tests_passed",
+  "status": "phase_01_manual_commit_required",
+  "git_policy": "installer_read_only_user_commits_manually",
   "phases": [
     {
       "phase": 0,
       "name": "actual_baseline",
-      "status": "passed",
-      "implementation_commit": null,
-      "record_commit": null,
-      "pushed": false,
-      "tests": [
-        "baseline collector passed"
-      ],
+      "status": "documented",
       "report": "docs/supervisor_worker_upgrade/phase_00_actual_baseline.md"
     },
     {
       "phase": 1,
       "name": "worker_dag_runtime_steps",
-      "status": "tests_passed",
-      "implementation_commit": "72b7809d6630bb0405155210b14ccc066fd99da3",
-      "record_commit": "see_external_stage_record",
+      "status": "tests_passed_manual_commit_required",
+      "implementation_commit": null,
+      "record_commit": null,
       "pushed": false,
-      "tests": [
-        "compileall passed",
-        "architecture passed",
-        "23 phase gate tests passed"
-      ],
+      "commit_managed_by": "user",
       "report": "docs/supervisor_worker_upgrade/phase_01_runtime_steps.md"
     }
   ],
-  "final_commit": null,
-  "updated_at": "2026-07-27T19:39:02"
+  "updated_at": "2026-07-27T20:00:00"
 }

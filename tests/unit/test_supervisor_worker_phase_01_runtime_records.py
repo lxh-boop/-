@@ -231,3 +231,151 @@ def test_current_coordinator_dag_persists_parallel_worker_results(tmp_path) -> N
     assert by_id["task_b"]["status"] == "succeeded"
     assert by_id["task_a"]["metadata_json"]["agent_role"] == "PORTFOLIO_ANALYST"
     assert by_id["task_b"]["metadata_json"]["agent_role"] == "EVIDENCE_RETRIEVER"
+
+@pytest.mark.parametrize(
+    ("worker_status", "expected_step_status"),
+    [
+        (ResultStatus.PARTIAL, "succeeded"),
+        (ResultStatus.PROPOSAL_READY, "succeeded"),
+        (ResultStatus.WAITING_APPROVAL, "succeeded"),
+        (ResultStatus.BLOCKED, "skipped"),
+        (ResultStatus.NOT_EXECUTED, "skipped"),
+    ],
+)
+def test_worker_terminal_status_mapping_is_persisted(
+    tmp_path,
+    worker_status,
+    expected_step_status,
+) -> None:
+    db_path, recorder, services = _services(tmp_path)
+    task = _task(recorder.run_id)
+
+    services.register_tasks([task])
+    services.mark_running(task)
+    services.record_result(
+        task,
+        GraphWorkerResult(
+            task_id=task.task_id,
+            agent_id=task.assigned_agent,
+            status=worker_status,
+            summary=f"status={worker_status.value}",
+        ),
+    )
+
+    step = load_run_snapshot(db_path, recorder.run_id)["steps"][0]
+    assert step["status"] == expected_step_status
+    assert step["metadata_json"]["worker_result_status"] == worker_status.value
+
+
+def test_failed_worker_result_is_persisted_as_failed(tmp_path) -> None:
+    db_path, recorder, services = _services(tmp_path)
+    task = _task(recorder.run_id)
+
+    services.register_tasks([task])
+    services.mark_ready(task)
+    services.mark_running(task)
+    services.record_result(
+        task,
+        GraphWorkerResult(
+            task_id=task.task_id,
+            agent_id=task.assigned_agent,
+            status=ResultStatus.FAILED,
+            summary="worker failed",
+            warnings=["provider timeout"],
+        ),
+    )
+
+    step = load_run_snapshot(db_path, recorder.run_id)["steps"][0]
+    assert step["status"] == "failed"
+    assert step["observation_summary"] == "worker failed"
+    assert "provider timeout" in step["error_type"]
+    assert step["metadata_json"]["worker_result_status"] == "failed"
+
+
+def test_same_step_id_is_isolated_by_run_id(tmp_path) -> None:
+    db_path = tmp_path / "agent_quant.db"
+    initialize_database(db_path)
+
+    first_recorder = AgentRuntimeRecorder(
+        user_id="user-1",
+        goal="first run",
+        db_path=db_path,
+        session_id="session-1",
+    )
+    second_recorder = AgentRuntimeRecorder(
+        user_id="user-1",
+        goal="second run",
+        db_path=db_path,
+        session_id="session-1",
+    )
+    first_services = CollaborationRuntimeServices.from_recorder(
+        first_recorder,
+        user_id="user-1",
+        session_id="session-1",
+    )
+    second_services = CollaborationRuntimeServices.from_recorder(
+        second_recorder,
+        user_id="user-1",
+        session_id="session-1",
+    )
+
+    first_task = _task(first_recorder.run_id, task_id="shared_step")
+    second_task = _task(second_recorder.run_id, task_id="shared_step")
+    first_services.register_tasks([first_task])
+    second_services.register_tasks([second_task])
+
+    first_services.record_result(
+        first_task,
+        GraphWorkerResult(
+            task_id="shared_step",
+            agent_id=first_task.assigned_agent,
+            status=ResultStatus.COMPLETED,
+            summary="first",
+        ),
+    )
+    second_services.record_result(
+        second_task,
+        GraphWorkerResult(
+            task_id="shared_step",
+            agent_id=second_task.assigned_agent,
+            status=ResultStatus.FAILED,
+            summary="second",
+        ),
+    )
+
+    first_step = load_run_snapshot(db_path, first_recorder.run_id)["steps"][0]
+    second_step = load_run_snapshot(db_path, second_recorder.run_id)["steps"][0]
+    assert first_step["step_id"] == second_step["step_id"] == "shared_step"
+    assert first_step["status"] == "succeeded"
+    assert second_step["status"] == "failed"
+
+
+def test_register_tasks_rejects_foreign_run_id(tmp_path) -> None:
+    _, recorder, services = _services(tmp_path)
+    foreign_task = _task("foreign-run")
+
+    with pytest.raises(ValueError, match="worker_task_run_id_mismatch"):
+        services.register_tasks([foreign_task])
+
+
+def test_worker_result_records_duration_and_reference_counts(tmp_path) -> None:
+    db_path, recorder, services = _services(tmp_path)
+    task = _task(recorder.run_id)
+
+    services.register_tasks([task])
+    services.record_result(
+        task,
+        GraphWorkerResult(
+            task_id=task.task_id,
+            agent_id=task.assigned_agent,
+            status=ResultStatus.COMPLETED,
+            summary="completed with artifact",
+            artifact_refs=[{"artifact_id": "artifact://phase-1-test"}],
+            metadata={"duration_ms": 125},
+        ),
+    )
+
+    step = load_run_snapshot(db_path, recorder.run_id)["steps"][0]
+    assert step["duration_seconds"] == pytest.approx(0.125)
+    assert step["metadata_json"]["artifact_refs"] == [{"artifact_id": "artifact://phase-1-test"}]
+    assert step["metadata_json"]["agent_output_summary"]["artifact_ref_count"] == 1
