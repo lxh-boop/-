@@ -9,7 +9,7 @@ def main() -> None:
         "server.api.main:app",
         host=os.environ.get("AGENT_API_HOST", "127.0.0.1"),
         port=int(os.environ.get("AGENT_API_PORT", "8010")),
-        reload=False,
+        reload=True,
         access_log=True,
     )
 

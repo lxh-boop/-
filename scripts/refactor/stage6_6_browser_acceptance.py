@@ -48,12 +48,33 @@ def format_console_message(item: Any) -> str:
         return str(item)
 
 
-def wait_heading(page: Page, text: str, timeout: int = 60_000) -> tuple[bool, str]:
+def wait_heading(page: Page, text: str, timeout: int = 120_000) -> tuple[bool, str]:
+    """Wait for the page-content heading, not the permanent sidebar label."""
     try:
-        page.get_by_text(text, exact=False).first.wait_for(state="visible", timeout=timeout)
-        return True, f"visible={text}"
+        page.locator(".page-loading").wait_for(state="hidden", timeout=timeout)
+        page.locator(".page-heading").get_by_role(
+            "heading",
+            name=text,
+            exact=True,
+        ).wait_for(state="visible", timeout=timeout)
+        return True, f"content_heading_visible={text}"
     except Exception as exc:
         return False, f"{type(exc).__name__}: {exc}"
+
+
+def wait_attached(locator: Any, *, timeout: int = 120_000) -> tuple[bool, str]:
+    try:
+        locator.wait_for(state="attached", timeout=timeout)
+        return True, "attached"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def route_body_snapshot(page: Page, limit: int = 1200) -> str:
+    try:
+        return page.locator("body").inner_text()[:limit]
+    except Exception as exc:
+        return f"<body unavailable: {type(exc).__name__}: {exc}>"
 
 
 def load_regression(path: str) -> tuple[list[dict[str, Any]], list[str], list[str]]:
@@ -267,41 +288,155 @@ def main() -> int:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(channel="chrome", headless=not args.headed)
             page = browser.new_page(viewport={"width": 1680, "height": 1050})
-            page.set_default_timeout(90_000)
-            page.on("console", lambda item: console_errors.append(format_console_message(item)) if item.type == "error" else None)
+            page.set_default_timeout(120_000)
+            page.on(
+                "console",
+                lambda item: console_errors.append(format_console_message(item))
+                if item.type == "error"
+                else None,
+            )
             page.on("pageerror", lambda error: console_errors.append(str(error)))
             try:
-                page.goto(f"{args.url}/dashboard", wait_until="domcontentloaded", timeout=120_000)
+                page.goto(
+                    f"{args.url}/dashboard",
+                    wait_until="domcontentloaded",
+                    timeout=120_000,
+                )
                 ready, ready_detail = wait_heading(page, "首页 / 预测排名")
-                body = page.locator("body").inner_text()
-                labels = [label for label in ("开盘价", "最高价", "最低价", "收盘价") if label in body]
-                record(results, "Dashboard renders the ranking page", ready, ready_detail)
-                record(results, "Dashboard table displays all OHLC columns", len(labels) == 4, f"labels={labels}")
-                page.screenshot(path=str(shots / "08_dashboard_ohlc.png"), full_page=True)
+                dashboard_headers: list[str] = []
+                dashboard_wait_errors: list[str] = []
+                if ready:
+                    header_root = page.locator(".ant-table-thead")
+                    for label in ("开盘价", "最高价", "最低价", "收盘价"):
+                        attached, attached_detail = wait_attached(
+                            header_root.get_by_text(label, exact=True).first,
+                        )
+                        if attached:
+                            dashboard_headers.append(label)
+                        else:
+                            dashboard_wait_errors.append(
+                                f"{label}: {attached_detail}"
+                            )
+                record(
+                    results,
+                    "Dashboard renders the ranking page",
+                    ready,
+                    (
+                        f"{ready_detail}; "
+                        f"api_status={page.get_by_test_id('api-status').inner_text()}"
+                        if ready
+                        else f"{ready_detail}; body={route_body_snapshot(page)}"
+                    ),
+                )
+                record(
+                    results,
+                    "Dashboard table displays all OHLC columns",
+                    ready and len(dashboard_headers) == 4,
+                    (
+                        f"labels={dashboard_headers}; "
+                        f"wait_errors={dashboard_wait_errors}"
+                    ),
+                )
+                page.screenshot(
+                    path=str(shots / "08_dashboard_ohlc.png"),
+                    full_page=True,
+                )
 
-                page.goto(f"{args.url}/settings", wait_until="domcontentloaded", timeout=120_000)
+                page.goto(
+                    f"{args.url}/settings",
+                    wait_until="domcontentloaded",
+                    timeout=120_000,
+                )
                 ready, ready_detail = wait_heading(page, "系统设置")
-                body = page.locator("body").inner_text()
-                ui_markers = [item for item in ("本地模型", "远程 API", "保存配置", "Tushare 配置") if item in body]
-                record(results, "Editable settings page renders", ready and len(ui_markers) == 4, f"{ready_detail}; markers={ui_markers}")
+                ui_markers: list[str] = []
+                settings_wait_errors: list[str] = []
+                if ready:
+                    marker_locators = {
+                        "本地模型": page.get_by_text("本地模型", exact=True).first,
+                        "远程 API": page.get_by_text("远程 API", exact=True).first,
+                        "保存配置": page.get_by_role(
+                            "button",
+                            name="保存配置",
+                            exact=True,
+                        ),
+                        "Tushare 配置": page.get_by_text(
+                            "Tushare 配置",
+                            exact=True,
+                        ).first,
+                    }
+                    for marker, locator in marker_locators.items():
+                        attached, attached_detail = wait_attached(locator)
+                        if attached:
+                            ui_markers.append(marker)
+                        else:
+                            settings_wait_errors.append(
+                                f"{marker}: {attached_detail}"
+                            )
+                record(
+                    results,
+                    "Editable settings page renders",
+                    ready and len(ui_markers) == 4,
+                    (
+                        f"{ready_detail}; markers={ui_markers}; "
+                        f"wait_errors={settings_wait_errors}; "
+                        f"body={route_body_snapshot(page) if not ready else '<ready>'}"
+                    ),
+                )
 
                 secret_inputs = page.locator('input[type="password"]')
-                secret_values = [secret_inputs.nth(index).input_value() for index in range(secret_inputs.count())]
+                secret_ready = False
+                secret_wait_detail = ""
+                if ready:
+                    secret_ready, secret_wait_detail = wait_attached(
+                        secret_inputs.first,
+                    )
+                secret_values = [
+                    secret_inputs.nth(index).input_value()
+                    for index in range(secret_inputs.count())
+                ]
                 record(
                     results,
                     "Credential inputs are never prefilled",
-                    bool(secret_values) and all(not value for value in secret_values),
-                    f"input_count={len(secret_values)}; nonempty={sum(1 for value in secret_values if value)}",
+                    (
+                        ready
+                        and secret_ready
+                        and bool(secret_values)
+                        and all(not value for value in secret_values)
+                    ),
+                    (
+                        f"input_count={len(secret_values)}; "
+                        f"nonempty={sum(1 for value in secret_values if value)}; "
+                        f"wait={secret_wait_detail}"
+                    ),
                 )
-                page.screenshot(path=str(shots / "09_settings_editor.png"), full_page=True)
+                page.screenshot(
+                    path=str(shots / "09_settings_editor.png"),
+                    full_page=True,
+                )
 
-                save_button = page.get_by_role("button", name="保存配置", exact=True)
+                save_button = page.get_by_role(
+                    "button",
+                    name="保存配置",
+                    exact=True,
+                )
                 save_button.click(timeout=30_000)
-                modal = page.locator(".ant-modal:visible").filter(has_text="确认保存运行配置？")
+                modal = page.locator(".ant-modal:visible").filter(
+                    has_text="确认保存运行配置？"
+                )
                 modal.wait_for(state="visible", timeout=30_000)
-                record(results, "Settings save is protected by browser confirmation", modal.count() > 0, f"modal_count={modal.count()}")
-                page.screenshot(path=str(shots / "10_settings_confirmation.png"), full_page=True)
-                cancel = modal.locator(".ant-modal-confirm-btns .ant-btn-default")
+                record(
+                    results,
+                    "Settings save is protected by browser confirmation",
+                    modal.count() > 0,
+                    f"modal_count={modal.count()}",
+                )
+                page.screenshot(
+                    path=str(shots / "10_settings_confirmation.png"),
+                    full_page=True,
+                )
+                cancel = modal.locator(
+                    ".ant-modal-confirm-btns .ant-btn-default"
+                )
                 if cancel.count():
                     cancel.first.click(force=True)
                 else:
@@ -310,7 +445,12 @@ def main() -> int:
                 browser.close()
     except Exception as exc:
         runtime_errors.append(f"{type(exc).__name__}: {exc}")
-        record(results, "Stage 6.6 browser flow completed", False, f"{type(exc).__name__}: {exc}")
+        record(
+            results,
+            "Stage 6.6 browser flow completed",
+            False,
+            f"{type(exc).__name__}: {exc}",
+        )
 
     meaningful_console = [
         item

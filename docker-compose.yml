@@ -28,32 +28,37 @@ services:
       AGENT_FLOW_TRACE: ${AGENT_FLOW_TRACE:-1}
       AGENT_FLOW_TRACE_MAX_CHARS: ${AGENT_FLOW_TRACE_MAX_CHARS:-30000}
       AGENT_CONSOLE_TRACE: ${AGENT_CONSOLE_TRACE:-0}
+
+      WATCHFILES_FORCE_POLLING: "true"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
       - "${STOCK_APP_API_PORT:-8010}:8010"
     volumes:
+#      - type: bind
+#        source: ./data
+#        target: /app/data
+#      - type: bind
+#        source: ./models
+#        target: /app/models
+#      - type: bind
+#        source: ./outputs
+#        target: /app/outputs
+#      - type: bind
+#        source: ./logs
+#        target: /app/logs
+#      - type: bind
+#        source: ./runtime
+#        target: /app/runtime
+#      - type: bind
+#        source: ./external_repos
+#        target: /app/external_repos
+#      - type: bind
+#        source: ./local_app_config.json
+#        target: /app/local_app_config.json
       - type: bind
-        source: ./data
-        target: /app/data
-      - type: bind
-        source: ./models
-        target: /app/models
-      - type: bind
-        source: ./outputs
-        target: /app/outputs
-      - type: bind
-        source: ./logs
-        target: /app/logs
-      - type: bind
-        source: ./runtime
-        target: /app/runtime
-      - type: bind
-        source: ./external_repos
-        target: /app/external_repos
-      - type: bind
-        source: ./local_app_config.json
-        target: /app/local_app_config.json
+        source: .
+        target: /app
     healthcheck:
       test:
         - CMD
