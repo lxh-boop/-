@@ -21,6 +21,20 @@ def run_diagnostic(
         task_id=task.task_id,
         agent_id=task.assigned_agent,
         status=ResultStatus.COMPLETED,
+        output_type="DiagnosticResult",
+        data={
+            "diagnostic_target": str(task.args.get("diagnostic_target") or task.objective),
+            "checked_components": ["neo4j_financial_graph"],
+            "findings": [
+                {
+                    "kind": "neo4j_connectivity",
+                    "status": "ok",
+                    "graph_id": provider.identity.store.graph_id,
+                }
+            ],
+            "root_cause": "",
+        },
+        error=None,
         focus_refs=task.focus_refs,
         summary="Neo4j 金融事实图连接正常。",
         findings=[

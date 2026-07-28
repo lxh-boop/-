@@ -36,6 +36,30 @@ class WorkerToolDirectory:
             and str(worker_role or "") in set(definition.allowed_agent_types)
         )
 
+    def private_catalog(self, worker_role: str) -> list[dict]:
+        """Return Tool schemas only to the assigned Worker runtime.
+
+        The coordinator never calls this method. It is the private Tool-level
+        contract that a Worker may use when planning its own Tool DAG.
+        """
+
+        catalog: list[dict] = []
+        for definition in self.registry.list(
+            agent_type=str(worker_role or ""),
+            visibility=TOOL_VISIBILITY_WORKER_PRIVATE,
+        ):
+            catalog.append(
+                {
+                    "tool_id": definition.name,
+                    "description": definition.description,
+                    "input_schema": dict(definition.input_schema or {}),
+                    "output_schema": dict(definition.output_schema or {}),
+                    "produced_outputs": list(definition.produced_outputs or []),
+                    "side_effects": list(definition.side_effects or []),
+                }
+            )
+        return catalog
+
 
 def build_worker_tool_registry(
     *,

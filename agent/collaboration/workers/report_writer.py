@@ -25,6 +25,14 @@ def run_report_writer(
     dependency_results: dict[str, dict[str, Any]],
     language: str,
 ) -> GraphWorkerResult:
+    requested_task_ids = [
+        str(item) for item in task.args.get("input_task_ids") or []
+    ]
+    selected_dependency_results = {
+        task_id: payload
+        for task_id, payload in dependency_results.items()
+        if not requested_task_ids or task_id in set(requested_task_ids)
+    }
     safe_results = [
         {
             "contract_version": str(
@@ -33,6 +41,9 @@ def run_report_writer(
             "task_id": str(item.get("task_id") or ""),
             "agent_id": str(item.get("agent_id") or ""),
             "status": str(item.get("status") or ""),
+            "output_type": str(item.get("output_type") or ""),
+            "data": safe_public_value(item.get("data")),
+            "error": safe_public_value(item.get("error")),
             "focus_refs": safe_public_value(item.get("focus_refs") or []),
             "summary": str(item.get("summary") or "")[:2000],
             "findings": safe_public_value(item.get("findings") or []),
@@ -43,13 +54,16 @@ def run_report_writer(
             "missing_items": safe_public_value(item.get("missing_items") or []),
             "confidence": item.get("confidence"),
         }
-        for item in dependency_result_items(dependency_results)
+        for item in dependency_result_items(selected_dependency_results)
     ]
     if not safe_results:
         return GraphWorkerResult(
             task_id=task.task_id,
             agent_id=task.assigned_agent,
             status=ResultStatus.NEED_CONTEXT,
+            output_type="FinalReport",
+            data=None,
+            error=None,
             focus_refs=task.focus_refs,
             summary="报告生成缺少上游 GraphWorkerResult。",
             missing_items=[
@@ -65,14 +79,15 @@ def run_report_writer(
         "不能猜证券代码，不能引用未提供的实体、证据或影响路径。明确区分已验证事实、来源声明、间接关系和不确定性。"
         "若没有影响路径，必须明确说当前证据不足，不能把新闻提及当作因果影响。"
         "不要暴露内部 Agent 名称、task_id、GraphRef 技术字段、工具名或数据库实现。"
-        "使用中文回答。"
+        "使用中文回答。输出完整的用户可读报告正文，不要输出 WorkerResult 外壳或 JSON。"
         if language != "en"
         else (
             "You are the financial Agent report writer. Use only the supplied "
             "GraphWorkerResult contracts. Do not re-parse raw evidence or invent "
             "entity identities, evidence, or causal paths. Clearly separate "
             "validated facts, claims, indirect relations, and uncertainty. Do not "
-            "expose internal agents, task IDs, tools, GraphRef fields, or storage details."
+            "expose internal agents, task IDs, tools, GraphRef fields, or storage details. "
+            "Return only the complete user-facing report body, not JSON or a WorkerResult envelope."
         )
     )
     answer = llm_service.generate_text(
@@ -83,7 +98,7 @@ def run_report_writer(
                 "role": "user",
                 "content": json.dumps(
                     {
-                        "objective": task.objective,
+                        "objective": str(task.args.get("report_goal") or task.objective),
                         "worker_results": safe_results,
                     },
                     ensure_ascii=False,
@@ -103,6 +118,19 @@ def run_report_writer(
             if statuses & {"partial", "need_context", "failed"}
             else ResultStatus.COMPLETED
         ),
+        output_type="FinalReport",
+        data={
+            "title": str(task.args.get("report_goal") or task.objective)[:300],
+            "language": "en" if language == "en" else "zh",
+            "source_task_ids": requested_task_ids or list(selected_dependency_results.keys()),
+            "content": str(answer or ""),
+            "limitations": [
+                str(item.get("summary") or "")[:500]
+                for item in safe_results
+                if str(item.get("status") or "") in {"partial", "need_context", "failed"}
+            ],
+        },
+        error=None,
         focus_refs=task.focus_refs,
         summary=str(answer or ""),
         findings=[{"kind": "report", "text": str(answer or "")}],
@@ -110,7 +138,7 @@ def run_report_writer(
             [float(item.get("confidence") or 0.0) for item in safe_results] or [0.0]
         ),
         evidence_refs=refs_from_dependencies(
-            dependency_results,
+            selected_dependency_results,
             kinds={GraphNodeKind.EVIDENCE},
         ),
         graph_path_refs=[

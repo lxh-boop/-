@@ -7,7 +7,12 @@ from core.llm import LLMExecutionDependencies, LLMRuntimeSettings, LLMService, r
 from core.llm.dependencies import register_llm_execution_dependencies
 
 from agent.collaboration import execute_unified_agent_request
-from agent.console_trace import flow_event, trace_event, trace_exception
+from agent.console_trace import (
+    finalize_flow_markdown,
+    flow_event,
+    trace_event,
+    trace_exception,
+)
 from agent.llm_audit import activate_llm_audit_context
 from agent.runtime import (
     AgentRuntimeRecorder,
@@ -218,7 +223,7 @@ def run_agent_request(
             runtime.transition_run(RUN_FAILED, f"{type(exc).__name__}:{exc}")
         except Exception:
             pass
-        return _empty_failure(
+        failure = _empty_failure(
             exc=exc,
             query=raw_query,
             user_id=user_id,
@@ -226,6 +231,22 @@ def run_agent_request(
             run_id=runtime.run_id,
             language=language,
         )
+        finalize_flow_markdown(
+            run_id=runtime.run_id,
+            question=raw_query,
+            execution=failure.get("orchestration"),
+            runtime_status=RUN_FAILED,
+            success=False,
+            final_answer=str(failure.get("answer") or ""),
+            user_id=user_id,
+            session_id=session_id,
+            language=language,
+            llm_runtime={
+                **active_llm.public_dict,
+                "config_hash": active_llm.config_hash,
+            },
+        )
+        return failure
 
     execution_status = str(execution.get("execution_status") or "failed")
     plan_id = ""
@@ -356,7 +377,7 @@ def run_agent_request(
         },
         run_id=runtime.run_id,
     )
-    return {
+    response = {
         "success": bool(execution.get("success")),
         "run_id": runtime.run_id,
         "formal_entry_audit": {
@@ -384,6 +405,22 @@ def run_agent_request(
         },
         "context_warnings": [],
     }
+    finalize_flow_markdown(
+        run_id=runtime.run_id,
+        question=raw_query,
+        execution=orchestration,
+        runtime_status=final_runtime_status,
+        success=bool(execution.get("success")),
+        final_answer=str(execution.get("answer") or ""),
+        user_id=user_id,
+        session_id=session_id,
+        language=language,
+        llm_runtime={
+            **active_llm.public_dict,
+            "config_hash": active_llm.config_hash,
+        },
+    )
+    return response
 
 
 __all__ = ["run_agent_request"]

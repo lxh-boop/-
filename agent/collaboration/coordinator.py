@@ -102,6 +102,7 @@ class AgentCollaborationCoordinator:
             llm_service=llm_service,
             provider=provider,
             impact_service=GraphImpactService(self.store),
+            directory=self.directory,
         )
         self.entry = MainEntryDecisionPlanner(llm_service=llm_service)
         self.planner = CoordinatorPlanner(self.directory, llm_service=llm_service)
@@ -393,6 +394,15 @@ class AgentCollaborationCoordinator:
                 "focus_refs": [ref.to_dict() for ref in focus_refs],
                 "resolution_audit": resolution_audit,
                 "planner": plan_meta,
+                "worker_dag": {
+                    "contract_version": "worker_dag_snapshot.v1",
+                    "task_count": len(tasks),
+                    "tasks": [task.safe_for_coordinator() for task in tasks],
+                    "execution_batches": batches,
+                    "execution_order": [
+                        item.task_id for item in tasks if item.task_id in results
+                    ],
+                },
                 "runtime_persistence": {
                     "agent_steps_connected": self.runtime_services is not None,
                     "runtime_layer": "worker_dag",
@@ -425,6 +435,14 @@ class AgentCollaborationCoordinator:
                         task_id=task.task_id,
                         agent_id=task.assigned_agent,
                         status=ResultStatus.NOT_EXECUTED,
+                        output_type=task.expected_output_type,
+                        data=None,
+                        error={
+                            "code": "unresolved_task_dependency",
+                            "message": "任务依赖无法满足。",
+                            "component": "worker_dag_executor",
+                            "retryable": False,
+                        },
                         focus_refs=task.focus_refs,
                         summary="任务依赖无法满足。",
                         warnings=["unresolved_task_dependency"],
@@ -469,6 +487,14 @@ class AgentCollaborationCoordinator:
                             task_id=task.task_id,
                             agent_id=task.assigned_agent,
                             status=ResultStatus.FAILED,
+                            output_type=task.expected_output_type,
+                            data=None,
+                            error={
+                                "code": "worker_execution_failed",
+                                "message": str(exc),
+                                "component": task.assigned_agent,
+                                "retryable": True,
+                            },
                             focus_refs=task.focus_refs,
                             summary="Worker 执行失败。",
                             warnings=[f"{type(exc).__name__}:{exc}"],
@@ -478,9 +504,17 @@ class AgentCollaborationCoordinator:
                         self.runtime_services.record_result(task, result)
                     timeline.append({
                         "task_id": task.task_id,
+                        "worker_id": task.worker_id,
                         "agent_id": task.assigned_agent,
+                        "task_type": task.task_type,
                         "status": result.status.value,
+                        "output_type": result.output_type,
+                        "duration_ms": result.metadata.get("duration_ms"),
                         "summary": result.summary[:500],
+                        "warning_count": len(result.warnings),
+                        "evidence_count": len(result.evidence_refs),
+                        "artifact_count": len(result.artifact_refs),
+                        "error": result.error,
                     })
                     pending.pop(task.task_id, None)
         return results, batches, timeline

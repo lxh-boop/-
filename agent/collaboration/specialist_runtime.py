@@ -19,6 +19,7 @@ from agent.tool_runtime import ToolExecutor
 from agent.worker_tools import WorkerToolDirectory, build_worker_tool_registry
 
 from .agent_directory import (
+    AgentDirectory,
     EVIDENCE_RETRIEVER,
     GRAPH_IMPACT_ANALYST,
     PORTFOLIO_ANALYST,
@@ -28,6 +29,7 @@ from .agent_directory import (
     SYSTEM_DIAGNOSTIC,
 )
 from .models import GraphAgentTask, GraphWorkerResult, ResultStatus, TaskStatus
+from .worker_contracts import WorkerContractViolation
 from .workers import (
     run_diagnostic,
     run_evidence,
@@ -56,10 +58,12 @@ class SpecialistRuntime:
         llm_service: LLMService,
         provider: GraphProviderAdapter,
         impact_service: GraphImpactService,
+        directory: AgentDirectory | None = None,
     ) -> None:
         self.llm_service = llm_service
         self.provider = provider
         self.impact_service = impact_service
+        self.directory = directory or AgentDirectory()
         self.worker_tool_registry = build_worker_tool_registry(provider=provider)
         self.worker_tool_directory = WorkerToolDirectory(
             self.worker_tool_registry
@@ -83,6 +87,8 @@ class SpecialistRuntime:
         started = time.perf_counter()
         task.status = TaskStatus.RUNNING
         try:
+            if task.metadata.get("structured_worker_contract"):
+                self.directory.validate_task_contract(task)
             if task.assigned_agent == EVIDENCE_RETRIEVER:
                 result = self._run_evidence(
                     task,
@@ -126,24 +132,70 @@ class SpecialistRuntime:
                     task_id=task.task_id,
                     agent_id=task.assigned_agent,
                     status=ResultStatus.NOT_EXECUTED,
+                    output_type=task.expected_output_type,
+                    data=None,
+                    error={
+                        "code": "unknown_worker_agent",
+                        "message": f"Unsupported Worker agent: {task.assigned_agent}",
+                        "retryable": False,
+                    },
                     focus_refs=task.focus_refs,
                     summary=f"Unsupported Worker agent: {task.assigned_agent}",
                     warnings=["unknown_worker_agent"],
                 )
         except Exception as exc:
+            error_code = (
+                "worker_contract_violation"
+                if isinstance(exc, WorkerContractViolation)
+                else "worker_execution_failed"
+            )
             result = GraphWorkerResult(
                 task_id=task.task_id,
                 agent_id=task.assigned_agent,
                 status=ResultStatus.FAILED,
+                output_type=task.expected_output_type,
+                data=None,
+                error={
+                    "code": error_code,
+                    "message": str(exc),
+                    "component": task.assigned_agent,
+                    "retryable": not isinstance(exc, WorkerContractViolation),
+                },
                 focus_refs=task.focus_refs,
                 summary=(
-                    "金融图或专业数据链路执行失败。"
+                    "Worker 输入合同或专业数据链路执行失败。"
                     if language != "en"
-                    else "The financial-graph or specialist data path failed."
+                    else "The Worker input contract or specialist data path failed."
                 ),
                 warnings=[f"{type(exc).__name__}:{exc}"],
                 metadata={"error_type": type(exc).__name__},
             )
+        if not result.output_type:
+            result.output_type = task.expected_output_type
+        if task.metadata.get("structured_worker_contract"):
+            try:
+                self.directory.validate_result(result)
+            except WorkerContractViolation as exc:
+                result = GraphWorkerResult(
+                    task_id=task.task_id,
+                    agent_id=task.assigned_agent,
+                    status=ResultStatus.FAILED,
+                    output_type=task.expected_output_type,
+                    data=None,
+                    error={
+                        "code": "worker_output_contract_violation",
+                        "message": str(exc),
+                        "component": task.assigned_agent,
+                        "retryable": False,
+                    },
+                    focus_refs=task.focus_refs,
+                    summary=(
+                        "Worker 返回结果不符合公开输出合同。"
+                        if language != "en"
+                        else "The Worker result does not satisfy its public output contract."
+                    ),
+                    warnings=[str(exc)],
+                )
         result.metadata.setdefault("task_type", task.task_type)
         result.metadata.setdefault("attempt", task.attempt)
         result.metadata.setdefault(

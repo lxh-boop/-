@@ -56,6 +56,14 @@ def run_strategy_guard(
             task_id=task.task_id,
             agent_id=task.assigned_agent,
             status=ResultStatus.FAILED,
+            output_type="ReviewedProposal",
+            data=None,
+            error={
+                "code": "proposal_capability_catalog_empty",
+                "message": "没有可用的 Proposal 能力。",
+                "component": "strategy_guard",
+                "retryable": False,
+            },
             focus_refs=task.focus_refs,
             summary="没有可用的 Proposal 能力，未进行任何写入。",
             warnings=["proposal_capability_catalog_empty"],
@@ -76,7 +84,8 @@ def run_strategy_guard(
                 "role": "system",
                 "content": (
                     "你是 Strategy Guard 的私有 Proposal 规划器。主 Agent 看不到这些私有能力。"
-                    "只能选择一个 proposal 能力生成待审批预案，禁止 Commit，禁止表示已经执行。"
+                    "任务中必须存在明确 change_intent；只能选择一个 proposal 能力生成待审批预案，"
+                    "禁止 Commit，禁止表示已经执行。"
                     "Agent 公共实体引用均为 GraphRef，不得要求主 Agent 提供 stock_code。"
                     "严格输出 JSON：{\"action\":\"execute_proposal|need_context|blocked\","
                     "\"capability\":\"\",\"parameters\":{},\"reason\":\"\",\"missing_items\":[]}。"
@@ -87,6 +96,7 @@ def run_strategy_guard(
                 "content": json.dumps(
                     {
                         "task": task.safe_for_coordinator(),
+                        "worker_args": safe_public_value(task.args),
                         "user_request": current_user_request,
                         "dependency_results": safe_public_value(
                             dependency_result_items(dependency_results)
@@ -124,6 +134,9 @@ def run_strategy_guard(
             task_id=task.task_id,
             agent_id=task.assigned_agent,
             status=ResultStatus.NEED_CONTEXT,
+            output_type="ReviewedProposal",
+            data=None,
+            error=None,
             focus_refs=task.focus_refs,
             summary="生成预案前需要补充信息。",
             missing_items=missing,
@@ -133,6 +146,14 @@ def run_strategy_guard(
             task_id=task.task_id,
             agent_id=task.assigned_agent,
             status=ResultStatus.BLOCKED,
+            output_type="ReviewedProposal",
+            data=None,
+            error={
+                "code": "proposal_blocked",
+                "message": str(decision.get("reason") or "当前请求不能安全形成预案。"),
+                "component": "strategy_guard",
+                "retryable": False,
+            },
             focus_refs=task.focus_refs,
             summary=str(decision.get("reason") or "当前请求不能安全形成预案。"),
         )
@@ -140,6 +161,7 @@ def run_strategy_guard(
     params = dict(decision.get("parameters") or {})
     params.pop("account_id", None)
     params["user_id"] = task.user_id
+    params.setdefault("change_intent", str(task.args.get("change_intent") or ""))
     raw = execute_tool_legacy_dict(
         str(decision.get("capability") or ""),
         params,
@@ -173,6 +195,28 @@ def run_strategy_guard(
         task_id=task.task_id,
         agent_id=task.assigned_agent,
         status=ResultStatus.PROPOSAL_READY if success else ResultStatus.FAILED,
+        output_type="ReviewedProposal",
+        data=(
+            {
+                "proposal_id": proposal_id,
+                "plan_id": plan_id,
+                "proposal": safe_public_value(data),
+                "requires_approval": bool(success),
+                "execution_allowed": False,
+            }
+            if success
+            else None
+        ),
+        error=(
+            None
+            if success
+            else {
+                "code": str(raw.get("error_type") or "proposal_generation_failed"),
+                "message": str(raw.get("message") or "预案生成失败。"),
+                "component": str(decision.get("capability") or "strategy_guard"),
+                "retryable": True,
+            }
+        ),
         focus_refs=task.focus_refs,
         summary=str(raw.get("message") or ("已生成待审批预案。" if success else "预案生成失败。")),
         findings=[

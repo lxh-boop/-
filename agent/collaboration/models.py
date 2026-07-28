@@ -78,6 +78,30 @@ def _compact(value: Any, *, depth: int = 0, max_depth: int = 5, max_items: int =
     return str(value)[:max_chars]
 
 
+def _public_result_data(output_type: str, data: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return the coordinator-visible Worker payload.
+
+    Generic evidence payloads continue to remove fields such as ``content``,
+    ``body`` and ``full_text`` because those fields may contain raw documents.
+    ``FinalReport.content`` is different: it is the deliberate user-facing
+    product of the report Worker and is required by the public FinalReport
+    schema. Preserve only that schema-owned field after the generic compaction.
+    """
+    if data is None:
+        return None
+
+    compacted = _compact(data, max_depth=5)
+    result = dict(compacted) if isinstance(compacted, dict) else {}
+    if str(output_type or "") == "FinalReport":
+        report_content = str(data.get("content") or "")
+        result["content"] = _compact(
+            report_content,
+            max_depth=2,
+            max_chars=12000,
+        )
+    return result
+
+
 class TaskStatus(str, Enum):
     CREATED = "created"
     READY = "ready"
@@ -122,20 +146,63 @@ class ResultStatus(str, Enum):
 
 @dataclass(frozen=True)
 class AgentCapabilityCard:
+    """Structured public contract for one MainAgent-selectable Worker.
+
+    ``worker_id`` is the stable short identifier written into the Worker DAG.
+    ``agent_id`` remains the existing runtime dispatch identifier so current
+    Worker implementations and persisted traces stay compatible.
+    """
+
+    worker_id: str
     agent_id: str
     role: str
     description: str
+    responsibility: str
     accepted_task_types: list[str] = field(default_factory=list)
-    input_description: str = ""
+    input_schema: dict[str, Any] = field(default_factory=dict)
+    output_schema: dict[str, Any] = field(default_factory=dict)
     output_types: list[str] = field(default_factory=list)
+    required_upstream_output_groups: list[list[str]] = field(default_factory=list)
+    dependency_arg_fields: dict[str, list[str]] = field(default_factory=dict)
+    non_responsibilities: list[str] = field(default_factory=list)
+    side_effects: list[str] = field(default_factory=list)
+    missing_context_policy: str = "return_to_main_agent"
     supports_parallel: bool = True
     can_generate_proposal: bool = False
+    private_tool_ids: list[str] = field(default_factory=list, repr=False)
+    private_worker_prompt: str = field(default="", repr=False)
+
+    @property
+    def input_description(self) -> str:
+        """Compatibility summary retained for older callers and UI views."""
+
+        required = list(self.input_schema.get("required") or [])
+        return "required args: " + ", ".join(required) if required else "structured args object"
 
     def to_dict(self) -> dict[str, Any]:
         return _plain(self)
 
     def safe_for_coordinator(self) -> dict[str, Any]:
-        return self.to_dict()
+        """Return the Worker card without private Tool or private prompt data."""
+
+        return {
+            "worker_id": self.worker_id,
+            "agent_id": self.agent_id,
+            "role": self.role,
+            "description": self.description,
+            "responsibility": self.responsibility,
+            "accepted_task_types": list(self.accepted_task_types),
+            "input_schema": _plain(self.input_schema),
+            "output_schema": _plain(self.output_schema),
+            "output_types": list(self.output_types),
+            "required_upstream_output_groups": _plain(self.required_upstream_output_groups),
+            "dependency_arg_fields": _plain(self.dependency_arg_fields),
+            "non_responsibilities": list(self.non_responsibilities),
+            "side_effects": list(self.side_effects),
+            "missing_context_policy": self.missing_context_policy,
+            "supports_parallel": self.supports_parallel,
+            "can_generate_proposal": self.can_generate_proposal,
+        }
 
 
 @dataclass
@@ -205,6 +272,9 @@ class GraphAgentTask:
     objective: str
     task_type: str
     user_id: str
+    worker_id: str = ""
+    args: dict[str, Any] = field(default_factory=dict)
+    expected_output_type: str = ""
     focus_refs: list[GraphRef] = field(default_factory=list)
     context_refs: list[GraphRef] = field(default_factory=list)
     dependency_task_ids: list[str] = field(default_factory=list)
@@ -225,6 +295,9 @@ class GraphAgentTask:
         self.objective = str(self.objective or "").strip()
         self.task_type = str(self.task_type or "general_analysis").strip()
         self.user_id = str(self.user_id or "default")
+        self.worker_id = str(self.worker_id or "").strip().upper()
+        self.args = dict(self.args or {})
+        self.expected_output_type = str(self.expected_output_type or "").strip()
         self.focus_refs = refs_from(self.focus_refs)
         self.context_refs = refs_from(self.context_refs)
         self.dependency_task_ids = _str_list(self.dependency_task_ids, limit=50)
@@ -252,9 +325,12 @@ class GraphAgentTask:
             "task_id": self.task_id,
             "run_id": self.run_id,
             "session_id": self.session_id,
+            "worker_id": self.worker_id,
             "assigned_agent": self.assigned_agent,
             "objective": self.objective,
             "task_type": self.task_type,
+            "args": _compact(self.args, max_depth=4),
+            "expected_output_type": self.expected_output_type,
             "user_id": self.user_id,
             "focus_refs": [ref.to_dict() for ref in self.focus_refs],
             "context_refs": [ref.to_dict() for ref in self.context_refs],
@@ -277,6 +353,9 @@ class GraphWorkerResult:
     task_id: str
     agent_id: str
     status: ResultStatus
+    output_type: str = ""
+    data: dict[str, Any] | None = field(default_factory=dict)
+    error: dict[str, Any] | None = None
     focus_refs: list[GraphRef] = field(default_factory=list)
     summary: str = ""
     findings: list[dict[str, Any]] = field(default_factory=list)
@@ -298,6 +377,9 @@ class GraphWorkerResult:
         self.task_id = str(self.task_id or "")
         self.agent_id = str(self.agent_id or "").upper()
         self.status = ResultStatus.from_value(self.status)
+        self.output_type = str(self.output_type or "").strip()
+        self.data = dict(self.data or {}) if self.data is not None else None
+        self.error = dict(self.error or {}) if self.error is not None else None
         self.focus_refs = refs_from(self.focus_refs)
         self.summary = str(self.summary or "")[:8000]
         self.findings = _dict_list(self.findings, limit=100)
@@ -340,6 +422,7 @@ class GraphWorkerResult:
             if key in {
                 "task_type", "attempt", "partial_reason", "proposal_id", "plan_id",
                 "requires_approval", "graph_view_id", "duration_ms",
+                "tool_execution",
             }
         }
         return {
@@ -347,6 +430,9 @@ class GraphWorkerResult:
             "task_id": self.task_id,
             "agent_id": self.agent_id,
             "status": self.status.value,
+            "output_type": self.output_type,
+            "data": _public_result_data(self.output_type, self.data),
+            "error": _compact(self.error, max_depth=3),
             "focus_refs": [ref.to_dict() for ref in self.focus_refs],
             "summary": self.summary[:1800],
             "findings": [_compact(item) for item in self.findings[:12]],

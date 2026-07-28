@@ -21,6 +21,18 @@ def run_graph_impact(
     task: GraphAgentTask,
     dependency_results: dict[str, dict[str, Any]],
 ) -> GraphWorkerResult:
+    source_task_ids = [
+        str(item) for item in task.args.get("source_task_ids") or []
+    ]
+    target_task_ids = [
+        str(item) for item in task.args.get("target_task_ids") or []
+    ]
+    selected_dependencies = {
+        task_id: payload
+        for task_id, payload in dependency_results.items()
+        if not source_task_ids + target_task_ids
+        or task_id in set(source_task_ids + target_task_ids)
+    }
     causes = [
         ref
         for ref in task.focus_refs + task.context_refs
@@ -32,7 +44,7 @@ def run_graph_impact(
     ]
     causes.extend(
         refs_from_dependencies(
-            dependency_results,
+            selected_dependencies,
             kinds={GraphNodeKind.EVIDENCE, GraphNodeKind.ASSERTION},
         )
     )
@@ -45,7 +57,7 @@ def run_graph_impact(
         and "portfolio" in ref.node_id.lower()
     ]
     portfolio_candidates.extend(
-        refs_from_dependencies(dependency_results, kinds={GraphNodeKind.OBJECT})
+        refs_from_dependencies(selected_dependencies, kinds={GraphNodeKind.OBJECT})
     )
     portfolio_ref = next(
         (ref for ref in portfolio_candidates if "portfolio" in ref.node_id.lower()),
@@ -75,6 +87,9 @@ def run_graph_impact(
             task_id=task.task_id,
             agent_id=task.assigned_agent,
             status=ResultStatus.NEED_CONTEXT,
+            output_type="ImpactAnalysisResult",
+            data=None,
+            error=None,
             focus_refs=task.focus_refs,
             summary="影响路径分析缺少必要图锚点。",
             missing_items=missing,
@@ -89,6 +104,14 @@ def run_graph_impact(
         task_id=task.task_id,
         agent_id=task.assigned_agent,
         status=ResultStatus.COMPLETED if paths else ResultStatus.PARTIAL,
+        output_type="ImpactAnalysisResult",
+        data={
+            "source_task_ids": source_task_ids or list(selected_dependencies.keys()),
+            "target_task_ids": target_task_ids or list(selected_dependencies.keys()),
+            "impact_paths": [path.to_dict() for path in paths],
+            "impact_summary": safe_public_value(summary),
+        },
+        error=None,
         focus_refs=[*causes, portfolio_ref],
         summary=(
             f"已找到 {len(paths)} 条可追踪影响路径，涉及 {summary.get('holding_count', 0)} 个持仓。"

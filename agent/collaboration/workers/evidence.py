@@ -29,17 +29,47 @@ def run_evidence(
     db_path: str | Path | None,
     default_top_k: int,
 ) -> GraphWorkerResult:
+    requested_ref_ids = {
+        str(item)
+        for item in task.args.get("focus_ref_ids") or []
+        if str(item).strip()
+    }
+    all_refs = task.focus_refs + task.context_refs
+    selected_refs = [
+        ref for ref in all_refs
+        if not requested_ref_ids or ref.node_id in requested_ref_ids
+    ]
+    research_question = str(
+        task.args.get("research_question") or query or task.objective
+    ).strip()
     evidence_refs = [
         ref
-        for ref in task.focus_refs + task.context_refs
+        for ref in selected_refs
         if ref.node_kind == GraphNodeKind.EVIDENCE
     ]
-    object_refs = [ref for ref in task.focus_refs if ref.node_kind == GraphNodeKind.OBJECT]
+    object_refs = [
+        ref for ref in selected_refs
+        if ref.node_kind == GraphNodeKind.OBJECT
+    ]
     if evidence_refs and not object_refs:
         return GraphWorkerResult(
             task_id=task.task_id,
             agent_id=task.assigned_agent,
             status=ResultStatus.COMPLETED,
+            output_type="EntityResearchResult",
+            data={
+                "entity_refs": [ref.to_dict() for ref in evidence_refs],
+                "research_question": research_question,
+                "results": [
+                    {
+                        "kind": "provided_evidence",
+                        "evidence_refs": [ref.to_dict() for ref in evidence_refs],
+                    }
+                ],
+                "evidence_refs": [ref.to_dict() for ref in evidence_refs],
+                "conclusion": "已确认指定证据节点，可供下游任务使用。",
+            },
+            error=None,
             focus_refs=task.focus_refs,
             summary="已使用指定新闻或证据节点作为分析原因锚点。",
             evidence_refs=evidence_refs,
@@ -57,6 +87,9 @@ def run_evidence(
             task_id=task.task_id,
             agent_id=task.assigned_agent,
             status=ResultStatus.NEED_CONTEXT,
+            output_type="EntityResearchResult",
+            data=None,
+            error=None,
             focus_refs=task.focus_refs,
             summary="缺少已解析的金融对象或指定证据。",
             missing_items=[
@@ -85,7 +118,7 @@ def run_evidence(
     if tool_name == EVIDENCE_RETRIEVE_TOOL:
         arguments.update(
             {
-                "query": query or task.objective,
+                "query": research_question,
                 "top_k": max(1, min(int(default_top_k or 20), 100)),
                 "source_task_id": task.task_id,
                 "source_agent_id": task.assigned_agent,
@@ -137,6 +170,32 @@ def run_evidence(
         task_id=task.task_id,
         agent_id=task.assigned_agent,
         status=ResultStatus.COMPLETED if success else ResultStatus.FAILED,
+        output_type="EntityResearchResult",
+        data=(
+            {
+                "entity_refs": [ref.to_dict() for ref in object_refs],
+                "research_question": research_question,
+                "results": safe_public_value(analysis.get("results") or []),
+                "evidence_refs": [ref.to_dict() for ref in produced_evidence],
+                "conclusion": (
+                    "已形成可追踪的实体研究证据结果。"
+                    if success
+                    else "当前未形成可用实体研究结果。"
+                ),
+            }
+            if success
+            else None
+        ),
+        error=(
+            None
+            if success
+            else {
+                "code": tool_result.error_type or "evidence_dependency_failed",
+                "message": tool_result.error_message or tool_result.message,
+                "component": tool_result.tool_name,
+                "retryable": True,
+            }
+        ),
         focus_refs=object_refs,
         summary="已完成金融对象证据读取并写入可追踪金融图。" if success else "未获得可用的金融证据。",
         findings=findings,
