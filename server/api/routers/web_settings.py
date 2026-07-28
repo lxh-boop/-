@@ -26,6 +26,8 @@ _SAFE_REASONS = {
     "local_model_required",
     "endpoint_required",
     "invalid_endpoint",
+    "invalid_scheduler_hour",
+    "invalid_scheduler_minute",
 }
 
 

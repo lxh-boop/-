@@ -1,9 +1,9 @@
 {
-  "version": "6.6",
+  "version": "6.7",
   "resource": "/api/v1/web/settings",
   "methods": {
-    "GET": "Return public runtime configuration and boolean credential status.",
-    "PUT": "Persist confirmed local/API LLM and Tushare overrides to local_app_config.json."
+    "GET": "Return public runtime configuration, scheduler runtime status and boolean credential status.",
+    "PUT": "Persist confirmed LLM, Tushare and scheduler settings to local_app_config.json, then reload the in-process scheduler."
   },
   "write_requirements": [
     "request_id",
@@ -14,6 +14,20 @@
     "blank": "preserve current local override or environment default",
     "clear_flag": "remove only the local override",
     "response": "never return credential values"
+  },
+  "scheduler_semantics": {
+    "host": "FastAPI process",
+    "timezone": "Asia/Shanghai",
+    "config_file": "local_app_config.json",
+    "run_order": [
+      "market data incremental update",
+      "latest ranking generation",
+      "public result publication",
+      "news/user scoring",
+      "paper trading"
+    ],
+    "catch_up": "when enabled, API startup schedules an immediate run if the latest expected trading date is missing",
+    "manual_run": "paper-profile.scheduler-manual Task API task"
   },
   "ranking_price_semantics": "open/high/low/close are joined by stock code and signal date"
 }

@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_TASK_NAME = "StockDailyApp-AutoUpdate"
-DEFAULT_TRIGGER_TIME = "17:30"
+DEFAULT_TASK_NAME = "StockDailyApp-AutoUpdate-Fallback"
+DEFAULT_TRIGGER_TIME = "20:00"
 
 
 def project_root() -> Path:
@@ -15,9 +15,10 @@ def project_root() -> Path:
 
 def detect_project_python(root: str | Path | None = None) -> Path:
     root_path = Path(root) if root else project_root()
-    venv_python = root_path / ".venv1" / "Scripts" / "python.exe"
-    if venv_python.exists():
-        return venv_python
+    for name in (".venv", ".venv1"):
+        venv_python = root_path / name / "Scripts" / "python.exe"
+        if venv_python.exists():
+            return venv_python
     return Path(sys.executable)
 
 

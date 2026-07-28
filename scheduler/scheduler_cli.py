@@ -27,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--skip-training", action="store_true")
     run.add_argument("--skip-news", action="store_true")
     run.add_argument("--skip-paper-trading", action="store_true")
+    run.add_argument("--skip-market-update", action="store_true")
     run.add_argument("--source", default="manual", choices=["scheduled", "manual", "retry"])
     run.add_argument("--top-k", type=int, default=50)
     run.add_argument("--output-dir", default="outputs")
@@ -57,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
             skip_training=args.skip_training,
             skip_news=args.skip_news,
             skip_paper_trading=args.skip_paper_trading,
+            skip_market_update=args.skip_market_update,
             source=args.source,
             top_k=args.top_k,
             output_dir=args.output_dir,

@@ -16,6 +16,7 @@ RUN apt-get update \
         git \
         libgomp1 \
         procps \
+        tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 FROM runtime-base AS api-deps

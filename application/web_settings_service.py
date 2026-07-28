@@ -8,6 +8,7 @@ import config
 from core.llm.profiles import build_model_profile
 from core.llm.runtime_settings import resolve_active_llm_settings
 from local_config import load_local_config, save_local_config
+from scheduler.runtime_scheduler import reload_runtime_scheduler, scheduler_public_status
 
 
 class WebSettingsApplicationService:
@@ -111,11 +112,7 @@ class WebSettingsApplicationService:
                     "default_available": default_tushare,
                 },
             },
-            "scheduler": {
-                "enabled": bool(cfg.get("auto_retrain_enabled")),
-                "hour": int(cfg.get("auto_retrain_hour") or 0),
-                "minute": int(cfg.get("auto_retrain_minute") or 0),
-            },
+            "scheduler": scheduler_public_status(),
             "read_only": False,
         }
 
@@ -135,6 +132,10 @@ class WebSettingsApplicationService:
         local_model: str,
         tushare_credential: str | None,
         clear_tushare_credential: bool,
+        scheduler_enabled: bool = False,
+        scheduler_hour: int = 20,
+        scheduler_minute: int = 0,
+        scheduler_catch_up: bool = True,
     ) -> dict[str, Any]:
         if not confirmed:
             raise ValueError("settings_update_confirmation_required")
@@ -150,6 +151,10 @@ class WebSettingsApplicationService:
             raise ValueError("api_credential_clear_conflict")
         if clear_tushare_credential and self._text(tushare_credential):
             raise ValueError("tushare_credential_clear_conflict")
+        if not 0 <= int(scheduler_hour) <= 23:
+            raise ValueError("invalid_scheduler_hour")
+        if not 0 <= int(scheduler_minute) <= 59:
+            raise ValueError("invalid_scheduler_minute")
 
         current = load_local_config()
         updated = dict(current)
@@ -161,6 +166,11 @@ class WebSettingsApplicationService:
                 "llm_api_model": self._text(api_model),
                 "llm_local_base_url": self._validated_endpoint(local_base_url, required=True),
                 "llm_local_model": self._text(local_model),
+                "auto_retrain_enabled": bool(scheduler_enabled),
+                "auto_retrain_hour": int(scheduler_hour),
+                "auto_retrain_minute": int(scheduler_minute),
+                "auto_retrain_timezone": "Asia/Shanghai",
+                "auto_retrain_catch_up": bool(scheduler_catch_up),
             }
         )
 
@@ -186,10 +196,17 @@ class WebSettingsApplicationService:
             raise ValueError("local_model_required")
 
         save_local_config(updated)
+        warnings: list[str] = []
+        try:
+            reload_runtime_scheduler()
+        except Exception as exc:
+            # 配置已经安全落盘；调度器会在 API 下次启动时重新读取。
+            warnings.append(f"scheduler_reload_failed:{type(exc).__name__}")
         return {
             "request_id": self._text(request_id),
             "idempotency_key": self._text(idempotency_key),
             "status": "saved",
+            "warnings": warnings,
             "settings": self.public_settings(),
         }
 

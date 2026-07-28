@@ -9,6 +9,7 @@ import {
   Descriptions,
   Form,
   Input,
+  InputNumber,
   Modal,
   Radio,
   Row,
@@ -36,6 +37,10 @@ interface SettingsFormValues {
   local_model: string
   tushare_credential?: string
   clear_tushare_credential: boolean
+  scheduler_enabled: boolean
+  scheduler_hour: number
+  scheduler_minute: number
+  scheduler_catch_up: boolean
 }
 
 const EMPTY_SETTINGS: Pick<PublicSettings, 'feature_flags' | 'credentials' | 'llm' | 'configuration' | 'scheduler'> = {
@@ -48,7 +53,7 @@ const EMPTY_SETTINGS: Pick<PublicSettings, 'feature_flags' | 'credentials' | 'll
     local: { provider: 'ollama_local', base_url: 'http://127.0.0.1:11434/v1', effective_base_url: '', model: 'stock-agent-qwen3-4b' },
     tushare: { configured: false, custom_configured: false, default_available: false },
   },
-  scheduler: { enabled: false, hour: 0, minute: 0 },
+  scheduler: { enabled: false, hour: 20, minute: 0, timezone: 'Asia/Shanghai', catch_up: true, runtime_running: false, job_registered: false, next_run_time: '', expected_signal_date: '', latest_signal_date: '', stale: false, last_started_at: '', last_finished_at: '', last_trade_date: '', last_status: 'unknown', current_step: '', last_error: '' },
 }
 
 function configuredText(custom: boolean, fallback: boolean, configured: boolean): string {
@@ -79,6 +84,10 @@ export function SettingsPage() {
       local_model: settings.configuration.local.model,
       tushare_credential: '',
       clear_tushare_credential: false,
+      scheduler_enabled: settings.scheduler.enabled,
+      scheduler_hour: settings.scheduler.hour,
+      scheduler_minute: settings.scheduler.minute,
+      scheduler_catch_up: settings.scheduler.catch_up,
     })
   }, [form, settings])
 
@@ -240,6 +249,36 @@ export function SettingsPage() {
               <Form.Item name="clear_tushare_credential" valuePropName="checked" label="Token 操作">
                 <Checkbox>清除本地自定义 Token，改用环境默认配置</Checkbox>
               </Form.Item>
+            </Col>
+          </Row>
+        </Card>
+
+        <Card title="每日自动更新" style={{ marginTop: 16 }}>
+          <Row gutter={[16, 0]}>
+            <Col xs={24} lg={8}>
+              <Form.Item name="scheduler_enabled" valuePropName="checked" label="计划任务">
+                <Checkbox>启用 FastAPI 常驻自动更新</Checkbox>
+              </Form.Item>
+            </Col>
+            <Col xs={12} lg={6}>
+              <Form.Item name="scheduler_hour" label="小时" rules={[{ required: true, message: '请填写小时' }]}>
+                <InputNumber min={0} max={23} precision={0} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={12} lg={6}>
+              <Form.Item name="scheduler_minute" label="分钟" rules={[{ required: true, message: '请填写分钟' }]}>
+                <InputNumber min={0} max={59} precision={0} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} lg={8}>
+              <Form.Item name="scheduler_catch_up" valuePropName="checked" label="错过计划时间">
+                <Checkbox>API 启动后自动补跑缺失交易日</Checkbox>
+              </Form.Item>
+            </Col>
+            <Col span={24}>
+              <Typography.Text type="secondary">
+                定时任务会先执行行情增量更新与排名生成，再执行新闻、用户推荐和模拟盘链路；无需保持浏览器页面打开。
+              </Typography.Text>
             </Col>
           </Row>
         </Card>

@@ -33,3 +33,7 @@ class SettingsUpdateRequest(BaseModel):
     local_model: str = Field(default="stock-agent-qwen3-4b", max_length=200)
     tushare_credential: str | None = Field(default=None, max_length=500)
     clear_tushare_credential: bool = False
+    scheduler_enabled: bool = False
+    scheduler_hour: int = Field(default=20, ge=0, le=23)
+    scheduler_minute: int = Field(default=0, ge=0, le=59)
+    scheduler_catch_up: bool = True

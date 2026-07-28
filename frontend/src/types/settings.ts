@@ -34,6 +34,27 @@ export interface EditableSettingsConfiguration {
   }
 }
 
+
+export interface SchedulerSettings {
+  enabled: boolean
+  hour: number
+  minute: number
+  timezone: string
+  catch_up: boolean
+  runtime_running: boolean
+  job_registered: boolean
+  next_run_time: string
+  expected_signal_date: string
+  latest_signal_date: string
+  stale: boolean
+  last_started_at: string
+  last_finished_at: string
+  last_trade_date: string
+  last_status: string
+  current_step: string
+  last_error: string
+}
+
 export interface PublicSettings {
   universe: string
   model_backend: string
@@ -44,7 +65,7 @@ export interface PublicSettings {
   credentials: CredentialStatus
   llm: PublicLlmStatus
   configuration: EditableSettingsConfiguration
-  scheduler: { enabled: boolean; hour: number; minute: number }
+  scheduler: SchedulerSettings
   read_only: boolean
 }
 
@@ -62,6 +83,10 @@ export interface SettingsUpdateRequest {
   local_model: string
   tushare_credential?: string
   clear_tushare_credential: boolean
+  scheduler_enabled: boolean
+  scheduler_hour: number
+  scheduler_minute: number
+  scheduler_catch_up: boolean
 }
 
 export interface SettingsUpdateResult {
