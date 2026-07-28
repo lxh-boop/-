@@ -32,8 +32,32 @@ QLIB_PROVIDER_URI = os.environ.get("QLIB_PROVIDER_URI", r"D:\qlib_data\cn_data")
 # CSI300 股票池缓存文件
 CSI300_POOL_CACHE_PATH = r"data\csi300_stock_pool.csv"
 
-# 如果 Qlib 的 csi300 文件不存在，是否尝试从 Tushare 获取
+# 最近一次通过完整数量校验的股票池。在线接口临时失败时用于兜底。
+CSI300_POOL_LAST_GOOD_PATH = os.environ.get(
+    "CSI300_POOL_LAST_GOOD_PATH",
+    r"data\csi300_stock_pool.last_good.csv",
+)
+
+# 当前缓存超过该天数后尝试在线刷新；刷新失败仍可使用 last-good 缓存。
+CSI300_POOL_CACHE_MAX_AGE_DAYS = int(
+    os.environ.get("CSI300_POOL_CACHE_MAX_AGE_DAYS", "45")
+)
+
+# Tushare index_weight 是月度数据，按自然月逐月向前回溯。
+CSI300_INDEX_WEIGHT_LOOKBACK_MONTHS = int(
+    os.environ.get("CSI300_INDEX_WEIGHT_LOOKBACK_MONTHS", "18")
+)
+
+# 如果 Qlib 的 csi300 文件不存在，是否尝试从 Tushare 获取。
 USE_TUSHARE_INDEX_WEIGHT_FALLBACK = True
+
+# Tushare 无数据或权限不足时，使用 AKShare 的中证指数成分接口。
+CSI300_AKSHARE_FALLBACK_ENABLED = (
+    os.environ.get("CSI300_AKSHARE_FALLBACK_ENABLED", "true")
+    .strip()
+    .lower()
+    not in {"0", "false", "no", "off"}
+)
 
 
 # ============================================================
