@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from importlib import import_module
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import numpy as np
 import pandas as pd
@@ -14,6 +14,7 @@ from risk_scoring import add_risk_scores
 
 
 MODEL_ZOO_BACKEND_PREFIX = "zoo:"
+PROJECT_ROOT = Path(__file__).resolve().parent
 ZOO_OPTIONAL_DEPENDENCIES = {
     "chronos": (
         "chronos",
@@ -62,6 +63,115 @@ def list_downloaded_zoo_model_names() -> list[str]:
     return names
 
 
+def _append_unique_path(
+    paths: list[Path],
+    candidate: Path,
+) -> None:
+    key = str(candidate).replace("\\", "/").rstrip("/").lower()
+    if not key:
+        return
+
+    existing = {
+        str(path).replace("\\", "/").rstrip("/").lower()
+        for path in paths
+    }
+    if key not in existing:
+        paths.append(candidate)
+
+
+def _configured_zoo_local_path(model_name: str) -> str:
+    entry = get_model_entry(model_name)
+    meta = get_model_metadata(entry.name) or {}
+    return str(meta.get("local_path") or entry.local_path or "").strip()
+
+
+def _normalized_configured_path_parts(
+    configured: str,
+) -> list[str]:
+    return [
+        part
+        for part in configured.replace("\\", "/").split("/")
+        if part and not part.endswith(":")
+    ]
+
+
+def zoo_local_path_candidates(model_name: str) -> list[Path]:
+    """Return model-path candidates in current-project-first order.
+
+    Model metadata may be written on Windows and later consumed by a Linux
+    Docker container.  The current running project's ``models`` directory is
+    authoritative.  A stale absolute path from another checkout is only used
+    after project-root candidates have been tried.
+    """
+
+    configured = _configured_zoo_local_path(model_name)
+    if not configured:
+        return []
+
+    candidates: list[Path] = []
+    parts = _normalized_configured_path_parts(configured)
+    lower_parts = [part.lower() for part in parts]
+
+    # Highest priority: remap everything from the "models" segment into the
+    # current running project.  This is correct for both:
+    #   models\external_zoo\...
+    #   D:\stock_daily_app\models\external_zoo\...
+    if "models" in lower_parts:
+        models_index = lower_parts.index("models")
+        model_tail = parts[models_index:]
+        _append_unique_path(
+            candidates,
+            PROJECT_ROOT.joinpath(*model_tail),
+        )
+        _append_unique_path(
+            candidates,
+            Path.cwd().joinpath(*model_tail),
+        )
+
+    raw_path = Path(configured).expanduser()
+    windows_path = PureWindowsPath(configured)
+    is_windows_absolute = bool(
+        windows_path.drive or windows_path.root
+    )
+    is_native_absolute = raw_path.is_absolute()
+
+    normalized = Path(*parts) if parts else raw_path
+
+    # For ordinary relative custom paths without a "models" segment, resolve
+    # against the current project before consulting the process working dir.
+    if "models" not in lower_parts and not (
+        is_windows_absolute or is_native_absolute
+    ):
+        _append_unique_path(
+            candidates,
+            PROJECT_ROOT / normalized,
+        )
+        _append_unique_path(
+            candidates,
+            Path.cwd() / normalized,
+        )
+
+    # Legacy/raw metadata remains a fallback.  On Windows this can still be a
+    # valid absolute D:\... path; inside Linux it will normally not exist.
+    _append_unique_path(candidates, raw_path)
+    _append_unique_path(candidates, normalized)
+
+    return candidates
+
+
+def resolve_zoo_local_path(model_name: str) -> Path:
+    candidates = zoo_local_path_candidates(model_name)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+
+    if candidates:
+        # Report the authoritative current-project candidate when nothing
+        # exists, instead of leaking a stale path from old metadata.
+        return candidates[0]
+
+    return PROJECT_ROOT / "models" / "external_zoo" / model_name
+
 def validate_zoo_backend_environment(model_name: str) -> tuple[bool, str]:
     entry = get_model_entry(model_name)
     meta = get_model_metadata(entry.name) or {}
@@ -71,9 +181,21 @@ def validate_zoo_backend_environment(model_name: str) -> tuple[bool, str]:
             f"{entry.name} 尚未下载。请先运行：python -m model_zoo.downloader --model {entry.name}",
         )
 
-    local_path = Path(meta.get("local_path") or entry.local_path)
+    configured_path = str(meta.get("local_path") or entry.local_path or "")
+    local_path = resolve_zoo_local_path(entry.name)
     if not local_path.exists():
-        return False, f"{entry.name} 的本地模型目录不存在：{local_path}"
+        attempted = ", ".join(
+            str(path)
+            for path in zoo_local_path_candidates(entry.name)
+        )
+        return (
+            False,
+            (
+                f"{entry.name} 的本地模型目录不存在。"
+                f"原始配置：{configured_path or '<empty>'}；"
+                f"已尝试：{attempted or '<none>'}"
+            ),
+        )
 
     dependency = ZOO_OPTIONAL_DEPENDENCIES.get(entry.adapter)
     if dependency:
@@ -97,8 +219,7 @@ def load_zoo_adapter(
         raise RuntimeError(message)
 
     entry = get_model_entry(model_name)
-    meta = get_model_metadata(entry.name) or {}
-    local_path = meta.get("local_path") or entry.local_path
+    local_path = resolve_zoo_local_path(entry.name)
     adapter_def = ZOO_ADAPTER_CLASSES.get(entry.adapter)
     if not adapter_def:
         raise RuntimeError(f"{entry.name} adapter is not registered.")
@@ -113,7 +234,7 @@ def load_zoo_adapter(
 
     return adapter_cls(
         model_name=entry.name,
-        local_path=local_path,
+        local_path=str(local_path),
         device=device,
         context_length=context_length,
         batch_size=batch_size,
