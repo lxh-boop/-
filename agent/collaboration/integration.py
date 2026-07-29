@@ -5,6 +5,7 @@ from typing import Any
 
 from core.llm import LLMService
 
+from agent.console_trace import flow_event, trace_exception
 from agent.runtime import AgentRuntimeRecorder
 
 from .control_gateway import ControlGateway
@@ -110,11 +111,47 @@ def execute_unified_agent_request(
         session_id=str(session_id or f"session_{user_id}"),
         strict=True,
     )
-    coordinator = AgentCollaborationCoordinator(
-        output_dir=output_dir,
-        db_path=db_path,
-        llm_service=binding.service,
-        runtime_services=runtime_services,
+    flow_event(
+        "GRAPH_RUNTIME_INITIALIZATION_STARTED",
+        {
+            "entry": "AgentCollaborationCoordinator",
+            "run_id": effective_run_id,
+            "graph_boundary": "Neo4j/GraphRef",
+        },
+        run_id=effective_run_id,
+    )
+    try:
+        coordinator = AgentCollaborationCoordinator(
+            output_dir=output_dir,
+            db_path=db_path,
+            llm_service=binding.service,
+            runtime_services=runtime_services,
+        )
+    except Exception as exc:
+        flow_event(
+            "GRAPH_RUNTIME_INITIALIZATION_FAILED",
+            {
+                "exception_type": type(exc).__name__,
+                "message": str(exc),
+            },
+            run_id=effective_run_id,
+            level="ERROR",
+        )
+        trace_exception(
+            "collaboration.graph_runtime.initialization_failed",
+            exc,
+            run_id=effective_run_id,
+        )
+        raise
+    flow_event(
+        "GRAPH_RUNTIME_INITIALIZATION_COMPLETED",
+        {
+            "graph_id": str(getattr(getattr(coordinator, "store", None), "graph_id", "")),
+            "worker_count": len(
+                getattr(getattr(coordinator, "directory", None), "safe_catalog", lambda: [])()
+            ),
+        },
+        run_id=effective_run_id,
     )
     try:
         result = coordinator.execute(
@@ -129,6 +166,15 @@ def execute_unified_agent_request(
         )
     finally:
         coordinator.close()
+        flow_event(
+            "GRAPH_RUNTIME_CLOSED",
+            {
+                "graph_id": str(
+                    getattr(getattr(coordinator, "store", None), "graph_id", "")
+                )
+            },
+            run_id=effective_run_id,
+        )
     runtime = result.setdefault("graph_runtime", {})
     runtime["llm_binding"] = binding.public_dict()
     runtime["llm_binding"]["single_service_identity"] = True

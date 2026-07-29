@@ -241,7 +241,8 @@ def validate_schema(value: Any, schema: dict[str, Any], *, path: str = "$") -> N
                     "missing_required_property",
                     f"{path}.{key}",
                 )
-        if schema.get("additionalProperties") is False:
+        additional_properties = schema.get("additionalProperties")
+        if additional_properties is False:
             extras = [key for key in value if key not in properties]
             if extras:
                 raise WorkerContractViolation(
@@ -253,6 +254,12 @@ def validate_schema(value: Any, schema: dict[str, Any], *, path: str = "$") -> N
             child = properties.get(key)
             if isinstance(child, dict):
                 validate_schema(item, child, path=f"{path}.{key}")
+            elif isinstance(additional_properties, dict):
+                validate_schema(
+                    item,
+                    additional_properties,
+                    path=f"{path}.{key}",
+                )
 
 
 def validate_dependency_ids(

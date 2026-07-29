@@ -51,6 +51,45 @@ def _dict_list(value: Any, *, limit: int = 100) -> list[dict[str, Any]]:
     return [dict(item) for item in list(value)[:limit] if isinstance(item, dict)]
 
 
+def _task_inputs(value: Any, *, limit_roles: int = 20, limit_items: int = 20) -> dict[str, list[dict[str, str]]]:
+    """Normalize semantic upstream input bindings.
+
+    MainAgent declares only semantic roles and ``from_task_id`` references.
+    Runtime execution dependencies are derived later from this normalized map.
+    """
+
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, list[dict[str, str]]] = {}
+    for raw_role, raw_items in list(value.items())[:limit_roles]:
+        role = str(raw_role or "").strip()
+        if not role:
+            continue
+        items = raw_items if isinstance(raw_items, list) else [raw_items]
+        normalized: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for raw_item in items[:limit_items]:
+            if not isinstance(raw_item, dict):
+                continue
+            task_id = str(raw_item.get("from_task_id") or "").strip()
+            output_type = str(raw_item.get("expected_output_type") or "").strip()
+            if not task_id:
+                continue
+            key = (task_id, output_type)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(
+                {
+                    "from_task_id": task_id,
+                    "expected_output_type": output_type,
+                }
+            )
+        if normalized:
+            result[role] = normalized
+    return result
+
+
 def _compact(value: Any, *, depth: int = 0, max_depth: int = 5, max_items: int = 20, max_chars: int = 1200) -> Any:
     if depth >= max_depth:
         return "<summarized>" if isinstance(value, (dict, list, tuple, set)) else str(value)[:max_chars]
@@ -163,7 +202,10 @@ class AgentCapabilityCard:
     output_schema: dict[str, Any] = field(default_factory=dict)
     output_types: list[str] = field(default_factory=list)
     required_upstream_output_groups: list[list[str]] = field(default_factory=list)
-    dependency_arg_fields: dict[str, list[str]] = field(default_factory=dict)
+    upstream_input_bindings: dict[str, dict[str, Any]] = field(default_factory=dict)
+    authoritative_arg_bindings: dict[str, str] = field(default_factory=dict, repr=False)
+    selection_requirements: list[str] = field(default_factory=list)
+    dependency_arg_fields: dict[str, list[str]] = field(default_factory=dict, repr=False)
     non_responsibilities: list[str] = field(default_factory=list)
     side_effects: list[str] = field(default_factory=list)
     missing_context_policy: str = "return_to_main_agent"
@@ -185,6 +227,16 @@ class AgentCapabilityCard:
     def safe_for_coordinator(self) -> dict[str, Any]:
         """Return the Worker card without private Tool or private prompt data."""
 
+        public_input_schema = _plain(self.input_schema)
+        if isinstance(public_input_schema, dict):
+            runtime_bound = set(self.authoritative_arg_bindings)
+            required = public_input_schema.get("required")
+            if isinstance(required, list):
+                public_input_schema["required"] = [
+                    str(item) for item in required if str(item) not in runtime_bound
+                ]
+            public_input_schema["x-runtime-bound-args"] = sorted(runtime_bound)
+
         return {
             "worker_id": self.worker_id,
             "agent_id": self.agent_id,
@@ -192,11 +244,13 @@ class AgentCapabilityCard:
             "description": self.description,
             "responsibility": self.responsibility,
             "accepted_task_types": list(self.accepted_task_types),
-            "input_schema": _plain(self.input_schema),
+            "input_schema": public_input_schema,
             "output_schema": _plain(self.output_schema),
             "output_types": list(self.output_types),
             "required_upstream_output_groups": _plain(self.required_upstream_output_groups),
-            "dependency_arg_fields": _plain(self.dependency_arg_fields),
+            "upstream_input_bindings": _plain(self.upstream_input_bindings),
+            "runtime_bound_args": sorted(self.authoritative_arg_bindings),
+            "selection_requirements": list(self.selection_requirements),
             "non_responsibilities": list(self.non_responsibilities),
             "side_effects": list(self.side_effects),
             "missing_context_policy": self.missing_context_policy,
@@ -274,6 +328,7 @@ class GraphAgentTask:
     user_id: str
     worker_id: str = ""
     args: dict[str, Any] = field(default_factory=dict)
+    inputs: dict[str, list[dict[str, str]]] = field(default_factory=dict)
     expected_output_type: str = ""
     focus_refs: list[GraphRef] = field(default_factory=list)
     context_refs: list[GraphRef] = field(default_factory=list)
@@ -285,7 +340,7 @@ class GraphAgentTask:
     status: TaskStatus = TaskStatus.CREATED
     attempt: int = 1
     metadata: dict[str, Any] = field(default_factory=dict)
-    contract_version: str = "graph_agent_task.v1"
+    contract_version: str = "graph_agent_task.v2"
 
     def __post_init__(self) -> None:
         self.task_id = str(self.task_id or new_id("task"))
@@ -297,6 +352,7 @@ class GraphAgentTask:
         self.user_id = str(self.user_id or "default")
         self.worker_id = str(self.worker_id or "").strip().upper()
         self.args = dict(self.args or {})
+        self.inputs = _task_inputs(self.inputs)
         self.expected_output_type = str(self.expected_output_type or "").strip()
         self.focus_refs = refs_from(self.focus_refs)
         self.context_refs = refs_from(self.context_refs)
@@ -306,7 +362,7 @@ class GraphAgentTask:
         self.as_of_time = str(self.as_of_time or "")
         self.status = TaskStatus.from_value(self.status)
         self.metadata = dict(self.metadata or {})
-        self.contract_version = "graph_agent_task.v1"
+        self.contract_version = "graph_agent_task.v2"
         try:
             self.priority = max(0, min(10, int(self.priority)))
         except (TypeError, ValueError):
@@ -319,6 +375,22 @@ class GraphAgentTask:
     def to_dict(self) -> dict[str, Any]:
         return _plain(self)
 
+    def input_task_ids(self, role: str | None = None) -> list[str]:
+        """Return ordered task IDs declared by semantic upstream inputs."""
+
+        selected = (
+            {str(role): self.inputs.get(str(role), [])}
+            if role is not None
+            else self.inputs
+        )
+        result: list[str] = []
+        for items in selected.values():
+            for item in items:
+                task_id = str(item.get("from_task_id") or "").strip()
+                if task_id and task_id not in result:
+                    result.append(task_id)
+        return result
+
     def safe_for_coordinator(self) -> dict[str, Any]:
         return {
             "contract_version": self.contract_version,
@@ -330,6 +402,7 @@ class GraphAgentTask:
             "objective": self.objective,
             "task_type": self.task_type,
             "args": _compact(self.args, max_depth=4),
+            "inputs": _compact(self.inputs, max_depth=4),
             "expected_output_type": self.expected_output_type,
             "user_id": self.user_id,
             "focus_refs": [ref.to_dict() for ref in self.focus_refs],

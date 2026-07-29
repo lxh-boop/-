@@ -80,6 +80,13 @@ class AgentDirectory:
                     },
                     required=["focus_ref_ids", "research_question"],
                 ),
+                authoritative_arg_bindings={
+                    "focus_ref_ids": "focus_ref_ids",
+                },
+                selection_requirements=[
+                    "用于已解析金融实体的独立研究、比较或证据整合。",
+                    "不因为用户只请求实体分析而自动扩展到组合、持仓或组合风险。",
+                ],
                 output_schema=worker_result_schema(
                     "EntityResearchResult",
                     data_schema=object_schema(
@@ -133,6 +140,13 @@ class AgentDirectory:
                     },
                     required=["user_id"],
                 ),
+                authoritative_arg_bindings={
+                    "user_id": "user_id",
+                    "as_of_time": "as_of_time",
+                },
+                selection_requirements=[
+                    "仅当用户明确要求组合、账户或持仓分析，或另一个已选择 Worker 明确需要 PortfolioAnalysisResult 时选择。",
+                ],
                 output_schema=worker_result_schema(
                     "PortfolioAnalysisResult",
                     data_schema=object_schema(
@@ -176,15 +190,9 @@ class AgentDirectory:
                 ],
                 input_schema=object_schema(
                     {
-                        "source_task_ids": _task_ids(),
-                        "target_task_ids": _task_ids(),
                         "analysis_question": string_schema(min_length=1),
                     },
-                    required=[
-                        "source_task_ids",
-                        "target_task_ids",
-                        "analysis_question",
-                    ],
+                    required=["analysis_question"],
                 ),
                 output_schema=worker_result_schema(
                     "ImpactAnalysisResult",
@@ -209,10 +217,26 @@ class AgentDirectory:
                     ["EntityResearchResult"],
                     ["PortfolioAnalysisResult"],
                 ],
-                dependency_arg_fields={
-                    "source_task_ids": ["EntityResearchResult"],
-                    "target_task_ids": ["PortfolioAnalysisResult"],
+                upstream_input_bindings={
+                    "source_analysis": {
+                        "description": "实体研究或证据分析结果",
+                        "accepted_output_types": ["EntityResearchResult"],
+                        "required": True,
+                        "min_items": 1,
+                        "max_items": 8,
+                    },
+                    "target_state": {
+                        "description": "当前组合状态分析结果",
+                        "accepted_output_types": ["PortfolioAnalysisResult"],
+                        "required": True,
+                        "min_items": 1,
+                        "max_items": 8,
+                    },
                 },
+                selection_requirements=[
+                    "仅当用户明确要求分析金融实体对当前组合或持仓的影响时选择。",
+                    "必须同时引用 EntityResearchResult 与 PortfolioAnalysisResult；报告 Worker 不能作为组合状态来源。",
+                ],
                 non_responsibilities=[
                     "自行检索缺失源证据",
                     "自行读取缺失组合状态",
@@ -242,11 +266,9 @@ class AgentDirectory:
                 ],
                 input_schema=object_schema(
                     {
-                        "portfolio_task_ids": _task_ids(),
-                        "related_task_ids": _task_ids(min_items=0),
                         "risk_question": string_schema(min_length=1),
                     },
-                    required=["portfolio_task_ids", "risk_question"],
+                    required=["risk_question"],
                 ),
                 output_schema=worker_result_schema(
                     "PortfolioRiskResult",
@@ -262,13 +284,29 @@ class AgentDirectory:
                 ),
                 output_types=["PortfolioRiskResult"],
                 required_upstream_output_groups=[["PortfolioAnalysisResult"]],
-                dependency_arg_fields={
-                    "portfolio_task_ids": ["PortfolioAnalysisResult"],
-                    "related_task_ids": [
-                        "EntityResearchResult",
-                        "ImpactAnalysisResult",
-                    ],
+                upstream_input_bindings={
+                    "portfolio_state": {
+                        "description": "当前组合状态分析结果",
+                        "accepted_output_types": ["PortfolioAnalysisResult"],
+                        "required": True,
+                        "min_items": 1,
+                        "max_items": 8,
+                    },
+                    "related_analysis": {
+                        "description": "与风险问题相关的实体或影响分析结果",
+                        "accepted_output_types": [
+                            "EntityResearchResult",
+                            "ImpactAnalysisResult",
+                        ],
+                        "required": False,
+                        "min_items": 0,
+                        "max_items": 8,
+                    },
                 },
+                selection_requirements=[
+                    "仅当用户明确要求组合层风险、集中度、适配性或权限风险时选择。",
+                    "必须引用 PortfolioAnalysisResult；普通实体分析不需要本 Worker。",
+                ],
                 non_responsibilities=[
                     "普通个体金融实体研究",
                     "读取原始市场证据",
@@ -298,12 +336,10 @@ class AgentDirectory:
                 ],
                 input_schema=object_schema(
                     {
-                        "current_state_task_ids": _task_ids(),
-                        "supporting_task_ids": _task_ids(min_items=0),
                         "change_intent": string_schema(min_length=1),
                         "proposal_constraints": array_schema({"type": "string"}),
                     },
-                    required=["current_state_task_ids", "change_intent"],
+                    required=["change_intent"],
                 ),
                 output_schema=worker_result_schema(
                     "ReviewedProposal",
@@ -327,17 +363,29 @@ class AgentDirectory:
                         "ImpactAnalysisResult",
                     ]
                 ],
-                dependency_arg_fields={
-                    "current_state_task_ids": [
-                        "PortfolioAnalysisResult",
-                        "PortfolioRiskResult",
-                        "ImpactAnalysisResult",
-                    ],
-                    "supporting_task_ids": [
-                        "EntityResearchResult",
-                        "ImpactAnalysisResult",
-                        "PortfolioRiskResult",
-                    ],
+                upstream_input_bindings={
+                    "current_state": {
+                        "description": "当前状态、风险或影响分析结果",
+                        "accepted_output_types": [
+                            "PortfolioAnalysisResult",
+                            "PortfolioRiskResult",
+                            "ImpactAnalysisResult",
+                        ],
+                        "required": True,
+                        "min_items": 1,
+                        "max_items": 8,
+                    },
+                    "supporting_analysis": {
+                        "description": "用于支持预案的其他分析结果",
+                        "accepted_output_types": [
+                            "EntityResearchResult",
+                            "ImpactAnalysisResult",
+                            "PortfolioRiskResult",
+                        ],
+                        "required": False,
+                        "min_items": 0,
+                        "max_items": 8,
+                    },
                 },
                 non_responsibilities=[
                     "纯分析或纯解释任务",
@@ -364,12 +412,17 @@ class AgentDirectory:
                 accepted_task_types=["write_report", "summarize_results"],
                 input_schema=object_schema(
                     {
-                        "input_task_ids": _task_ids(),
                         "report_goal": string_schema(min_length=1),
                         "reply_language": string_schema(enum=["zh", "en"]),
                     },
-                    required=["input_task_ids", "report_goal", "reply_language"],
+                    required=["report_goal", "reply_language"],
                 ),
+                authoritative_arg_bindings={
+                    "reply_language": "reply_language",
+                },
+                selection_requirements=[
+                    "作为最终报告 Worker，只汇总用户目标所需的上游结果。",
+                ],
                 output_schema=worker_result_schema(
                     "FinalReport",
                     data_schema=object_schema(
@@ -385,7 +438,15 @@ class AgentDirectory:
                     ),
                 ),
                 output_types=["FinalReport"],
-                dependency_arg_fields={"input_task_ids": ["*"]},
+                upstream_input_bindings={
+                    "upstream_results": {
+                        "description": "需要汇总到最终报告的上游 WorkerResult",
+                        "accepted_output_types": ["*"],
+                        "required": True,
+                        "min_items": 1,
+                        "max_items": 8,
+                    },
+                },
                 non_responsibilities=[
                     "重新查询业务数据",
                     "解析新的金融实体",
@@ -491,6 +552,121 @@ class AgentDirectory:
         card = self.get(identifier)
         validate_schema(dict(args or {}), card.input_schema, path="$.args")
 
+    def validate_task_inputs(
+        self,
+        identifier: str,
+        inputs: dict[str, Any],
+        *,
+        task_id: str = "",
+        output_type_by_task: dict[str, str] | None = None,
+        path: str = "$.inputs",
+    ) -> list[str]:
+        """Validate semantic upstream bindings and derive execution dependencies.
+
+        MainAgent owns the semantic decision by choosing ``from_task_id`` for
+        each declared input role. The runtime only compiles those references
+        into an ordered dependency list; it never invents an edge.
+        """
+
+        card = self.get(identifier)
+        raw_inputs = dict(inputs or {})
+        bindings = dict(card.upstream_input_bindings or {})
+        unknown_roles = sorted(set(raw_inputs) - set(bindings))
+        if unknown_roles:
+            raise WorkerContractViolation(
+                "unknown_upstream_input_role",
+                path,
+                ",".join(unknown_roles[:20]),
+            )
+
+        derived: list[str] = []
+        known_outputs = dict(output_type_by_task or {})
+        for role, binding in bindings.items():
+            raw_value = raw_inputs.get(role, [])
+            if isinstance(raw_value, dict):
+                raw_items = [raw_value]
+            elif isinstance(raw_value, list):
+                raw_items = raw_value
+            else:
+                raise WorkerContractViolation(
+                    "upstream_input_role_must_be_object_or_array",
+                    f"{path}.{role}",
+                )
+            minimum = max(0, int(binding.get("min_items") or 0))
+            maximum = max(minimum, int(binding.get("max_items") or 8))
+            required = bool(binding.get("required"))
+            if required and minimum == 0:
+                minimum = 1
+            if len(raw_items) < minimum:
+                raise WorkerContractViolation(
+                    "required_upstream_input_missing",
+                    f"{path}.{role}",
+                    f"min_items={minimum}",
+                )
+            if len(raw_items) > maximum:
+                raise WorkerContractViolation(
+                    "too_many_upstream_inputs",
+                    f"{path}.{role}",
+                    f"max_items={maximum}",
+                )
+            accepted = [str(item) for item in binding.get("accepted_output_types") or []]
+            seen_role_ids: set[str] = set()
+            for index, item in enumerate(raw_items):
+                item_path = f"{path}.{role}[{index}]"
+                if not isinstance(item, dict):
+                    raise WorkerContractViolation(
+                        "upstream_input_reference_must_be_object",
+                        item_path,
+                    )
+                from_task_id = str(item.get("from_task_id") or "").strip()
+                expected_type = str(item.get("expected_output_type") or "").strip()
+                if not from_task_id:
+                    raise WorkerContractViolation(
+                        "upstream_input_task_id_missing",
+                        f"{item_path}.from_task_id",
+                    )
+                if task_id and from_task_id == task_id:
+                    raise WorkerContractViolation(
+                        "self_dependency_not_allowed",
+                        f"{item_path}.from_task_id",
+                        from_task_id,
+                    )
+                if from_task_id in seen_role_ids:
+                    raise WorkerContractViolation(
+                        "duplicate_upstream_input_reference",
+                        item_path,
+                        from_task_id,
+                    )
+                seen_role_ids.add(from_task_id)
+                if not expected_type:
+                    raise WorkerContractViolation(
+                        "upstream_input_expected_output_type_missing",
+                        f"{item_path}.expected_output_type",
+                    )
+                if "*" not in accepted and expected_type not in accepted:
+                    raise WorkerContractViolation(
+                        "upstream_input_output_type_not_accepted",
+                        f"{item_path}.expected_output_type",
+                        f"actual={expected_type},allowed={accepted}",
+                    )
+                if known_outputs:
+                    if from_task_id not in known_outputs:
+                        raise WorkerContractViolation(
+                            "unknown_upstream_input_task",
+                            f"{item_path}.from_task_id",
+                            from_task_id,
+                        )
+                    actual_type = str(known_outputs[from_task_id])
+                    if expected_type != actual_type:
+                        raise WorkerContractViolation(
+                            "upstream_input_output_type_mismatch",
+                            f"{item_path}.expected_output_type",
+                            f"task={from_task_id},expected={expected_type},actual={actual_type}",
+                        )
+                if from_task_id not in derived:
+                    derived.append(from_task_id)
+        return derived
+
     def validate_result(self, result: GraphWorkerResult) -> None:
         card = self.get(result.agent_id)
         if result.output_type not in card.output_types:
@@ -516,6 +692,17 @@ class AgentDirectory:
                 f"{card.worker_id}:{task.task_type}",
             )
         self.validate_task_args(card.worker_id, task.args)
+        derived_dependencies = self.validate_task_inputs(
+            card.worker_id,
+            task.inputs,
+            task_id=task.task_id,
+        )
+        if derived_dependencies != list(task.dependency_task_ids):
+            raise WorkerContractViolation(
+                "derived_dependency_mismatch",
+                "$.dependency_task_ids",
+                f"derived={derived_dependencies},actual={task.dependency_task_ids}",
+            )
         if task.expected_output_type not in card.output_types:
             raise WorkerContractViolation(
                 "unexpected_task_output_type",

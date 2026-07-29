@@ -25,9 +25,7 @@ def run_report_writer(
     dependency_results: dict[str, dict[str, Any]],
     language: str,
 ) -> GraphWorkerResult:
-    requested_task_ids = [
-        str(item) for item in task.args.get("input_task_ids") or []
-    ]
+    requested_task_ids = task.input_task_ids("upstream_results")
     selected_dependency_results = {
         task_id: payload
         for task_id, payload in dependency_results.items()

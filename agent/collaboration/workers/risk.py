@@ -24,12 +24,8 @@ def run_risk(
     output_dir: str | Path,
     db_path: str | Path | None,
 ) -> GraphWorkerResult:
-    portfolio_task_ids = [
-        str(item) for item in task.args.get("portfolio_task_ids") or []
-    ]
-    related_task_ids = [
-        str(item) for item in task.args.get("related_task_ids") or []
-    ]
+    portfolio_task_ids = task.input_task_ids("portfolio_state")
+    related_task_ids = task.input_task_ids("related_analysis")
     selected_dependencies = {
         task_id: payload
         for task_id, payload in dependency_results.items()

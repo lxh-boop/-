@@ -85,8 +85,8 @@ def main() -> int:
         )
         _check(
             checks,
-            "report_args_reference_research_task",
-            report_task.args.get("input_task_ids") == [research_task.task_id],
+            "report_inputs_reference_research_task",
+            report_task.input_task_ids("upstream_results") == [research_task.task_id],
         )
         _check(
             checks,
@@ -112,7 +112,7 @@ def main() -> int:
     else:
         for key in (
             "report_depends_on_research_task",
-            "report_args_reference_research_task",
+            "report_inputs_reference_research_task",
             "research_output_contract",
             "report_output_contract",
             "research_focus_ref",

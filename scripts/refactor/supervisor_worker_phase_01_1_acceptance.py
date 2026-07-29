@@ -30,8 +30,8 @@ class FakeLLMService:
                         "focus_ref_ids": ["object:security:600519"],
                         "research_question": "分析当前表现、主要证据与风险因素",
                     },
+                    "inputs": {},
                     "constraints": ["read_only"],
-                    "dependency_task_ids": [],
                     "expected_output_type": "EntityResearchResult",
                     "priority": 1,
                 },
@@ -41,12 +41,16 @@ class FakeLLMService:
                     "objective": "依据上游结构化结果形成最终报告",
                     "task_type": "write_report",
                     "args": {
-                        "input_task_ids": ["task_1"],
                         "report_goal": "形成金融实体分析报告",
                         "reply_language": "zh",
                     },
+                    "inputs": {
+                        "upstream_results": {
+                            "from_task_id": "task_1",
+                            "expected_output_type": "EntityResearchResult",
+                        }
+                    },
                     "constraints": ["upstream_results_only"],
-                    "dependency_task_ids": ["task_1"],
                     "expected_output_type": "FinalReport",
                     "priority": 2,
                 },
@@ -88,8 +92,10 @@ def main() -> int:
     worker_ids = [task.worker_id for task in tasks]
     if worker_ids != ["W01", "W06"]:
         raise AssertionError(f"unexpected_worker_dag:{worker_ids}")
+    if tasks[1].input_task_ids("upstream_results") != ["task_1"]:
+        raise AssertionError("report_semantic_input_invalid")
     if tasks[1].dependency_task_ids != ["task_1"]:
-        raise AssertionError("report_dependency_invalid")
+        raise AssertionError("report_derived_dependency_invalid")
 
     result = GraphWorkerResult(
         task_id="task_1",
@@ -119,6 +125,8 @@ def main() -> int:
         "main_agent_selects_workers": True,
         "dag_mutation_after_planning": False,
         "task_args_schema_validated": True,
+        "semantic_inputs_validated": True,
+        "dependencies_compiled_from_inputs": True,
         "worker_result_schema_validated": True,
         "private_tool_visibility": "worker_only",
         "metadata": metadata,

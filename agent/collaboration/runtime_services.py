@@ -126,6 +126,8 @@ class CollaborationRuntimeServices:
                         "priority": task.priority,
                         "attempt": task.attempt,
                         "request_mode": task.metadata.get("request_mode"),
+                        "semantic_inputs": task.inputs,
+                        "dependency_derivation": task.metadata.get("dependency_derivation"),
                         **self._ref_summary(task),
                     },
                 )
@@ -187,6 +189,7 @@ class CollaborationRuntimeServices:
                     "agent_input_summary": {
                         "objective": task.objective[:500],
                         "required_outputs": list(task.required_outputs),
+                        "semantic_inputs": task.inputs,
                         "dependency_task_ids": list(task.dependency_task_ids),
                     },
                     "agent_output_summary": {

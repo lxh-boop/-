@@ -62,6 +62,31 @@ _STAGE_LABELS = {
     "CRITIC": "结果审查",
     "UI": "页面输出",
     "EXCEPTION": "异常记录",
+    "GRAPH_RUNTIME_INITIALIZATION_STARTED": "金融图运行时初始化开始",
+    "GRAPH_RUNTIME_INITIALIZATION_COMPLETED": "金融图运行时初始化完成",
+    "GRAPH_RUNTIME_INITIALIZATION_FAILED": "金融图运行时初始化失败",
+    "MAIN_ENTRY_DECISION_STARTED": "MainAgent 入口判断开始",
+    "MAIN_ENTRY_DECISION_COMPLETED": "MainAgent 入口判断完成",
+    "GRAPH_REF_RESOLUTION_STARTED": "GraphRef 解析开始",
+    "GRAPH_REF_RESOLUTION_COMPLETED": "GraphRef 解析完成",
+    "WORKER_PLANNING_STARTED": "Worker DAG 规划开始",
+    "LOCAL_LLM_REQUEST_STARTED": "本地模型规划请求开始",
+    "LOCAL_LLM_RESPONSE_RECEIVED": "本地模型规划响应已返回",
+    "WORKER_PLAN_CANDIDATE_GENERATED": "候选 Worker DAG 已生成",
+    "WORKER_PLAN_VALIDATION_FAILED": "候选 Worker DAG 校验失败",
+    "WORKER_PLAN_REPAIR_STARTED": "完整 Worker DAG 重新规划开始",
+    "WORKER_PLAN_REPAIR_RESPONSE_RECEIVED": "重新规划响应已返回",
+    "WORKER_PLAN_REPAIR_CANDIDATE_GENERATED": "重新规划候选 DAG 已生成",
+    "WORKER_PLAN_REPAIR_SUCCEEDED": "重新规划通过",
+    "WORKER_PLAN_REPAIR_FAILED": "重新规划失败",
+    "WORKER_PLAN_ACCEPTED": "Worker DAG 候选已接受",
+    "WORKER_DAG_VALIDATED": "Worker DAG 合同校验通过",
+    "WORKER_PLANNING_COMPLETED": "Worker DAG 规划完成",
+    "WORKER_PLANNING_FAILED": "Worker DAG 规划失败",
+    "WORKER_DAG_REGISTERED": "Worker DAG 已登记",
+    "WORKER_EXECUTION_STARTED": "Worker DAG 执行开始",
+    "WORKER_EXECUTION_COMPLETED": "Worker DAG 执行完成",
+    "RUN_FAILED": "Agent Run 失败",
 }
 
 
@@ -413,11 +438,13 @@ def _path_for_run(
     with _LOCK:
         if start_new or run_id not in _RUN_FILES:
             question = _extract_question_text(payload)
-            stem = _question_filename_stem(question)
-            path = _deduplicated_markdown_path(stem)
+            question_stem = _question_filename_stem(question)
+            run_stem = _safe_file_name(run_id or _new_fallback_run_id())
+            path = _output_directory() / f"{question_stem}__{run_stem}.md"
             _RUN_FILES[run_id] = path
             _RUN_SEQUENCE[run_id] = 0
-            _write_document_header(path, run_id, question=question)
+            if not path.exists():
+                _write_document_header(path, run_id, question=question)
         return _RUN_FILES[run_id]
 
 
@@ -720,6 +747,7 @@ def finalize_flow_markdown(
             warnings = [str(item) for item in payload.get("warnings") or []]
             errors = [str(item) for item in payload.get("errors") or []]
             missing_context = _as_rows(payload.get("missing_context"))
+            failure = _as_mapping(payload.get("failure"))
             execution_status = str(payload.get("execution_status") or runtime_status or "unknown")
 
             lines: list[str] = [
@@ -760,6 +788,15 @@ def finalize_flow_markdown(
                 "",
                 *_markdown_json(planner),
                 "",
+            ])
+            if failure:
+                lines.extend([
+                    "## 失败阶段与错误分类",
+                    "",
+                    *_markdown_json(failure),
+                    "",
+                ])
+            lines.extend([
                 "## Worker DAG",
                 "",
             ])

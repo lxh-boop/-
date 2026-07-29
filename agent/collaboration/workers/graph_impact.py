@@ -21,12 +21,8 @@ def run_graph_impact(
     task: GraphAgentTask,
     dependency_results: dict[str, dict[str, Any]],
 ) -> GraphWorkerResult:
-    source_task_ids = [
-        str(item) for item in task.args.get("source_task_ids") or []
-    ]
-    target_task_ids = [
-        str(item) for item in task.args.get("target_task_ids") or []
-    ]
+    source_task_ids = task.input_task_ids("source_analysis")
+    target_task_ids = task.input_task_ids("target_state")
     selected_dependencies = {
         task_id: payload
         for task_id, payload in dependency_results.items()

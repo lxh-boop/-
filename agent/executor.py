@@ -4,9 +4,12 @@ from pathlib import Path
 from typing import Any
 
 from core.llm import LLMExecutionDependencies, LLMRuntimeSettings, LLMService, resolve_active_llm_settings
+from core.llm.contracts import LLMConfigurationError, LLMJSONError, LLMProviderError
 from core.llm.dependencies import register_llm_execution_dependencies
 
 from agent.collaboration import execute_unified_agent_request
+from agent.collaboration.planner import CoordinatorPlanningError
+from agent.graph.errors import GraphConfigurationError, GraphUnavailableError
 from agent.console_trace import (
     finalize_flow_markdown,
     flow_event,
@@ -48,6 +51,90 @@ def _sanitize_context(value: dict[str, Any] | None, *, user_id: str, session_id:
     return context
 
 
+def _exception_chain(exc: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+def _failure_descriptor(exc: Exception, language: str) -> dict[str, Any]:
+    chain = _exception_chain(exc)
+    messages = " | ".join(str(item) for item in chain)
+
+    if any(isinstance(item, (LLMJSONError, CoordinatorPlanningError)) for item in chain):
+        return {
+            "code": "main_agent_planning_failed",
+            "stage": "worker_planning",
+            "message": (
+                "MainAgent 未能生成符合 Worker 输入、输出和依赖合同的执行计划，本次请求尚未进入 Worker 执行阶段。"
+                if language == "zh"
+                else "The MainAgent could not produce a Worker DAG that satisfies the Worker input, output, and dependency contracts. Worker execution did not start."
+            ),
+            "retryable": True,
+        }
+
+    if any(isinstance(item, (LLMConfigurationError, LLMProviderError)) for item in chain):
+        return {
+            "code": "llm_service_unavailable",
+            "stage": "llm_execution",
+            "message": (
+                "当前配置的本地模型服务不可用，本次请求未完成。"
+                if language == "zh"
+                else "The configured local model service is unavailable, so the request could not be completed."
+            ),
+            "retryable": True,
+        }
+
+    if any(isinstance(item, (GraphConfigurationError, GraphUnavailableError)) for item in chain):
+        return {
+            "code": "financial_graph_unavailable",
+            "stage": "graph_runtime_initialization",
+            "message": (
+                "金融图运行时不可用，请检查 Neo4j 配置、连接和主数据初始化。"
+                if language == "zh"
+                else "The financial-graph runtime is unavailable. Check Neo4j configuration, connectivity, and master-data initialization."
+            ),
+            "retryable": True,
+        }
+
+    lowered = messages.lower()
+    if "neo4j" in lowered or "graphunavailable" in lowered:
+        return {
+            "code": "financial_graph_unavailable",
+            "stage": "graph_runtime",
+            "message": (
+                "金融图运行时不可用，请检查 Neo4j 配置、连接和主数据初始化。"
+                if language == "zh"
+                else "The financial-graph runtime is unavailable. Check Neo4j configuration, connectivity, and master-data initialization."
+            ),
+            "retryable": True,
+        }
+
+    return {
+        "code": "agent_runtime_failed",
+        "stage": "agent_runtime",
+        "message": (
+            "Agent 运行过程中发生技术错误，本次请求未完成。"
+            if language == "zh"
+            else "A technical error occurred in the Agent runtime, so the request was not completed."
+        ),
+        "retryable": True,
+    }
+
+
+def _exception_diagnostics(exc: Exception) -> dict[str, Any]:
+    for item in _exception_chain(exc):
+        diagnostics = getattr(item, "diagnostics", None)
+        if isinstance(diagnostics, dict):
+            return dict(diagnostics)
+    return {}
+
+
 def _empty_failure(
     *,
     exc: Exception,
@@ -57,11 +144,29 @@ def _empty_failure(
     run_id: str,
     language: str,
 ) -> dict[str, Any]:
-    message = (
-        "金融图运行时不可用，请检查 Neo4j 配置、连接和主数据初始化。"
-        if language == "zh"
-        else "The financial-graph runtime is unavailable. Check Neo4j configuration, connectivity, and master-data initialization."
-    )
+    failure = _failure_descriptor(exc, language)
+    diagnostics = _exception_diagnostics(exc)
+    error_text = f"{type(exc).__name__}:{exc}"
+    planner_snapshot = {
+        "status": "failed",
+        "failure_code": failure["code"],
+        "failure_stage": failure["stage"],
+        "candidate_plan_diagnostics": diagnostics,
+        "worker_selection_owner": "main_agent",
+        "dag_mutation_after_planning": "forbidden",
+    }
+    graph_runtime = {
+        "contract_version": "financial_graph_runtime.v1",
+        "legacy_public_protocol_enabled": False,
+        "planner": planner_snapshot,
+        "worker_dag": {
+            "contract_version": "worker_dag_snapshot.v1",
+            "task_count": 0,
+            "tasks": [],
+            "execution_batches": [],
+            "execution_order": [],
+        },
+    }
     return {
         "success": False,
         "run_id": run_id,
@@ -80,10 +185,12 @@ def _empty_failure(
                 "legacy_router_called": False,
                 "legacy_entity_protocol_enabled": False,
                 "single_llm_service": True,
+                "failure": failure,
             },
         },
         "orchestration": {
             "success": False,
+            "answer": failure["message"],
             "execution_status": "failed",
             "task_results": {},
             "graph_worker_results": {
@@ -94,16 +201,25 @@ def _empty_failure(
                 "failed_count": 1,
                 "waiting_context_count": 0,
             },
+            "execution_batches": [],
+            "agent_timeline": [],
+            "internal_tool_call_count": 0,
+            "missing_context": [],
             "warnings": [],
-            "errors": [f"{type(exc).__name__}:{exc}"],
+            "errors": [error_text],
+            "graph_runtime": graph_runtime,
+            "failure": failure,
         },
         "routing_layer": "single_main_agent_graph_entry",
-        "answer": message,
+        "answer": failure["message"],
         "result": {
             "success": False,
-            "message": message,
-            "data": {"graph_runtime": {"legacy_public_protocol_enabled": False}},
-            "errors": [f"{type(exc).__name__}:{exc}"],
+            "message": failure["message"],
+            "data": {
+                "graph_runtime": graph_runtime,
+                "failure": failure,
+            },
+            "errors": [error_text],
             "tool_name": "financial_graph_agent",
             "status": "failed",
             "requires_confirmation": False,
@@ -230,6 +346,16 @@ def run_agent_request(
             session_id=session_id,
             run_id=runtime.run_id,
             language=language,
+        )
+        flow_event(
+            "RUN_FAILED",
+            {
+                "failure": failure.get("orchestration", {}).get("failure", {}),
+                "errors": failure.get("orchestration", {}).get("errors", []),
+                "planner": failure.get("orchestration", {}).get("graph_runtime", {}).get("planner", {}),
+            },
+            run_id=runtime.run_id,
+            level="ERROR",
         )
         finalize_flow_markdown(
             run_id=runtime.run_id,

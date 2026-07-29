@@ -104,6 +104,24 @@ class LLMService:
         except Exception:
             return
 
+    @staticmethod
+    def _emit_generation_event(
+        callback: Callable[[str, dict[str, Any]], None] | None,
+        event: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Emit a best-effort JSON-generation lifecycle event.
+
+        The callback is deliberately optional and isolated from model execution:
+        observability failures must never change the LLM result or retry policy.
+        """
+        if callback is None:
+            return
+        try:
+            callback(str(event), dict(payload))
+        except Exception:
+            return
+
     def generate_text(
         self,
         *,
@@ -160,25 +178,96 @@ class LLMService:
         max_output_tokens: int,
         validator: Callable[[dict[str, Any]], None] | None = None,
         operation: str = "",
+        event_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
-        """Generate JSON and perform exactly one schema-repair request."""
+        """Generate JSON and perform exactly one full-plan repair request.
 
+        ``event_callback`` exposes only bounded lifecycle diagnostics. It does not
+        alter the existing timeout, retry count, model binding, or validation
+        policy. The first invalid plan is discarded; a successful repair must
+        still return a complete independently valid JSON object.
+        """
+
+        effective_operation = operation or "primary"
+        diagnostics: dict[str, Any] = {
+            "stage": stage,
+            "operation": effective_operation,
+            "primary": {},
+            "repair": {},
+        }
+        self._emit_generation_event(
+            event_callback,
+            "request_started",
+            {
+                "stage": stage,
+                "operation": effective_operation,
+                "attempt": "primary",
+            },
+        )
         output = self.generate_text(
             stage=stage,
             messages=messages,
             max_output_tokens=max_output_tokens,
             temperature=0.0,
-            operation=operation or "primary",
+            operation=effective_operation,
         )
         first_event_id = self.last_audit_event_id
+        diagnostics["primary"]["audit_event_id"] = first_event_id
+        diagnostics["primary"]["raw_output_excerpt"] = str(output or "")[:6000]
+        self._emit_generation_event(
+            event_callback,
+            "response_received",
+            {
+                "stage": stage,
+                "operation": effective_operation,
+                "attempt": "primary",
+                "response_chars": len(str(output or "")),
+                "audit_event_id": first_event_id,
+            },
+        )
+
+        first_candidate: dict[str, Any] | None = None
         try:
-            parsed = extract_json_object(output)
+            first_candidate = extract_json_object(output)
+            diagnostics["primary"]["candidate"] = first_candidate
+            self._emit_generation_event(
+                event_callback,
+                "candidate_generated",
+                {
+                    "stage": stage,
+                    "attempt": "primary",
+                    "candidate": first_candidate,
+                },
+            )
             if validator:
-                validator(parsed)
+                validator(first_candidate)
             self._record_schema(first_event_id, True)
-            return parsed
+            self._emit_generation_event(
+                event_callback,
+                "validation_succeeded",
+                {
+                    "stage": stage,
+                    "attempt": "primary",
+                    "candidate": first_candidate,
+                },
+            )
+            return first_candidate
         except Exception as first_exc:
             self._record_schema(first_event_id, False)
+            diagnostics["primary"]["error_type"] = type(first_exc).__name__
+            diagnostics["primary"]["error_message"] = str(first_exc)[:2000]
+            self._emit_generation_event(
+                event_callback,
+                "validation_failed",
+                {
+                    "stage": stage,
+                    "attempt": "primary",
+                    "error_type": type(first_exc).__name__,
+                    "error_message": str(first_exc)[:2000],
+                    "candidate": first_candidate,
+                },
+            )
+
             repair_messages = [
                 *[dict(item) for item in messages],
                 {"role": "assistant", "content": str(output or "")[:6000]},
@@ -192,6 +281,17 @@ class LLMService:
                     ),
                 },
             ]
+            self._emit_generation_event(
+                event_callback,
+                "repair_started",
+                {
+                    "stage": stage,
+                    "operation": "schema_repair",
+                    "attempt": "repair",
+                    "previous_error_type": type(first_exc).__name__,
+                    "previous_error_message": str(first_exc)[:2000],
+                },
+            )
             repaired = self.generate_text(
                 stage=stage,
                 messages=repair_messages,
@@ -200,18 +300,66 @@ class LLMService:
                 operation="schema_repair",
             )
             repair_event_id = self.last_audit_event_id
+            diagnostics["repair"]["audit_event_id"] = repair_event_id
+            diagnostics["repair"]["raw_output_excerpt"] = str(repaired or "")[:6000]
+            self._emit_generation_event(
+                event_callback,
+                "repair_response_received",
+                {
+                    "stage": stage,
+                    "attempt": "repair",
+                    "response_chars": len(str(repaired or "")),
+                    "audit_event_id": repair_event_id,
+                },
+            )
+
+            repair_candidate: dict[str, Any] | None = None
             try:
-                parsed = extract_json_object(repaired)
+                repair_candidate = extract_json_object(repaired)
+                diagnostics["repair"]["candidate"] = repair_candidate
+                self._emit_generation_event(
+                    event_callback,
+                    "repair_candidate_generated",
+                    {
+                        "stage": stage,
+                        "attempt": "repair",
+                        "candidate": repair_candidate,
+                    },
+                )
                 if validator:
-                    validator(parsed)
+                    validator(repair_candidate)
                 self._record_schema(repair_event_id, True)
-                return parsed
+                self._emit_generation_event(
+                    event_callback,
+                    "repair_validation_succeeded",
+                    {
+                        "stage": stage,
+                        "attempt": "repair",
+                        "candidate": repair_candidate,
+                    },
+                )
+                return repair_candidate
             except Exception as second_exc:
                 self._record_schema(repair_event_id, False)
-                raise LLMJSONError(
+                diagnostics["repair"]["error_type"] = type(second_exc).__name__
+                diagnostics["repair"]["error_message"] = str(second_exc)[:2000]
+                self._emit_generation_event(
+                    event_callback,
+                    "repair_failed",
+                    {
+                        "stage": stage,
+                        "attempt": "repair",
+                        "error_type": type(second_exc).__name__,
+                        "error_message": str(second_exc)[:2000],
+                        "candidate": repair_candidate,
+                    },
+                )
+                error = LLMJSONError(
                     f"LLM JSON/schema repair failed: {type(first_exc).__name__}; "
                     f"{type(second_exc).__name__}: {second_exc}"
-                ) from second_exc
+                )
+                setattr(error, "diagnostics", diagnostics)
+                raise error from second_exc
 
     def validate_connection(self) -> tuple[bool, str]:
         try:

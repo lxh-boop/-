@@ -46,8 +46,8 @@ def _simple_plan():
                     "focus_ref_ids": ["object:security:600519"],
                     "research_question": "分析当前表现、证据和风险因素",
                 },
+                "inputs": {},
                 "constraints": ["read_only"],
-                "dependency_task_ids": [],
                 "expected_output_type": "EntityResearchResult",
                 "priority": 1,
             },
@@ -57,12 +57,16 @@ def _simple_plan():
                 "objective": "依据上游结构化结果形成最终用户报告",
                 "task_type": "write_report",
                 "args": {
-                    "input_task_ids": ["task_1"],
                     "report_goal": "形成金融实体分析报告",
                     "reply_language": "zh",
                 },
+                "inputs": {
+                    "upstream_results": {
+                        "from_task_id": "task_1",
+                        "expected_output_type": "EntityResearchResult",
+                    }
+                },
                 "constraints": ["upstream_results_only"],
-                "dependency_task_ids": ["task_1"],
                 "expected_output_type": "FinalReport",
                 "priority": 2,
             },
@@ -76,12 +80,13 @@ def test_worker_cards_are_structured_and_hide_private_tool_contracts() -> None:
     w01 = next(item for item in catalog if item["worker_id"] == "W01")
 
     assert w01["agent_id"] == EVIDENCE_RETRIEVER
-    assert w01["input_schema"]["required"] == [
-        "focus_ref_ids",
-        "research_question",
-    ]
+    assert w01["input_schema"]["required"] == ["research_question"]
+    assert w01["runtime_bound_args"] == ["focus_ref_ids"]
+    assert w01["input_schema"]["x-runtime-bound-args"] == ["focus_ref_ids"]
     assert w01["output_types"] == ["EntityResearchResult"]
     assert "non_responsibilities" in w01
+    assert "upstream_input_bindings" in w01
+    assert "dependency_arg_fields" not in w01
     assert "private_tool_ids" not in w01
     assert "private_worker_prompt" not in w01
 
@@ -108,7 +113,10 @@ def test_main_agent_generates_structured_worker_dag_with_worker_ids() -> None:
         "REPORT_WRITER",
     ]
     assert tasks[0].args["focus_ref_ids"] == ["object:security:600519"]
+    assert tasks[1].input_task_ids("upstream_results") == ["task_1"]
     assert tasks[1].dependency_task_ids == ["task_1"]
+    assert "input_task_ids" not in tasks[1].args
+    assert metadata["dependency_derivation"] == "compiled_from_semantic_inputs"
     assert metadata["worker_selection_owner"] == "main_agent"
     assert metadata["dag_mutation_after_planning"] == "forbidden"
     assert "worker_capability_catalog" in service.messages[1]["content"]
@@ -124,17 +132,26 @@ def test_analysis_plan_cannot_select_proposal_worker() -> None:
             "objective": "生成状态调整预案",
             "task_type": "build_proposal",
             "args": {
-                "current_state_task_ids": ["task_1"],
                 "change_intent": "调整当前状态",
             },
+            "inputs": {
+                "current_state": {
+                    "from_task_id": "task_1",
+                    "expected_output_type": "EntityResearchResult",
+                }
+            },
             "constraints": [],
-            "dependency_task_ids": ["task_1"],
             "expected_output_type": "ReviewedProposal",
             "priority": 2,
         },
     )
-    payload["tasks"][-1]["dependency_task_ids"].append("task_proposal")
-    payload["tasks"][-1]["args"]["input_task_ids"].append("task_proposal")
+    payload["tasks"][-1]["inputs"]["upstream_results"] = [
+        payload["tasks"][-1]["inputs"]["upstream_results"],
+        {
+            "from_task_id": "task_proposal",
+            "expected_output_type": "ReviewedProposal",
+        },
+    ]
 
     planner = CoordinatorPlanner(
         AgentDirectory(),
@@ -166,18 +183,30 @@ def test_graph_impact_contract_requires_declared_upstream_output_types() -> None
             "objective": "分析源结果到目标状态的影响路径",
             "task_type": "analyze_graph_impact",
             "args": {
-                "source_task_ids": ["task_1"],
-                "target_task_ids": ["task_1"],
                 "analysis_question": "分析影响路径",
             },
+            "inputs": {
+                "source_analysis": {
+                    "from_task_id": "task_1",
+                    "expected_output_type": "EntityResearchResult",
+                },
+                "target_state": {
+                    "from_task_id": "task_1",
+                    "expected_output_type": "EntityResearchResult",
+                },
+            },
             "constraints": [],
-            "dependency_task_ids": ["task_1"],
             "expected_output_type": "ImpactAnalysisResult",
             "priority": 2,
         },
     )
-    payload["tasks"][-1]["dependency_task_ids"].append("task_impact")
-    payload["tasks"][-1]["args"]["input_task_ids"].append("task_impact")
+    payload["tasks"][-1]["inputs"]["upstream_results"] = [
+        payload["tasks"][-1]["inputs"]["upstream_results"],
+        {
+            "from_task_id": "task_impact",
+            "expected_output_type": "ImpactAnalysisResult",
+        },
+    ]
 
     planner = CoordinatorPlanner(
         AgentDirectory(),
@@ -185,7 +214,7 @@ def test_graph_impact_contract_requires_declared_upstream_output_types() -> None
     )
     with pytest.raises(
         CoordinatorPlanningError,
-        match="worker_upstream_output_contract_unsatisfied",
+        match="upstream_input_output_type_not_accepted",
     ):
         planner.plan(
             query="分析影响",
@@ -197,6 +226,54 @@ def test_graph_impact_contract_requires_declared_upstream_output_types() -> None
             context_refs=[],
             memory_summary="",
         )
+
+
+def test_llm_cannot_supply_derived_dependency_field() -> None:
+    payload = _simple_plan()
+    payload["tasks"][1]["dependency_task_ids"] = ["task_1"]
+    planner = CoordinatorPlanner(
+        AgentDirectory(),
+        llm_service=FakeLLMService(payload),
+    )
+    with pytest.raises(
+        CoordinatorPlanningError,
+        match="additional_property_not_allowed",
+    ):
+        planner.plan(
+            query="分析600519",
+            request_mode="analysis",
+            session_id="session-1",
+            run_id="run-1",
+            user_id="user-1",
+            focus_refs=[_ref()],
+            context_refs=[],
+            memory_summary="",
+        )
+
+
+def test_runtime_contract_requires_dependencies_to_match_semantic_inputs() -> None:
+    directory = AgentDirectory()
+    task = GraphAgentTask(
+        task_id="task_report",
+        run_id="run-1",
+        session_id="session-1",
+        assigned_agent="REPORT_WRITER",
+        worker_id="W06",
+        objective="形成最终报告",
+        task_type="write_report",
+        user_id="user-1",
+        args={"report_goal": "形成报告", "reply_language": "zh"},
+        inputs={
+            "upstream_results": {
+                "from_task_id": "task_1",
+                "expected_output_type": "EntityResearchResult",
+            }
+        },
+        dependency_task_ids=[],
+        expected_output_type="FinalReport",
+    )
+    with pytest.raises(WorkerContractViolation, match="derived_dependency_mismatch"):
+        directory.validate_task_contract(task)
 
 
 def test_worker_result_output_schema_is_machine_validated() -> None:
