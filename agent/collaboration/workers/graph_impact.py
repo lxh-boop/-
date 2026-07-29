@@ -20,6 +20,7 @@ def run_graph_impact(
     impact_service: GraphImpactService,
     task: GraphAgentTask,
     dependency_results: dict[str, dict[str, Any]],
+    resolved_inputs: dict[str, Any] | None = None,
 ) -> GraphWorkerResult:
     source_task_ids = task.input_task_ids("source_analysis")
     target_task_ids = task.input_task_ids("target_state")

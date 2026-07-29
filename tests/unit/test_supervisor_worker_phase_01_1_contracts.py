@@ -80,12 +80,14 @@ def test_worker_cards_are_structured_and_hide_private_tool_contracts() -> None:
     w01 = next(item for item in catalog if item["worker_id"] == "W01")
 
     assert w01["agent_id"] == EVIDENCE_RETRIEVER
-    assert w01["input_schema"]["required"] == ["research_question"]
+    assert w01["args_schema"]["required"] == ["research_question"]
     assert w01["runtime_bound_args"] == ["focus_ref_ids"]
-    assert w01["input_schema"]["x-runtime-bound-args"] == ["focus_ref_ids"]
+    assert w01["args_schema"]["x-runtime-bound-args"] == ["focus_ref_ids"]
     assert w01["output_types"] == ["EntityResearchResult"]
     assert "non_responsibilities" in w01
     assert "upstream_input_bindings" in w01
+    assert "semantic_inputs_schema" in w01
+    assert "input_schema" not in w01
     assert "dependency_arg_fields" not in w01
     assert "private_tool_ids" not in w01
     assert "private_worker_prompt" not in w01

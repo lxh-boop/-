@@ -31,7 +31,7 @@ class MessageRouter:
 
     def _route_for(self, message: AgentMessage) -> list[str]:
         message_type = message.message_type
-        if message_type in {MessageType.USER_REQUEST, MessageType.GOAL_PARSED, MessageType.TASK_PLANNED}:
+        if message_type in {MessageType.USER_REQUEST, MessageType.GOAL_PARSED, MessageType.TASK_PLANNED, MessageType.WORKER_RESULT_AVAILABLE}:
             return ["executor"]
         if message_type == MessageType.TOOL_CALL_REQUESTED:
             return ["tool_executor"]

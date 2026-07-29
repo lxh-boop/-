@@ -5,11 +5,31 @@ from .evidence import (
     EVIDENCE_RETRIEVE_TOOL,
     build_evidence_tool_definitions,
 )
+from .internal_system import (
+    INTERNAL_ACCOUNT_GET_STATE,
+    INTERNAL_BACKTEST_GET_SUMMARY,
+    INTERNAL_MODEL_GET_METRICS,
+    INTERNAL_PORTFOLIO_GET_STATE,
+    INTERNAL_PREDICTION_GET_STOCK,
+    INTERNAL_RANKING_GET_LATEST,
+    INTERNAL_STRATEGY_GET_SELECTED,
+    INTERNAL_USER_PROFILE_GET,
+    build_internal_system_tool_definitions,
+)
 from .registry import WorkerToolDirectory, build_worker_tool_registry
 
 __all__ = [
     "EVIDENCE_ANALYZE_ENTITIES_TOOL",
     "EVIDENCE_RETRIEVE_TOOL",
+    "INTERNAL_ACCOUNT_GET_STATE",
+    "INTERNAL_BACKTEST_GET_SUMMARY",
+    "INTERNAL_MODEL_GET_METRICS",
+    "INTERNAL_PORTFOLIO_GET_STATE",
+    "INTERNAL_PREDICTION_GET_STOCK",
+    "INTERNAL_RANKING_GET_LATEST",
+    "INTERNAL_STRATEGY_GET_SELECTED",
+    "INTERNAL_USER_PROFILE_GET",
+    "build_internal_system_tool_definitions",
     "WorkerToolDirectory",
     "build_evidence_tool_definitions",
     "build_worker_tool_registry",

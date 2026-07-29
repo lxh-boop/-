@@ -13,6 +13,8 @@ from typing import Any
 
 from core.llm import LLMService
 
+from agent.communication import MessageType, publish_agent_message
+
 from agent.graph.impact_service import GraphImpactService
 from agent.graph.provider_adapter import GraphProviderAdapter
 from agent.tool_runtime import ToolExecutor
@@ -34,6 +36,7 @@ from .workers import (
     run_diagnostic,
     run_evidence,
     run_graph_impact,
+    run_internal_system,
     run_portfolio,
     run_report_writer,
     run_risk,
@@ -86,9 +89,11 @@ class SpecialistRuntime:
     ) -> GraphWorkerResult:
         started = time.perf_counter()
         task.status = TaskStatus.RUNNING
+        resolved_inputs: dict[str, Any] = {}
         try:
             if task.metadata.get("structured_worker_contract"):
                 self.directory.validate_task_contract(task)
+                resolved_inputs = self.directory.resolve_task_inputs(task, dependency_results)
             if task.assigned_agent == EVIDENCE_RETRIEVER:
                 result = self._run_evidence(
                     task,
@@ -98,13 +103,18 @@ class SpecialistRuntime:
                     default_top_k,
                 )
             elif task.assigned_agent == PORTFOLIO_ANALYST:
-                result = self._run_portfolio(task, output_dir, db_path)
+                result = self._run_internal_system(
+                    task, output_dir, db_path, default_top_k
+                )
             elif task.assigned_agent == GRAPH_IMPACT_ANALYST:
-                result = self._run_graph_impact(task, dependency_results)
+                result = self._run_graph_impact(
+                    task, dependency_results, resolved_inputs
+                )
             elif task.assigned_agent == RISK_ANALYST:
                 result = self._run_risk(
                     task,
                     dependency_results,
+                    resolved_inputs,
                     output_dir,
                     db_path,
                 )
@@ -123,6 +133,7 @@ class SpecialistRuntime:
                 result = self._run_report_writer(
                     task,
                     dependency_results,
+                    resolved_inputs,
                     language,
                 )
             elif task.assigned_agent == SYSTEM_DIAGNOSTIC:
@@ -172,9 +183,12 @@ class SpecialistRuntime:
             )
         if not result.output_type:
             result.output_type = task.expected_output_type
+        result.metadata.setdefault("task_type", task.task_type)
+        result.metadata.setdefault("attempt", task.attempt)
+        result.metadata.setdefault("resolved_input_roles", sorted(resolved_inputs))
         if task.metadata.get("structured_worker_contract"):
             try:
-                self.directory.validate_result(result)
+                self.directory.validate_result(result, task_type=task.task_type)
             except WorkerContractViolation as exc:
                 result = GraphWorkerResult(
                     task_id=task.task_id,
@@ -196,11 +210,33 @@ class SpecialistRuntime:
                     ),
                     warnings=[str(exc)],
                 )
-        result.metadata.setdefault("task_type", task.task_type)
-        result.metadata.setdefault("attempt", task.attempt)
         result.metadata.setdefault(
             "duration_ms",
             round((time.perf_counter() - started) * 1000, 2),
+        )
+        publish_agent_message(
+            output_dir=output_dir,
+            user_id=task.user_id,
+            conversation_id=task.session_id,
+            run_id=task.run_id,
+            task_id=task.task_id,
+            sender=task.assigned_agent,
+            receiver="COORDINATOR",
+            message_type=MessageType.WORKER_RESULT_AVAILABLE,
+            payload={
+                "status": result.status.value,
+                "output_type": result.output_type,
+                "payload_schema": result.payload_schema,
+                "payload_version": result.payload_version,
+                "summary": result.summary[:500],
+            },
+            payload_schema="worker_result_available.v1",
+            context_refs=[ref.to_dict() for ref in result.focus_refs[:20]],
+            artifact_refs=list(result.artifact_refs[:20]),
+            source_refs=[ref.to_dict() for ref in result.evidence_refs[:20]],
+            warnings=list(result.warnings[:10]),
+            error=dict(result.error or {}),
+            metadata={"worker_id": task.worker_id, "task_type": task.task_type},
         )
         task.status = (
             TaskStatus.COMPLETED
@@ -230,25 +266,32 @@ class SpecialistRuntime:
             default_top_k,
         )
 
-    def _run_portfolio(
+    def _run_internal_system(
         self,
         task: GraphAgentTask,
         output_dir: str | Path,
         db_path: str | Path | None,
+        default_top_k: int,
     ) -> GraphWorkerResult:
-        return run_portfolio(self.provider, task, output_dir, db_path)
+        return run_internal_system(
+            self.worker_tool_executor, task, output_dir, db_path, default_top_k
+        )
 
     def _run_graph_impact(
         self,
         task: GraphAgentTask,
         dependency_results: dict[str, dict[str, Any]],
+        resolved_inputs: dict[str, Any],
     ) -> GraphWorkerResult:
-        return run_graph_impact(self.impact_service, task, dependency_results)
+        return run_graph_impact(
+            self.impact_service, task, dependency_results, resolved_inputs
+        )
 
     def _run_risk(
         self,
         task: GraphAgentTask,
         dependency_results: dict[str, dict[str, Any]],
+        resolved_inputs: dict[str, Any],
         output_dir: str | Path,
         db_path: str | Path | None,
     ) -> GraphWorkerResult:
@@ -258,6 +301,7 @@ class SpecialistRuntime:
             dependency_results,
             output_dir,
             db_path,
+            resolved_inputs=resolved_inputs,
         )
 
     def _run_strategy_guard(
@@ -288,6 +332,7 @@ class SpecialistRuntime:
         self,
         task: GraphAgentTask,
         dependency_results: dict[str, dict[str, Any]],
+        resolved_inputs: dict[str, Any],
         language: str,
     ) -> GraphWorkerResult:
         return run_report_writer(
@@ -295,6 +340,7 @@ class SpecialistRuntime:
             task,
             dependency_results,
             language,
+            resolved_inputs=resolved_inputs,
         )
 
     def _run_diagnostic(self, task: GraphAgentTask) -> GraphWorkerResult:

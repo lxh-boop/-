@@ -141,6 +141,69 @@ def _public_result_data(output_type: str, data: dict[str, Any] | None) -> dict[s
     return result
 
 
+def _semantic_inputs_schema(
+    bindings: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Build the public schema for upstream WorkerResult references only.
+
+    This schema is intentionally separate from ``args_schema``.  Values under
+    semantic inputs are references to upstream tasks, never direct strings,
+    numbers, GraphRef IDs, user IDs, language values, or time values.
+    """
+
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for raw_role, raw_binding in dict(bindings or {}).items():
+        role = str(raw_role or "").strip()
+        if not role:
+            continue
+        binding = dict(raw_binding or {})
+        accepted = [
+            str(item)
+            for item in binding.get("accepted_output_types") or []
+            if str(item or "").strip()
+        ]
+        output_type_schema: dict[str, Any] = {
+            "type": "string",
+            "minLength": 1,
+        }
+        if accepted and "*" not in accepted:
+            output_type_schema["enum"] = accepted
+        reference_schema = {
+            "type": "object",
+            "properties": {
+                "from_task_id": {"type": "string", "minLength": 1},
+                "expected_output_type": output_type_schema,
+            },
+            "required": ["from_task_id", "expected_output_type"],
+            "additionalProperties": False,
+        }
+        minimum = max(0, int(binding.get("min_items") or 0))
+        maximum = max(minimum, int(binding.get("max_items") or 8))
+        if bool(binding.get("required")) and minimum == 0:
+            minimum = 1
+        properties[role] = {
+            "description": str(binding.get("description") or ""),
+            "anyOf": [
+                reference_schema,
+                {
+                    "type": "array",
+                    "items": reference_schema,
+                    "minItems": max(1, minimum),
+                    "maxItems": maximum,
+                },
+            ],
+        }
+        if bool(binding.get("required")):
+            required.append(role)
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+    }
+
+
 class TaskStatus(str, Enum):
     CREATED = "created"
     READY = "ready"
@@ -184,6 +247,60 @@ class ResultStatus(str, Enum):
 
 
 @dataclass(frozen=True)
+class WorkerTaskContract:
+    """Task-specific public and private contract owned by one Worker.
+
+    A Worker may expose several business task types while retaining one stable
+    Worker identity.  MainAgent sees only the public schema; private tool IDs
+    remain inside the assigned Worker runtime.
+    """
+
+    task_type: str
+    description: str
+    input_schema: dict[str, Any] = field(default_factory=dict)
+    default_args: dict[str, Any] = field(default_factory=dict)
+    output_schema: dict[str, Any] = field(default_factory=dict)
+    output_type: str = ""
+    upstream_input_bindings: dict[str, dict[str, Any]] = field(default_factory=dict)
+    authoritative_arg_bindings: dict[str, str] = field(default_factory=dict, repr=False)
+    selection_requirements: list[str] = field(default_factory=list)
+    private_tool_ids: list[str] = field(default_factory=list, repr=False)
+
+    @property
+    def args_schema(self) -> dict[str, Any]:
+        """Canonical direct-argument schema; ``input_schema`` is legacy internal naming."""
+
+        return self.input_schema
+
+    @property
+    def semantic_inputs_schema(self) -> dict[str, Any]:
+        return _semantic_inputs_schema(self.upstream_input_bindings)
+
+    def safe_for_coordinator(self) -> dict[str, Any]:
+        public_args_schema = _plain(self.args_schema)
+        runtime_bound = set(self.authoritative_arg_bindings)
+        if isinstance(public_args_schema, dict):
+            required = public_args_schema.get("required")
+            if isinstance(required, list):
+                public_args_schema["required"] = [
+                    str(item) for item in required if str(item) not in runtime_bound
+                ]
+            public_args_schema["x-runtime-bound-args"] = sorted(runtime_bound)
+        return {
+            "task_type": self.task_type,
+            "description": self.description,
+            "args_schema": public_args_schema,
+            "semantic_inputs_schema": _plain(self.semantic_inputs_schema),
+            "default_args": _plain(self.default_args),
+            "output_schema": _plain(self.output_schema),
+            "output_type": self.output_type,
+            "upstream_input_bindings": _plain(self.upstream_input_bindings),
+            "runtime_bound_args": sorted(runtime_bound),
+            "selection_requirements": list(self.selection_requirements),
+        }
+
+
+@dataclass(frozen=True)
 class AgentCapabilityCard:
     """Structured public contract for one MainAgent-selectable Worker.
 
@@ -198,6 +315,7 @@ class AgentCapabilityCard:
     description: str
     responsibility: str
     accepted_task_types: list[str] = field(default_factory=list)
+    task_contracts: list[WorkerTaskContract] = field(default_factory=list)
     input_schema: dict[str, Any] = field(default_factory=dict)
     output_schema: dict[str, Any] = field(default_factory=dict)
     output_types: list[str] = field(default_factory=list)
@@ -213,6 +331,45 @@ class AgentCapabilityCard:
     can_generate_proposal: bool = False
     private_tool_ids: list[str] = field(default_factory=list, repr=False)
     private_worker_prompt: str = field(default="", repr=False)
+
+    def task_contract(self, task_type: str) -> WorkerTaskContract:
+        wanted = str(task_type or "").strip()
+        for contract in self.task_contracts:
+            if contract.task_type == wanted:
+                return contract
+        if wanted not in self.accepted_task_types:
+            raise KeyError(f"unknown_worker_task_contract:{self.worker_id}:{wanted}")
+        return WorkerTaskContract(
+            task_type=wanted,
+            description=self.description,
+            input_schema=self.input_schema,
+            default_args={},
+            output_schema=self.output_schema,
+            output_type=(self.output_types[0] if len(self.output_types) == 1 else ""),
+            upstream_input_bindings=self.upstream_input_bindings,
+            authoritative_arg_bindings=self.authoritative_arg_bindings,
+            selection_requirements=self.selection_requirements,
+            private_tool_ids=self.private_tool_ids,
+        )
+
+    def authoritative_bindings_for(self, task_type: str) -> dict[str, str]:
+        try:
+            return dict(self.task_contract(task_type).authoritative_arg_bindings)
+        except KeyError:
+            return dict(self.authoritative_arg_bindings)
+
+    def default_args_for(self, task_type: str) -> dict[str, Any]:
+        try:
+            return dict(self.task_contract(task_type).default_args)
+        except KeyError:
+            return {}
+
+    def private_tools_for(self, task_type: str) -> list[str]:
+        try:
+            values = self.task_contract(task_type).private_tool_ids
+        except KeyError:
+            values = self.private_tool_ids
+        return list(values or self.private_tool_ids)
 
     @property
     def input_description(self) -> str:
@@ -244,7 +401,9 @@ class AgentCapabilityCard:
             "description": self.description,
             "responsibility": self.responsibility,
             "accepted_task_types": list(self.accepted_task_types),
-            "input_schema": public_input_schema,
+            "task_contracts": [item.safe_for_coordinator() for item in self.task_contracts],
+            "args_schema": public_input_schema,
+            "semantic_inputs_schema": _plain(_semantic_inputs_schema(self.upstream_input_bindings)),
             "output_schema": _plain(self.output_schema),
             "output_types": list(self.output_types),
             "required_upstream_output_groups": _plain(self.required_upstream_output_groups),
@@ -427,6 +586,9 @@ class GraphWorkerResult:
     agent_id: str
     status: ResultStatus
     output_type: str = ""
+    payload_schema: str = ""
+    payload_version: str = "v1"
+    payload: dict[str, Any] | None = None
     data: dict[str, Any] | None = field(default_factory=dict)
     error: dict[str, Any] | None = None
     focus_refs: list[GraphRef] = field(default_factory=list)
@@ -451,7 +613,16 @@ class GraphWorkerResult:
         self.agent_id = str(self.agent_id or "").upper()
         self.status = ResultStatus.from_value(self.status)
         self.output_type = str(self.output_type or "").strip()
-        self.data = dict(self.data or {}) if self.data is not None else None
+        self.payload_schema = str(self.payload_schema or (f"{self.output_type}.v1" if self.output_type else "")).strip()
+        self.payload_version = str(self.payload_version or "v1").strip()
+        if self.payload is None and self.data is not None:
+            self.payload = dict(self.data or {})
+        elif self.payload is not None:
+            self.payload = dict(self.payload or {})
+        if self.data is None and self.payload is not None:
+            self.data = dict(self.payload)
+        else:
+            self.data = dict(self.data or {}) if self.data is not None else None
         self.error = dict(self.error or {}) if self.error is not None else None
         self.focus_refs = refs_from(self.focus_refs)
         self.summary = str(self.summary or "")[:8000]
@@ -495,7 +666,7 @@ class GraphWorkerResult:
             if key in {
                 "task_type", "attempt", "partial_reason", "proposal_id", "plan_id",
                 "requires_approval", "graph_view_id", "duration_ms",
-                "tool_execution",
+                "tool_execution", "resolved_input_roles",
             }
         }
         return {
@@ -504,6 +675,9 @@ class GraphWorkerResult:
             "agent_id": self.agent_id,
             "status": self.status.value,
             "output_type": self.output_type,
+            "payload_schema": self.payload_schema,
+            "payload_version": self.payload_version,
+            "payload": _public_result_data(self.output_type, self.payload),
             "data": _public_result_data(self.output_type, self.data),
             "error": _compact(self.error, max_depth=3),
             "focus_refs": [ref.to_dict() for ref in self.focus_refs],

@@ -180,8 +180,15 @@ class CoordinatorPlanner:
             args = dict(row.get("args") or {})
             inputs = dict(row.get("inputs") or {})
             bound: dict[str, Any] = {}
+            defaults_applied: dict[str, Any] = {}
             removed_from_inputs: list[str] = []
-            for arg_name, source_name in card.authoritative_arg_bindings.items():
+            task_type = str(row.get("task_type") or "")
+            for arg_name, default_value in card.default_args_for(task_type).items():
+                if arg_name not in args or args.get(arg_name) in (None, ""):
+                    args[str(arg_name)] = default_value
+                    defaults_applied[str(arg_name)] = default_value
+            bindings = card.authoritative_bindings_for(task_type)
+            for arg_name, source_name in bindings.items():
                 value = runtime_values.get(str(source_name))
                 args[str(arg_name)] = value
                 bound[str(arg_name)] = value
@@ -194,19 +201,93 @@ class CoordinatorPlanner:
             prepared["args"] = args
             prepared["inputs"] = inputs
             prepared_rows.append(prepared)
-            if bound or removed_from_inputs:
+            if bound or defaults_applied or removed_from_inputs:
                 audit_rows.append(
                     {
                         "task_index": index,
                         "task_id": str(row.get("task_id") or ""),
                         "worker_id": worker_id,
                         "authoritative_args_bound": sorted(bound),
+                        "default_args_applied": dict(defaults_applied),
                         "misplaced_runtime_args_removed_from_inputs": sorted(
                             removed_from_inputs
                         ),
                     }
                 )
         return {"tasks": prepared_rows}, {"tasks": audit_rows}
+
+    def _validate_planner_field_placement(self, payload: dict[str, Any]) -> None:
+        """Reject direct values under semantic ``inputs`` with actionable guidance.
+
+        The public catalog deliberately separates ``args_schema`` from
+        ``semantic_inputs_schema``.  This preflight runs before the generic plan
+        schema so a repair request receives the exact tasks and fields that must
+        move to ``args`` or be omitted as runtime-bound values.
+        """
+
+        rows = payload.get("tasks")
+        if not isinstance(rows, list):
+            return
+        issues: list[str] = []
+        for index, raw_row in enumerate(rows):
+            if not isinstance(raw_row, dict):
+                continue
+            worker_id = str(raw_row.get("worker_id") or "").upper()
+            task_type = str(raw_row.get("task_type") or "")
+            try:
+                card = self.directory.get(worker_id)
+                contract = card.task_contract(task_type)
+            except KeyError:
+                continue
+            inputs = raw_row.get("inputs")
+            if not isinstance(inputs, dict):
+                continue
+            args_properties = dict(contract.args_schema.get("properties") or {})
+            runtime_bound = set(contract.authoritative_arg_bindings)
+            semantic_roles = set(contract.upstream_input_bindings)
+            move_to_args: list[str] = []
+            omit_runtime: list[str] = []
+            invalid_roles: list[str] = []
+            for raw_name, value in inputs.items():
+                name = str(raw_name or "").strip()
+                if not name:
+                    continue
+                if name in runtime_bound:
+                    omit_runtime.append(name)
+                    continue
+                if name in args_properties:
+                    move_to_args.append(name)
+                    continue
+                if name in semantic_roles:
+                    continue
+                # Unknown roles remain a contract error; list them here when the
+                # value is plainly not a WorkerResult reference so repair can act.
+                values = value if isinstance(value, list) else [value]
+                if not values or not all(
+                    isinstance(item, dict)
+                    and str(item.get("from_task_id") or "").strip()
+                    and str(item.get("expected_output_type") or "").strip()
+                    for item in values
+                ):
+                    invalid_roles.append(name)
+            if move_to_args or omit_runtime or invalid_roles:
+                task_id = str(raw_row.get("task_id") or f"index_{index}")
+                details: list[str] = [f"task={task_id}"]
+                if move_to_args:
+                    details.append("move_to_args=" + ",".join(sorted(move_to_args)))
+                if omit_runtime:
+                    details.append("omit_runtime_bound=" + ",".join(sorted(omit_runtime)))
+                if invalid_roles:
+                    details.append("invalid_semantic_input_roles=" + ",".join(sorted(invalid_roles)))
+                issues.append(";".join(details))
+        if issues:
+            raise WorkerContractViolation(
+                "planner_field_placement_error",
+                "$.tasks",
+                " | ".join(issues)
+                + " | inputs_accept_only=from_task_id+expected_output_type;"
+                "args_schema_fields_belong_in=args;runtime_bound_args_must_be_omitted",
+            )
 
     @staticmethod
     def _canonical_inputs(value: Any) -> dict[str, list[dict[str, str]]]:
@@ -261,6 +342,7 @@ class CoordinatorPlanner:
             dependencies = self.directory.validate_task_inputs(
                 worker_id,
                 canonical_inputs,
+                task_type=str(row.get("task_type") or ""),
                 task_id=task_id,
                 output_type_by_task=output_type_by_task,
                 path=f"$.tasks[{task_id}].inputs",
@@ -330,16 +412,24 @@ class CoordinatorPlanner:
             "每个节点必须由一个 Worker 完整承担一个业务子目标；不要规划 Worker 内部的 Tool 调用。"
             "只选择完成用户明确目标所必要的最少 Worker；某个 Worker 可用不代表本次任务需要它；"
             "不得为了更全面、可能有帮助或顺便给建议而扩大用户目标。"
-            "当用户只要求分析一个已解析金融实体，且没有明确提出组合、持仓、适配性、集中度、权限风险或策略目标时，"
-            "只选择实体研究 Worker 和最终报告 Worker；不得选择组合、影响或组合风险 Worker。"
+            "当用户要求对一个已解析证券进行普通综合分析，且没有明确提出组合、持仓、适配性、集中度、权限风险或策略目标时，"
+            "至少选择 W01 的外部实体研究任务、W02 的 query_stock_prediction 内部模型预测任务和最终报告 Worker；"
+            "不得额外选择组合、影响或组合风险任务。若用户只问模型预测，可只选择 W02 query_stock_prediction 和报告 Worker。"
+            "同一个 W02 可以出现多个任务节点，但每个节点必须选择一个明确的 task_contract，并使用该合同声明的 output_type。"
             "W03 只能引用 W01 产生的 EntityResearchResult 与 W02 产生的 PortfolioAnalysisResult；"
-            "W04 必须引用 W02 产生的 PortfolioAnalysisResult；报告 Worker 不能作为任何专业分析 Worker 的上游状态来源。"
+            "W04 必须引用 W02 产生的 PortfolioAnalysisResult；报告 Worker不能作为任何专业分析Worker的上游状态来源。"
             "objective 只描述该 Worker 的完整业务子目标，不得包含 Tool、函数、API、数据库、Schema、字段名或实现细节。"
-            "能力卡 runtime_bound_args 中列出的参数由程序从权威运行上下文写入；不要生成这些参数，也不要把它们放入 inputs。"
-            "args 只填写所选 Worker input_schema 中剩余的普通业务参数，args 中禁止填写任何 task_id。"
-            "上游结果必须写入 inputs；inputs 的角色名必须来自该 Worker 的 upstream_input_bindings。"
+            "每个 task_contract 有三类完全不同的输入合同：args_schema 只描述要写入任务 args 的普通业务参数；"
+            "semantic_inputs_schema 只描述要写入任务 inputs 的上游 WorkerResult 引用；"
+            "runtime_bound_args 由程序从权威运行上下文写入 args，MainAgent不得生成。"
+            "严格按字段名放置：research_question、top_k、model_name、trade_date、report_goal 等 args_schema 字段只能写入 args；"
+            "不得因为旧名称或自然语言中的‘输入’一词把这些直接值写入 inputs。"
+            "query_stock_prediction 若用户未指定 top_k，args.top_k 写10；未明确指定 model_name 或 trade_date 时必须省略。"
+            "args 中禁止填写任何 task_id。上游结果必须写入 inputs；inputs 的角色名必须来自 semantic_inputs_schema。"
             "每个输入引用必须包含 from_task_id 和 expected_output_type；单个引用可写对象，多个引用写数组。"
-            "inputs 只能包含上述上游 WorkerResult 引用对象，禁止写入字符串、GraphRef ID、user_id、语言或时间等直接值。"
+            "inputs 只能包含上述上游 WorkerResult 引用对象，禁止写入字符串、数字、GraphRef ID、user_id、语言或时间等直接值。"
+            "正确示例：研究任务写 args={research_question:...}, inputs={}；模型预测任务写 args={top_k:10}, inputs={}；"
+            "报告任务把 report_goal 写入 args，并在 inputs.upstream_results 中写 from_task_id 引用。"
             "不要输出 dependency_task_ids；程序会严格根据 inputs 中已经声明的 from_task_id 确定性生成执行依赖。"
             "程序不会推测或新增任何未在 inputs 中声明的依赖边。"
             "expected_output_type 必须来自所选 Worker 的 output_types。"
@@ -406,6 +496,14 @@ class CoordinatorPlanner:
             validator=validate,
             operation=f"graph_agent_task_plan:{mode}",
             event_callback=emit_planning_event,
+            repair_guidance=(
+                "重新生成时必须按 task_contract 的 args_schema、semantic_inputs_schema 和 runtime_bound_args 分层。"
+                "若错误详情包含 move_to_args，则把列出的字段从 inputs 移到同一任务的 args；"
+                "若包含 omit_runtime_bound，则删除这些字段，交给程序绑定。"
+                "inputs 中每个值只能是包含 from_task_id 与 expected_output_type 的对象或对象数组。"
+                "query_stock_prediction 未指定 top_k 时使用 args.top_k=10；不得编造 model_name。"
+                "不得改变 Worker 节点、task_id、用户目标或已经正确声明的语义依赖。"
+            ),
         )
         prepared_payload, binding_audit = self._prepare_payload(
             semantic_payload,
@@ -524,6 +622,7 @@ class CoordinatorPlanner:
         authoritative_user_id: str = "",
         reply_language: str = "zh",
     ) -> None:
+        self._validate_planner_field_placement(payload)
         validate_schema(payload, PLAN_SCHEMA)
         rows = payload["tasks"]
         known_ids = {str(row["task_id"]) for row in rows}
@@ -559,7 +658,9 @@ class CoordinatorPlanner:
                     f"$.tasks[{index}].task_type",
                     f"{card.worker_id}:{task_type}",
                 )
-            self.directory.validate_task_args(card.worker_id, row["args"])
+            self.directory.validate_task_args(
+                card.worker_id, row["args"], task_type=task_type
+            )
             args = dict(row.get("args") or {})
             for arg_name, arg_value in args.items():
                 if "task_id" in str(arg_name).lower():
@@ -591,6 +692,13 @@ class CoordinatorPlanner:
                 )
 
             output_type = str(row["expected_output_type"])
+            contract = card.task_contract(task_type)
+            if contract.output_type and output_type != contract.output_type:
+                raise WorkerContractViolation(
+                    "task_contract_output_type_mismatch",
+                    f"$.tasks[{index}].expected_output_type",
+                    f"task_type={task_type},expected={contract.output_type},actual={output_type}",
+                )
             if output_type not in card.output_types:
                 raise WorkerContractViolation(
                     "unexpected_task_output_type",
@@ -629,6 +737,7 @@ class CoordinatorPlanner:
             dependencies = self.directory.validate_task_inputs(
                 card.worker_id,
                 inputs,
+                task_type=str(row.get("task_type") or ""),
                 task_id=task_id,
                 output_type_by_task=output_type_by_task,
                 path=f"$.tasks[{index}].inputs",

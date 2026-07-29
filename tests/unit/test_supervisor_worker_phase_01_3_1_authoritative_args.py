@@ -96,9 +96,9 @@ def test_public_worker_card_marks_runtime_bound_args() -> None:
     cards = {item["worker_id"]: item for item in AgentDirectory().safe_catalog()}
 
     assert cards["W01"]["runtime_bound_args"] == ["focus_ref_ids"]
-    assert "focus_ref_ids" not in cards["W01"]["input_schema"]["required"]
+    assert "focus_ref_ids" not in cards["W01"]["args_schema"]["required"]
     assert cards["W06"]["runtime_bound_args"] == ["reply_language"]
-    assert "reply_language" not in cards["W06"]["input_schema"]["required"]
+    assert "reply_language" not in cards["W06"]["args_schema"]["required"]
 
 
 def test_non_runtime_raw_input_value_is_rejected() -> None:
