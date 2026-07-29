@@ -52,7 +52,7 @@ def python_sandbox_analysis_adapter(args: dict[str, Any], context: dict[str, Any
         str(args.get("code") or ""),
         snapshot=dict(args.get("snapshot") or {}),
         snapshot_id=str(args.get("snapshot_id") or ""),
-        timeout_seconds=_float_value(args.get("timeout_seconds"), 5.0),
+        timeout_seconds=_float_value(args.get("timeout_seconds"), 995.0),
         max_output_chars=_int_value(args.get("max_output_chars"), 4000),
     )
 

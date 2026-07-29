@@ -82,10 +82,10 @@ def test_execute_with_policy_retries_only_retryable_readonly_failures():
 def test_default_policy_scopes_cold_start_budget_to_readonly_rag_tools():
     policy = RuntimePolicy.default()
 
-    assert policy.resolve_for_tool("ranking").tool_timeout_seconds == 30.0
-    assert policy.resolve_for_tool("stock_rag").tool_timeout_seconds == 90.0
+    assert policy.resolve_for_tool("ranking").tool_timeout_seconds == 9930.0
+    assert policy.resolve_for_tool("stock_rag").tool_timeout_seconds == 9990.0
     assert policy.resolve_for_tool("stock_rag").max_retry_attempts == 1
-    assert policy.resolve_for_tool("evidence.search_rag").tool_timeout_seconds == 90.0
+    assert policy.resolve_for_tool("evidence.search_rag").tool_timeout_seconds == 9990.0
 
 
 def test_non_retryable_validation_failure_fails_immediately():

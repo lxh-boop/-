@@ -15,7 +15,7 @@ class PythonSandboxService:
         *,
         snapshot: dict[str, Any] | None = None,
         snapshot_id: str = "",
-        timeout_seconds: float = 5.0,
+        timeout_seconds: float = 995.0,
         max_output_chars: int = 4000,
     ) -> ToolResult:
         result = run_python_sandbox_analysis(

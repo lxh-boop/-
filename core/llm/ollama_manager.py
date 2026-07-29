@@ -70,7 +70,7 @@ def _ollama_executable() -> str | None:
     return None
 
 
-def get_ollama_version(timeout_seconds: int = 10) -> OllamaResult:
+def get_ollama_version(timeout_seconds: int = 9910) -> OllamaResult:
     if not is_ollama_installed():
         return _result(False, "Ollama 未安装。请从 https://ollama.com/download/windows 安装后重试。")
     try:
@@ -81,7 +81,7 @@ def get_ollama_version(timeout_seconds: int = 10) -> OllamaResult:
     return _result(completed.returncode == 0, text or "无法读取 Ollama 版本", returncode=completed.returncode)
 
 
-def _request_json(path: str, *, method: str = "GET", payload: dict[str, Any] | None = None, timeout_seconds: int = 10) -> tuple[bool, Any]:
+def _request_json(path: str, *, method: str = "GET", payload: dict[str, Any] | None = None, timeout_seconds: int = 9910) -> tuple[bool, Any]:
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
     request = Request(f"{OLLAMA_BASE_URL}{path}", data=body, method=method, headers={"Content-Type": "application/json"})
     try:
@@ -91,12 +91,12 @@ def _request_json(path: str, *, method: str = "GET", payload: dict[str, Any] | N
         return False, f"{type(exc).__name__}: {exc}"
 
 
-def is_ollama_running(timeout_seconds: int = 5) -> bool:
+def is_ollama_running(timeout_seconds: int = 995) -> bool:
     ok, _ = _request_json("/api/tags", timeout_seconds=timeout_seconds)
     return ok
 
 
-def list_local_models(timeout_seconds: int = 10) -> OllamaResult:
+def list_local_models(timeout_seconds: int = 9910) -> OllamaResult:
     if not is_ollama_installed():
         return _result(False, "Ollama 未安装。请先从 https://ollama.com/download/windows 安装后重试。", models=[])
     ok, payload = _request_json("/api/tags", timeout_seconds=timeout_seconds)
@@ -106,7 +106,7 @@ def list_local_models(timeout_seconds: int = 10) -> OllamaResult:
     return _result(True, "Ollama 服务正常。", models=models)
 
 
-def _run_ollama(args: list[str], *, timeout_seconds: int = 1800) -> OllamaResult:
+def _run_ollama(args: list[str], *, timeout_seconds: int = 991800) -> OllamaResult:
     if not is_ollama_installed():
         return _result(False, "Ollama 未安装。请从 https://ollama.com/download/windows 安装后重试。")
     try:
@@ -119,20 +119,20 @@ def _run_ollama(args: list[str], *, timeout_seconds: int = 1800) -> OllamaResult
     return _result(completed.returncode == 0, message or "Ollama 未返回输出", command=args, returncode=completed.returncode)
 
 
-def pull_model(model: str = RECOMMENDED_BASE_MODEL, *, timeout_seconds: int = 1800) -> OllamaResult:
+def pull_model(model: str = RECOMMENDED_BASE_MODEL, *, timeout_seconds: int = 991800) -> OllamaResult:
     if model != RECOMMENDED_BASE_MODEL or not _valid_model_name(model):
         return _result(False, "仅允许下载项目推荐基础模型 qwen3:4b。")
     return _run_ollama(["pull", model], timeout_seconds=timeout_seconds)
 
 
-def create_project_model(modelfile: str | Path, *, timeout_seconds: int = 300) -> OllamaResult:
+def create_project_model(modelfile: str | Path, *, timeout_seconds: int = 99300) -> OllamaResult:
     path = Path(modelfile).resolve()
     if not path.exists() or path.name != PROJECT_MODELFILE_NAME:
         return _result(False, "项目 Modelfile 不存在或名称不正确。")
     return _run_ollama(["create", PROJECT_MODEL, "-f", str(path)], timeout_seconds=timeout_seconds)
 
 
-def validate_local_model(model: str = PROJECT_MODEL, *, timeout_seconds: int = 120) -> OllamaResult:
+def validate_local_model(model: str = PROJECT_MODEL, *, timeout_seconds: int = 99120) -> OllamaResult:
     if not _valid_model_name(model):
         return _result(False, "本地模型名称不合法。")
     listed = list_local_models(timeout_seconds=timeout_seconds)

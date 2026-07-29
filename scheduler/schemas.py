@@ -73,13 +73,14 @@ class JobStatus:
     user_task_status: dict[str, Any] = field(default_factory=dict)
     step_status: dict[str, StepStatus] = field(default_factory=dict)
     ranking_output_path: str = ""
+    latest_signal_date: str = ""
     news_count: int = 0
     recommendation_count: int = 0
     paper_order_count: int = 0
     position_count: int = 0
     report_path: str = ""
     is_trading_day: bool = False
-    plan_time: str = "17:30"
+    plan_time: str = "20:00"
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

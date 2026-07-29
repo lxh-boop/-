@@ -1,0 +1,1 @@
+import { Card } from 'antd'; import { RecordTable } from '../common/RecordTable'; export function MonitorAlertTable({ alerts }: { alerts: Record<string, unknown>[] }) { return <Card title="监控告警"><RecordTable records={alerts} maxColumns={12}/></Card> }

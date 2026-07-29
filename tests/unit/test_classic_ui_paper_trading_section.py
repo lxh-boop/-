@@ -2,7 +2,7 @@ import json
 
 import pandas as pd
 
-from app.classic_services import load_paper_trading_snapshot, portfolio_output_dir
+from application.paper_profile_service import load_paper_trading_snapshot, portfolio_output_dir
 
 
 def test_classic_ui_paper_trading_section_reads_user_scoped_outputs(tmp_path) -> None:

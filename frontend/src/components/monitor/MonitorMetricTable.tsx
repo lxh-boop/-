@@ -1,0 +1,1 @@
+import { Card } from 'antd'; import { RecordTable } from '../common/RecordTable'; export function MonitorMetricTable({ snapshot }: { snapshot: Record<string, unknown> }) { const rows=Object.entries(snapshot).filter(([,v])=>typeof v!=='object').map(([metric,value])=>({metric,value})); return <Card title="系统指标"><RecordTable records={rows}/></Card> }

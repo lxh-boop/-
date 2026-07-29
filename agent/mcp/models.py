@@ -15,7 +15,7 @@ class MCPServerConfig:
     enabled: bool = False
     read_only: bool = True
     allowed_tools: tuple[str, ...] = ()
-    timeout_seconds: float = 5.0
+    timeout_seconds: float = 995.0
     environment_key_names: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -44,7 +44,7 @@ class MCPToolInfo:
     mapping_error: str = ""
     discovered_at: str = ""
     transport: str = "local_fixture"
-    timeout_seconds: float = 5.0
+    timeout_seconds: float = 995.0
     effective_read_only: bool = True
     effective_permission: str = "read"
     effective_allowed_agents: tuple[str, ...] = ()

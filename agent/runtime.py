@@ -355,6 +355,65 @@ class AgentRuntimeRecorder:
             }
         )
 
+    def transition_step(
+        self,
+        step_id: str,
+        to_status: str,
+        *,
+        reason: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        existing = self.repo._decode_runtime_record(
+            "agent_steps",
+            self.repo.store.get(
+                "agent_steps",
+                {"run_id": self.run_id, "step_id": str(step_id)},
+            ),
+        )
+        if not existing:
+            raise ValueError(f"unknown_agent_step:{self.run_id}:{step_id}")
+
+        previous_status = str(existing.get("status") or STEP_PENDING)
+        if to_status != previous_status:
+            allowed = LEGAL_STEP_TRANSITIONS.get(previous_status, set())
+            if to_status not in allowed:
+                raise ValueError(
+                    f"illegal_step_transition:{previous_status}->{to_status}"
+                )
+
+        existing_metadata = dict(existing.get("metadata_json") or {})
+        transitions = list(existing_metadata.get("status_transitions") or [])
+        if to_status != previous_status:
+            transitions.append(
+                {
+                    "from": previous_status,
+                    "to": to_status,
+                    "at": now_text(),
+                    "reason": str(reason or "step_transition"),
+                }
+            )
+        existing_metadata.update(
+            sanitize_payload(dict(metadata or {}), max_chars=1200)
+        )
+        existing_metadata["status_transitions"] = transitions
+
+        changes: dict[str, Any] = {
+            "step_id": str(step_id),
+            "run_id": self.run_id,
+            "status": to_status,
+            "metadata": existing_metadata,
+        }
+        if to_status == STEP_RUNNING and not existing.get("started_at"):
+            changes["started_at"] = now_text()
+        if to_status in {
+            STEP_SUCCEEDED,
+            STEP_FAILED,
+            STEP_SKIPPED,
+            STEP_CANCELLED,
+        }:
+            changes["finished_at"] = now_text()
+        self.repo.upsert_agent_step(changes)
+
     def record_step_result(self, step_id: str, result: dict[str, Any]) -> None:
         status = str(result.get("step_status") or (STEP_SUCCEEDED if result.get("success") else STEP_FAILED))
         started_at = str(result.get("started_at") or "")
@@ -414,6 +473,9 @@ class AgentRuntimeRecorder:
                 "status_transitions": transitions,
             }
         )
+        extra_metadata = result.get("metadata")
+        if isinstance(extra_metadata, dict):
+            metadata.update(sanitize_payload(extra_metadata, max_chars=1200))
         for key in [
             "agent_role",
             "message_id",

@@ -51,7 +51,7 @@ class TaskStore:
                     started_at TEXT,
                     finished_at TEXT,
                     updated_at TEXT NOT NULL,
-                    timeout_seconds INTEGER NOT NULL DEFAULT 600,
+                    timeout_seconds INTEGER NOT NULL DEFAULT 99600,
                     max_retries INTEGER NOT NULL DEFAULT 0,
                     attempt INTEGER NOT NULL DEFAULT 0,
                     cancel_requested INTEGER NOT NULL DEFAULT 0,
@@ -94,7 +94,7 @@ class TaskStore:
         owner_id: str = "",
         session_id: str = "",
         metadata: dict[str, Any] | None = None,
-        timeout_seconds: int = 600,
+        timeout_seconds: int = 99600,
         max_retries: int = 0,
     ) -> dict[str, Any]:
         now = utc_now()

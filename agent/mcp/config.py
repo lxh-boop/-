@@ -40,7 +40,7 @@ def _tuple(value: Any) -> tuple[str, ...]:
     return ()
 
 
-def example_server_config(*, enabled: bool = False, allowed_tools: tuple[str, ...] | None = None, timeout_seconds: float = 5.0) -> MCPServerConfig:
+def example_server_config(*, enabled: bool = False, allowed_tools: tuple[str, ...] | None = None, timeout_seconds: float = 995.0) -> MCPServerConfig:
     return MCPServerConfig(
         server_id=EXAMPLE_SERVER_ID,
         name="Local Financial Evidence MCP",
@@ -48,7 +48,7 @@ def example_server_config(*, enabled: bool = False, allowed_tools: tuple[str, ..
         enabled=bool(enabled),
         read_only=True,
         allowed_tools=allowed_tools or (EXAMPLE_TOOL_NAME,),
-        timeout_seconds=float(timeout_seconds or 5.0),
+        timeout_seconds=float(timeout_seconds or 995.0),
         metadata={
             "provider": "project_fixture",
             "sdk_version": mcp_sdk_version(),
@@ -68,7 +68,7 @@ def _server_from_dict(data: dict[str, Any]) -> MCPServerConfig:
         enabled=_bool(data.get("enabled"), False),
         read_only=_bool(data.get("read_only"), True),
         allowed_tools=_tuple(data.get("allowed_tools")),
-        timeout_seconds=float(data.get("timeout_seconds") or 5.0),
+        timeout_seconds=float(data.get("timeout_seconds") or 995.0),
         environment_key_names=_tuple(data.get("environment_key_names")),
         metadata=dict(data.get("metadata") or {}),
     )
@@ -86,7 +86,7 @@ def build_mcp_context_from_local_config(local_cfg: dict[str, Any] | None = None)
     env_enabled = _bool(os.environ.get("STOCK_APP_MCP_EXAMPLE_ENABLED"), False)
     enabled = _bool((local_cfg or {}).get("mcp_example_enabled"), env_enabled)
     allowed = _tuple((local_cfg or {}).get("mcp_example_allowed_tools")) or (EXAMPLE_TOOL_NAME,)
-    timeout_seconds = float((local_cfg or {}).get("mcp_example_timeout_seconds") or 5.0)
+    timeout_seconds = float((local_cfg or {}).get("mcp_example_timeout_seconds") or 995.0)
     return {
         "servers": [
             example_server_config(

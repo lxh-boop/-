@@ -5,10 +5,14 @@ from typing import Any
 
 from core.llm import LLMService
 
+from agent.console_trace import flow_event, trace_exception
+from agent.runtime import AgentRuntimeRecorder
+
 from .control_gateway import ControlGateway
 from .coordinator import AgentCollaborationCoordinator
 from .entry_decision import EntryDecision, RequestMode
 from .llm_runtime import require_run_llm_service
+from .runtime_services import CollaborationRuntimeServices
 from .session_memory import SessionMemoryStore
 
 
@@ -85,14 +89,69 @@ def execute_unified_agent_request(
     run_id: str = "",
     language: str = "zh",
     llm_service: LLMService | None = None,
+    runtime_recorder: AgentRuntimeRecorder | None = None,
     context: dict[str, Any] | None = None,
     decomposition: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    binding = require_run_llm_service(llm_service=llm_service, run_id=run_id)
-    coordinator = AgentCollaborationCoordinator(
-        output_dir=output_dir,
+    effective_recorder = runtime_recorder or AgentRuntimeRecorder(
+        user_id=str(user_id or "default"),
+        goal=str(query or ""),
         db_path=db_path,
-        llm_service=binding.service,
+        session_id=str(session_id or f"session_{user_id}"),
+        run_id=str(run_id or "") or None,
+    )
+    effective_run_id = effective_recorder.run_id
+    binding = require_run_llm_service(
+        llm_service=llm_service,
+        run_id=effective_run_id,
+    )
+    runtime_services = CollaborationRuntimeServices.from_recorder(
+        effective_recorder,
+        user_id=str(user_id or "default"),
+        session_id=str(session_id or f"session_{user_id}"),
+        strict=True,
+    )
+    flow_event(
+        "GRAPH_RUNTIME_INITIALIZATION_STARTED",
+        {
+            "entry": "AgentCollaborationCoordinator",
+            "run_id": effective_run_id,
+            "graph_boundary": "Neo4j/GraphRef",
+        },
+        run_id=effective_run_id,
+    )
+    try:
+        coordinator = AgentCollaborationCoordinator(
+            output_dir=output_dir,
+            db_path=db_path,
+            llm_service=binding.service,
+            runtime_services=runtime_services,
+        )
+    except Exception as exc:
+        flow_event(
+            "GRAPH_RUNTIME_INITIALIZATION_FAILED",
+            {
+                "exception_type": type(exc).__name__,
+                "message": str(exc),
+            },
+            run_id=effective_run_id,
+            level="ERROR",
+        )
+        trace_exception(
+            "collaboration.graph_runtime.initialization_failed",
+            exc,
+            run_id=effective_run_id,
+        )
+        raise
+    flow_event(
+        "GRAPH_RUNTIME_INITIALIZATION_COMPLETED",
+        {
+            "graph_id": str(getattr(getattr(coordinator, "store", None), "graph_id", "")),
+            "worker_count": len(
+                getattr(getattr(coordinator, "directory", None), "safe_catalog", lambda: [])()
+            ),
+        },
+        run_id=effective_run_id,
     )
     try:
         result = coordinator.execute(
@@ -101,12 +160,21 @@ def execute_unified_agent_request(
             user_id=str(user_id or "default"),
             default_top_k=max(1, min(int(default_top_k or 50), 100)),
             session_id=str(session_id or f"session_{user_id}"),
-            run_id=str(run_id or ""),
+            run_id=effective_run_id,
             language=str(language or "zh"),
             execution_context=dict(context or {}),
         )
     finally:
         coordinator.close()
+        flow_event(
+            "GRAPH_RUNTIME_CLOSED",
+            {
+                "graph_id": str(
+                    getattr(getattr(coordinator, "store", None), "graph_id", "")
+                )
+            },
+            run_id=effective_run_id,
+        )
     runtime = result.setdefault("graph_runtime", {})
     runtime["llm_binding"] = binding.public_dict()
     runtime["llm_binding"]["single_service_identity"] = True

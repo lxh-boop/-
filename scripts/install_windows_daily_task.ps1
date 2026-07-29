@@ -1,6 +1,6 @@
 param(
-    [string]$TaskName = "StockDailyApp-AutoUpdate",
-    [string]$Time = "17:30",
+    [string]$TaskName = "StockDailyApp-AutoUpdate-Fallback",
+    [string]$Time = "20:00",
     [ValidateSet("Limited", "Highest")]
     [string]$RunLevel = "Limited"
 )
@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 $Root = "D:\stock_daily_app"
 $ScriptPath = Join-Path $Root "scripts\run_scheduled_daily_update.bat"
 
-if (-not (Test-Path -LiteralPath $ScriptPath)) {
+if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) {
     throw "Scheduled update script not found: $ScriptPath"
 }
 
@@ -20,7 +20,7 @@ $Settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
     -WakeToRun `
     -MultipleInstances IgnoreNew `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 3) `
+    -ExecutionTimeLimit (New-TimeSpan -Seconds 991800) `
     -RestartCount 2 `
     -RestartInterval (New-TimeSpan -Minutes 10)
 $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel $RunLevel
@@ -35,4 +35,5 @@ Register-ScheduledTask -TaskName $TaskName -InputObject $Task -Force | Out-Null
     WorkingDirectory = $Root
     RunLevel = $RunLevel
     Created = $true
+    Note = "FastAPI already hosts the primary scheduler; this Windows task is only an optional fallback."
 }

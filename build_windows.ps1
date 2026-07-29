@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -23,7 +23,7 @@ function Remove-ProjectDirectoryIfExists {
     }
 }
 
-if (-not (Test-Path -LiteralPath ".\app.py") -or -not (Test-Path -LiteralPath ".\desktop_launcher.py")) {
+if (-not (Test-Path -LiteralPath ".\desktop_launcher.py") -or -not (Test-Path -LiteralPath ".\frontend")) {
     throw "Please run this script from the stock_daily_app project root."
 }
 
@@ -37,7 +37,7 @@ $Version = & $PythonCommand -c "from app_version import APP_VERSION; print(APP_V
 Write-Host "[Version] $Version"
 
 Write-Host "[Check] Build dependencies"
-& $PythonCommand -c "import streamlit, PyInstaller, webview; print('streamlit/PyInstaller/pywebview OK')"
+& $PythonCommand -c "import PyInstaller, webview; print('PyInstaller/pywebview OK')"
 
 Write-Host "[Prepare] Distribution assets"
 & $PythonCommand .\scripts\prepare_distribution_assets.py

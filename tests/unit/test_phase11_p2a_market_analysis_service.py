@@ -9,7 +9,7 @@ from agent.tool_engine import AGENT_READ, OP_READ, execute_tool, get_tool_regist
 from agent.tools import market_analysis_adapters
 from agent.tools.position_recommendation_tool import recommend_position_weight
 from agent_control_center_utils import write_agent_fixture
-from app.classic_services import format_classic_ranking_for_display, load_classic_ranking_with_ai_adjustment
+from application.paper_profile_service import format_classic_ranking_for_display, load_classic_ranking_with_ai_adjustment
 
 
 def test_p2a_market_tools_registered_with_legacy_aliases() -> None:

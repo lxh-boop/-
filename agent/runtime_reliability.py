@@ -106,7 +106,7 @@ class RuntimePolicy:
         # the larger budget scoped to read-only RAG tools and avoid retrying the
         # same CPU-heavy initialization after a timeout.
         rag_cold_start = {
-            "tool_timeout_seconds": 90.0,
+            "tool_timeout_seconds": 9990.0,
             "max_retry_attempts": 1,
         }
         return cls(

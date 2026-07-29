@@ -1,6 +1,6 @@
 from agent.communication.integration import publish_agent_message
 from agent.communication.message_types import MessageType
-from app.handoff_ui import build_handoff_health_summary, build_handoff_safe_summary, format_handoff_caption
+from application.handoff_service import build_handoff_health_summary, build_handoff_safe_summary, format_handoff_caption
 
 
 def test_phase17_handoff_ui_summary_from_result_is_safe() -> None:

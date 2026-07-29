@@ -7,6 +7,9 @@ from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from local_config import load_local_config, save_local_config
+from scheduler.runtime_scheduler import reload_runtime_scheduler, start_runtime_scheduler
+
 from runtime_paths import (
     ensure_runtime_directories,
     get_logs_dir,
@@ -123,13 +126,13 @@ def auto_retrain_job(
 
 
 def create_scheduler():
-    scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
-    scheduler.start()
-    return scheduler
+    """兼容旧调用：返回 FastAPI 进程内的唯一常驻调度器。"""
+
+    return start_runtime_scheduler()
 
 
 def set_daily_retrain_job(
-    scheduler: BackgroundScheduler,
+    scheduler: BackgroundScheduler | None,
     token: str,
     hour: int,
     minute: int,
@@ -137,35 +140,33 @@ def set_daily_retrain_job(
     model_backend: str = DEFAULT_EXTERNAL_BACKEND,
     checkpoint_path: str | None = None,
 ):
+    """兼容旧调用并把计划写入统一本地配置。
+
+    任务实际执行时重新读取 Token，避免把敏感值固化到 APScheduler Job。
     """
-    注册或移除每日自动更新任务。
-    """
 
-    job_id = "daily_auto_retrain"
-
-    if scheduler.get_job(job_id):
-        scheduler.remove_job(job_id)
-
-    if not enabled:
-        return None
-
-    trigger = CronTrigger(hour=hour, minute=minute)
-
-    job = scheduler.add_job(
-        auto_retrain_job,
-        trigger=trigger,
-        args=[token, "latest", model_backend, checkpoint_path],
-        id=job_id,
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
+    config = load_local_config()
+    config.update(
+        {
+            "auto_retrain_enabled": bool(enabled),
+            "auto_retrain_hour": max(0, min(23, int(hour))),
+            "auto_retrain_minute": max(0, min(59, int(minute))),
+            "auto_retrain_timezone": "Asia/Shanghai",
+            "auto_retrain_catch_up": True,
+            "model_backend": str(model_backend or DEFAULT_EXTERNAL_BACKEND),
+            "dft_unet_checkpoint_path": str(checkpoint_path or ""),
+        }
     )
+    if str(token or "").strip():
+        config["tushare_token"] = str(token).strip()
+    save_local_config(config)
+    return reload_runtime_scheduler()
 
-    return job
 
-
-def get_scheduler_jobs(scheduler: BackgroundScheduler):
+def get_scheduler_jobs(scheduler: BackgroundScheduler | None):
     jobs = []
+    if scheduler is None:
+        return jobs
 
     for job in scheduler.get_jobs():
         jobs.append({

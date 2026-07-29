@@ -26,7 +26,7 @@ def _llm_settings_from_descriptor(descriptor: dict[str, Any] | None, secrets: di
         "llm_local_base_url": descriptor.get("base_url"),
         "llm_local_model": descriptor.get("model"),
         "llm_local_disable_thinking": descriptor.get("disable_thinking", False),
-        "llm_request_timeout_seconds": descriptor.get("request_timeout_seconds", 120),
+        "llm_request_timeout_seconds": descriptor.get("request_timeout_seconds", 99120),
         "llm_max_retries": descriptor.get("max_retries", 0),
     }
     return resolve_active_llm_settings(
@@ -128,6 +128,17 @@ def execute_task(
         emit("stage", {"progress": 0.35, "message": "正在生成模拟盘组合并执行规则校验"})
         result = run_paper_trading_from_latest(*args, **kwargs)
         emit("stage", {"progress": 0.95, "message": "模拟盘更新完成，正在刷新快照"})
+        return result
+
+    if task_type == "paper-trading.backfill":
+        from application.web_paper_trading_service import web_paper_trading_service
+
+        emit("stage", {"progress": 0.05, "message": "正在重新校验回填预案"})
+        if is_cancelled():
+            raise InterruptedError("Task cancellation requested")
+        emit("stage", {"progress": 0.12, "message": "正在执行历史模拟盘回填"})
+        result = web_paper_trading_service.commit_proposal(allow_long_running=True, **kwargs)
+        emit("stage", {"progress": 0.97, "message": "回填完成，正在刷新模拟盘快照"})
         return result
 
     if task_type == "paper-profile.ai-news-adjustment":

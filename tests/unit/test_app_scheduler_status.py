@@ -1,7 +1,7 @@
 from scheduler.job_state import save_job_status
 from scheduler.schemas import JobStatus, SchedulerStatus
 
-from app.classic_services import load_scheduler_status_summary, read_scheduler_log_tail
+from application.paper_profile_service import load_scheduler_status_summary, read_scheduler_log_tail
 
 
 def test_app_loads_scheduler_status_summary(tmp_path) -> None:

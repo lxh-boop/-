@@ -9,6 +9,7 @@ from fastapi import APIRouter, Header, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from config import OUTPUT_DIR
 from server.api.contracts import OperationResponse
 from server.api.dispatch import llm_settings_registry
 from server.api.serialization import decode_transport, encode_transport
@@ -26,12 +27,70 @@ class TaskSubmitRequest(BaseModel):
     owner_id: str = ""
     session_id: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
-    timeout_seconds: int = 600
+    timeout_seconds: int = 99600
     max_retries: int = 0
 
 
+TASK_REQUEST_SENSITIVE_KEYS = {
+    "api_key",
+    "credential",
+    "confirmation_token",
+    "db_path",
+    "database_path",
+    "output_dir",
+    "password",
+    "secret",
+    "token",
+    "base_url",
+}
+
+
+def _safe_task_request_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        for raw_key, item in value.items():
+            key = str(raw_key)
+            lowered = key.lower()
+            if lowered in TASK_REQUEST_SENSITIVE_KEYS or any(
+                marker in lowered
+                for marker in ("api_key", "password", "credential", "confirmation_token")
+            ):
+                continue
+            output[key] = _safe_task_request_value(item)
+        return output
+    if isinstance(value, list):
+        return [_safe_task_request_value(item) for item in value]
+    return value
+
+
+def _public_task(task: Any) -> Any:
+    if not isinstance(task, dict) or "task_id" not in task:
+        return task
+    output = dict(task)
+    request = output.get("request")
+    if isinstance(request, dict):
+        output["request"] = {
+            "args": list(request.get("args") or []),
+            "kwargs": _safe_task_request_value(dict(request.get("kwargs") or {})),
+        }
+    metadata = output.get("metadata")
+    if isinstance(metadata, dict):
+        output["metadata"] = _safe_task_request_value(metadata)
+    return output
+
+
+def _public_task_payload(data: Any) -> Any:
+    if isinstance(data, list):
+        return [_public_task(item) for item in data]
+    return _public_task(data)
+
+
 def _success(data: Any) -> OperationResponse:
-    return OperationResponse(success=True, data=encode_transport(data), request_id=uuid.uuid4().hex)
+    return OperationResponse(
+        success=True,
+        data=encode_transport(_public_task_payload(data)),
+        request_id=uuid.uuid4().hex,
+    )
 
 
 def _failure(exc: Exception) -> OperationResponse:
@@ -48,9 +107,15 @@ def submit_task(request: TaskSubmitRequest) -> OperationResponse:
     kwargs = dict(decode_transport(request.kwargs) or {})
     secrets: dict[str, str] = {}
     if request.task_type == "agent.run":
+        # Browser clients submit only business identifiers. Server-owned paths and
+        # identity fields are injected here so they cannot drift across surfaces.
+        kwargs["user_id"] = str(request.owner_id or kwargs.get("user_id") or "default")
+        kwargs["session_id"] = str(request.session_id or kwargs.get("session_id") or "")
+        kwargs.setdefault("output_dir", str(OUTPUT_DIR))
+        kwargs.setdefault("top_k", 10)
         settings_payload = kwargs.pop("llm_settings", None)
-        if settings_payload:
-            settings = llm_settings_registry.resolve(settings_payload)
+        settings = llm_settings_registry.resolve(settings_payload or {})
+        if settings is not None:
             kwargs["llm_settings_descriptor"] = {
                 "profile_id": str(settings.profile_id),
                 "mode": str(settings.mode),
@@ -145,7 +210,7 @@ def task_events(
                 yield f"id: {sequence}\nevent: task-event\ndata: {payload}\n\n"
             task = task_manager.store.get(task_id)
             if task["status"] in TERMINAL_STATUSES and not events:
-                payload = json.dumps(encode_transport({"task": task}), ensure_ascii=False, separators=(",", ":"))
+                payload = json.dumps(encode_transport({"task": _public_task(task)}), ensure_ascii=False, separators=(",", ":"))
                 yield f"event: task-complete\ndata: {payload}\n\n"
                 break
             idle += 1

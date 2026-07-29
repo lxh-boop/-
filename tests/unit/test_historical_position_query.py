@@ -1,7 +1,7 @@
 from portfolio.paper_account import create_default_account
 from portfolio.paper_position import create_position
 from portfolio.storage import PortfolioStorage
-from app.classic_services import load_daily_position_snapshot
+from application.paper_profile_service import load_daily_position_snapshot
 
 
 def test_historical_position_query(tmp_path) -> None:

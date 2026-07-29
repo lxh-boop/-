@@ -1,4 +1,8 @@
 import json
+import os
+import shutil
+import tempfile
+import threading
 from pathlib import Path
 from typing import Any, Dict
 
@@ -8,6 +12,9 @@ from core.config.paths import get_local_config_path, is_frozen_app
 LOCAL_CONFIG_PATH = (
     str(get_local_config_path()) if is_frozen_app() else "local_app_config.json"
 )
+
+
+_CONFIG_WRITE_LOCK = threading.Lock()
 
 
 DEFAULT_LOCAL_CONFIG = {
@@ -35,11 +42,14 @@ DEFAULT_LOCAL_CONFIG = {
     "auto_retrain_enabled": False,
     "auto_retrain_hour": 20,
     "auto_retrain_minute": 0,
+    "auto_retrain_timezone": "Asia/Shanghai",
+    "auto_retrain_catch_up": True,
+    "scheduler_market_update_timeout_seconds": 997200,
     "model_version": "latest",
     "page_zoom_percent": 100,
     "mcp_example_enabled": False,
     "mcp_example_allowed_tools": ["market_risk_summary"],
-    "mcp_example_timeout_seconds": 5.0,
+    "mcp_example_timeout_seconds": 995.0,
     "mcp_discovery_ttl_seconds": 300,
     "neo4j_uri": "bolt://127.0.0.1:7687",
     "neo4j_username": "neo4j",
@@ -86,6 +96,14 @@ def load_local_config() -> Dict[str, Any]:
 
 
 def save_local_config(config: Dict[str, Any]) -> None:
+    """Persist one validated configuration snapshot.
+
+    The temporary file is written and fsynced before replacement. Docker may
+    bind-mount ``local_app_config.json`` as an individual file, in which case
+    replacing the mount point can fail. The fallback copies the already-complete
+    temporary JSON into the mounted file while holding the process write lock.
+    """
+
     cfg = DEFAULT_LOCAL_CONFIG.copy()
     cfg.update(config)
     if not str(cfg.get("llm_api_base_url") or "").strip() and str(cfg.get("llm_base_url") or "").strip():
@@ -98,6 +116,31 @@ def save_local_config(config: Dict[str, Any]) -> None:
 
     path = Path(LOCAL_CONFIG_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(cfg, ensure_ascii=False, indent=2) + "\n"
 
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    with _CONFIG_WRITE_LOCK:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=str(path.parent),
+            text=True,
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.replace(temporary, path)
+            except OSError:
+                # A single-file Docker bind mount cannot be replaced, but it can
+                # be updated. Copy only after the complete JSON was fsynced.
+                with temporary.open("r", encoding="utf-8") as source, path.open(
+                    "w", encoding="utf-8", newline="\n"
+                ) as target:
+                    shutil.copyfileobj(source, target)
+                    target.flush()
+                    os.fsync(target.fileno())
+        finally:
+            temporary.unlink(missing_ok=True)

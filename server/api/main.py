@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -23,13 +24,34 @@ from server.api.dispatch import (
 )
 from server.api.router_factory import build_operation_router
 from server.api.tasks import router as tasks_router
+from server.api.routers.web_dashboard import router as web_dashboard_router
+from server.api.routers.web_stocks import router as web_stocks_router
+from server.api.routers.web_models import router as web_models_router
+from server.api.routers.web_backtests import router as web_backtests_router
+from server.api.routers.web_news import router as web_news_router
+from server.api.routers.web_settings import router as web_settings_router
+from server.api.routers.web_monitor import router as web_monitor_router
+from server.api.routers.web_paper_trading import router as web_paper_trading_router
+from server.api.routers.web_agent import router as web_agent_router
+from scheduler.runtime_scheduler import shutdown_runtime_scheduler, start_runtime_scheduler
+
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    # 正式 API 进程即常驻调度器宿主；测试环境由 runtime_scheduler 自动禁用。
+    start_runtime_scheduler()
+    try:
+        yield
+    finally:
+        shutdown_runtime_scheduler()
 
 
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Stock Daily App API",
         version="4.0.0",
-        description="Frontend-independent HTTP boundary for Streamlit and future React clients.",
+        description="React + FastAPI boundary with persistent daily scheduler.",
+        lifespan=_lifespan,
     )
     origins = [item.strip() for item in os.environ.get("STOCK_AGENT_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",") if item.strip()]
     app.add_middleware(
@@ -62,6 +84,15 @@ def create_app() -> FastAPI:
     app.include_router(build_operation_router(prefix="/api/v1/handoff", tag="handoff", invoker=invoke_handoff))
     app.include_router(build_operation_router(prefix="/api/v1/reflection", tag="reflection", invoker=invoke_reflection))
     app.include_router(tasks_router)
+    app.include_router(web_dashboard_router)
+    app.include_router(web_stocks_router)
+    app.include_router(web_models_router)
+    app.include_router(web_backtests_router)
+    app.include_router(web_news_router)
+    app.include_router(web_settings_router)
+    app.include_router(web_monitor_router)
+    app.include_router(web_paper_trading_router)
+    app.include_router(web_agent_router)
     return app
 
 

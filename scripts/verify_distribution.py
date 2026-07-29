@@ -102,8 +102,8 @@ def main() -> int:
         "manual_checks": [
             "Install on a clean Windows user profile.",
             "Launch from the Start menu shortcut.",
-            "Confirm Streamlit listens on 127.0.0.1 and a dynamic port.",
-            "Close the desktop window and confirm the Streamlit child process exits.",
+            "Start the Docker Compose api/frontend stack before launching the desktop shortcut.",
+            "Confirm the launcher opens the production React frontend at 127.0.0.1:3000.",
             "Confirm existing %LOCALAPPDATA%\\StockDailyApp user data is preserved during upgrade and uninstall.",
         ],
     }

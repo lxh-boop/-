@@ -1,6 +1,6 @@
 import pandas as pd
 
-from app.classic_services import build_ai_adjustment_detail
+from application.paper_profile_service import build_ai_adjustment_detail
 
 
 def test_ai_adjustment_reason_and_evidence_are_visible() -> None:

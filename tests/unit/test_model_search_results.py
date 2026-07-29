@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from app.services.model_search_results import (
+from application.support.model_search_results import (
     load_daily_returns_for_strategy,
     load_table_file,
     make_strategy_from_row,
@@ -37,7 +37,7 @@ def test_missing_daily_returns_path_gives_empty_frame(sample_search_results_df):
 
 
 def test_save_selected_strategy_writes_json(tmp_path, monkeypatch, sample_search_results_df):
-    import app.services.model_search_results as service
+    import application.support.model_search_results as service
 
     monkeypatch.setattr(service, "SELECTED_STRATEGY_PATH", tmp_path / "selected_strategy.json")
     strategy = make_strategy_from_row(sample_search_results_df.iloc[0])

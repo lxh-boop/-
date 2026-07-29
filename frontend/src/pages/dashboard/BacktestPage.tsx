@@ -1,0 +1,11 @@
+import { useQuery } from '@tanstack/react-query'
+import { Alert, Space } from 'antd'
+import { backtestApi } from '../../api/backtestApi'
+import { BacktestMetricCards } from '../../components/dashboard/BacktestMetricCards'
+import { BacktestNavChart } from '../../components/dashboard/BacktestNavChart'
+import { BacktestTradeTable } from '../../components/dashboard/BacktestTradeTable'
+import { EmptyState } from '../../components/common/EmptyState'
+import { PageHeader } from '../../components/common/PageHeader'
+import { PageLoading } from '../../components/common/PageLoading'
+import { ReadOnlyNotice } from '../../components/common/ReadOnlyNotice'
+export function BacktestPage(){ const detail=useQuery({queryKey:['web','backtest','latest'],queryFn:()=>backtestApi.detail()}); const equity=useQuery({queryKey:['web','backtest','latest','equity'],queryFn:()=>backtestApi.equity()}); const trades=useQuery({queryKey:['web','backtest','latest','trades'],queryFn:()=>backtestApi.trades()}); if(detail.isLoading||equity.isLoading||trades.isLoading)return <PageLoading/>; if(detail.error)return <EmptyState title="回测数据加载失败" description={String(detail.error)}/>; if(!detail.data?.available)return <Space direction="vertical" size="large" style={{width:'100%'}}><PageHeader title="回测分析" description="读取最新已完成回测结果。"/><ReadOnlyNotice/><Alert type="info" showIcon message="暂无已完成回测结果" description="阶段 6.2 不会自动启动回测。"/></Space>; return <Space direction="vertical" size="large" style={{width:'100%'}}><PageHeader title="回测分析" description="展示后端已有指标、净值和交易结果，不在浏览器重新计算指标。"/><ReadOnlyNotice/><BacktestMetricCards metrics={detail.data.metrics}/><BacktestNavChart records={equity.data?.records??[]}/><BacktestTradeTable records={trades.data?.records??[]}/></Space> }

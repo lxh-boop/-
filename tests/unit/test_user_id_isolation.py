@@ -1,4 +1,4 @@
-from app.classic_services import portfolio_output_dir, save_classic_user_context, user_output_dir
+from application.paper_profile_service import portfolio_output_dir, save_classic_user_context, user_output_dir
 
 
 def test_user_id_output_paths_are_isolated(tmp_path) -> None:

@@ -1,0 +1,1 @@
+import { ServiceHealthPanel } from './ServiceHealthPanel'; export function ReflectionHealthPanel({ data }: { data?: Record<string, unknown> }) { return <ServiceHealthPanel title="Reflection" data={data}/> }

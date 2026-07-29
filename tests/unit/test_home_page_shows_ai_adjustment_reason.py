@@ -1,6 +1,6 @@
 import pandas as pd
 
-from app.classic_services import build_ai_adjustment_detail, format_classic_ranking_for_display, load_classic_ranking_with_ai_adjustment
+from application.paper_profile_service import build_ai_adjustment_detail, format_classic_ranking_for_display, load_classic_ranking_with_ai_adjustment
 
 
 def test_home_page_data_contains_ai_adjustment_reason_and_evidence(tmp_path) -> None:

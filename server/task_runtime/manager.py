@@ -21,6 +21,7 @@ ALLOWED_TASK_TYPES = {
     "dashboard.rolling_update",
     "dashboard.backtest",
     "paper-trading.update",
+    "paper-trading.backfill",
     "paper-profile.ai-news-adjustment",
     "paper-profile.scheduler-manual",
 }
@@ -49,7 +50,7 @@ class TaskManager:
         owner_id: str = "",
         session_id: str = "",
         metadata: dict[str, Any] | None = None,
-        timeout_seconds: int = 600,
+        timeout_seconds: int = 99600,
         max_retries: int = 0,
         secrets: dict[str, str] | None = None,
     ) -> dict[str, Any]:
@@ -152,7 +153,7 @@ class TaskManager:
                         self.store.update(task_id, status="cancelled", finished_at=utc_now(), progress=1, message="任务已取消", worker_pid=None)
                         self.store.add_event(task_id, "cancelled", {"message": "任务进程已终止"})
                     return
-                if time.monotonic() - started > int(task.get("timeout_seconds") or 600):
+                if time.monotonic() - started > int(task.get("timeout_seconds") or 99600):
                     self._terminate_tree(process)
                     current = self.store.get(task_id)
                     if current["status"] not in TERMINAL_STATUSES:

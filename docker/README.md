@@ -1,13 +1,17 @@
-# Stage 5 Docker Compose deployment
+# Stage 6.5 production Docker Compose deployment
 
-The Compose deployment runs two services:
+The production stack contains two services:
 
 ```text
-Streamlit -> HTTP/SSE -> FastAPI -> Task Runtime / Worker -> Application Service
+Browser -> React/Nginx -> HTTP/SSE -> FastAPI -> Task Runtime / Agent / Application Service
 ```
 
-Persistent project directories are bind-mounted from the host and are never
-copied into Docker images:
+Services:
+
+- `frontend`: React production build served by Nginx on host port `3000`;
+- `api`: FastAPI and Task Runtime on host port `8010`.
+
+Streamlit and the legacy Python HTTP client were removed at Stage 6.5. Persistent host directories remain bind-mounted and are never copied into images:
 
 ```text
 data
@@ -19,5 +23,4 @@ external_repos
 local_app_config.json
 ```
 
-Use the one-click scripts installed under `D:\google` for build, start, stop,
-logs, and Chrome acceptance testing.
+Use the scripts installed under `D:\google` for build/start, stop, logs and Chrome acceptance testing.

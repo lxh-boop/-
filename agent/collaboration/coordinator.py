@@ -7,6 +7,8 @@ from typing import Any
 
 from core.llm import LLMService
 
+from agent.console_trace import flow_event, trace_exception
+
 from agent.graph.contracts import GraphNodeKind, GraphRef, refs_from
 from agent.graph.errors import GraphConfigurationError, GraphUnavailableError
 from agent.graph.identity import GraphEntityIdentityService
@@ -23,6 +25,7 @@ from .control_gateway import ControlGateway
 from .entry_decision import MainEntryDecisionPlanner, RequestMode
 from .models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus
 from .planner import CoordinatorPlanner
+from .runtime_services import CollaborationRuntimeServices
 from .session_memory import SessionMemoryStore
 from .specialist_runtime import SpecialistRuntime
 
@@ -78,10 +81,12 @@ class AgentCollaborationCoordinator:
         db_path: str | Path | None,
         llm_service: LLMService,
         graph_settings: Neo4jSettings | None = None,
+        runtime_services: CollaborationRuntimeServices | None = None,
     ) -> None:
         self.output_dir = output_dir
         self.db_path = db_path
         self.llm_service = llm_service
+        self.runtime_services = runtime_services
         self.memory = SessionMemoryStore(output_dir=output_dir)
         self.directory = AgentDirectory()
         settings = graph_settings or Neo4jSettings.from_env()
@@ -99,6 +104,7 @@ class AgentCollaborationCoordinator:
             llm_service=llm_service,
             provider=provider,
             impact_service=GraphImpactService(self.store),
+            directory=self.directory,
         )
         self.entry = MainEntryDecisionPlanner(llm_service=llm_service)
         self.planner = CoordinatorPlanner(self.directory, llm_service=llm_service)
@@ -219,13 +225,38 @@ class AgentCollaborationCoordinator:
         execution_context: dict[str, Any] | None,
     ) -> dict[str, Any]:
         del decomposition
+        if self.runtime_services is not None:
+            self.runtime_services.validate_identity(
+                run_id=run_id,
+                user_id=user_id,
+                session_id=session_id,
+            )
         context = dict(execution_context or {})
         memory_summary = self.memory.build_summary(session_id, limit=40)
+        flow_event(
+            "MAIN_ENTRY_DECISION_STARTED",
+            {
+                "request": query,
+                "memory_summary_chars": len(memory_summary),
+                "execution_context_keys": sorted(context.keys()),
+            },
+            run_id=run_id,
+        )
         decision = self.entry.decide(
             query=query,
             memory_summary=memory_summary,
             execution_context=context,
             language=language,
+        )
+        flow_event(
+            "MAIN_ENTRY_DECISION_COMPLETED",
+            {
+                "request_mode": decision.mode.value,
+                "reason": decision.reason,
+                "source": decision.source,
+                "confidence": decision.confidence,
+            },
+            run_id=run_id,
         )
         if decision.mode in {RequestMode.CONFIRM, RequestMode.REJECT, RequestMode.LANGUAGE}:
             return ControlGateway(output_dir=self.output_dir, db_path=self.db_path).execute(
@@ -244,12 +275,32 @@ class AgentCollaborationCoordinator:
         context_refs = _walk_graph_refs(context)
         inherited_refs = self._memory_refs(session_id)
         explicit_as_of = str(context.get("as_of_time") or context.get("as_of_date") or "")
+        flow_event(
+            "GRAPH_REF_RESOLUTION_STARTED",
+            {
+                "context_ref_count": len(context_refs),
+                "inherited_ref_count": len(inherited_refs),
+                "as_of_time": explicit_as_of,
+            },
+            run_id=run_id,
+        )
         focus_refs, resolution_missing, resolution_audit = self._resolve_request_refs(
             query=query,
             inherited_refs=inherited_refs,
             context_refs=context_refs,
             as_of_time=explicit_as_of,
             language=language,
+        )
+        flow_event(
+            "GRAPH_REF_RESOLUTION_COMPLETED",
+            {
+                "focus_ref_count": len(focus_refs),
+                "focus_refs": [ref.to_dict() for ref in focus_refs],
+                "missing_context": [item.to_dict() for item in resolution_missing],
+                "resolution_audit": resolution_audit,
+            },
+            run_id=run_id,
+            level="WARNING" if resolution_missing else "INFO",
         )
         if resolution_missing:
             question = _clarification_question(resolution_missing, language)
@@ -288,17 +339,73 @@ class AgentCollaborationCoordinator:
                 confidence=1.0,
             )
 
-        tasks, plan_meta = self.planner.plan(
-            query=query,
-            request_mode=decision.mode.value,
-            session_id=session_id,
+        flow_event(
+            "WORKER_PLANNING_STARTED",
+            {
+                "request_mode": decision.mode.value,
+                "focus_ref_count": len(focus_refs),
+                "context_ref_count": len(context_refs),
+                "worker_selection_owner": "main_agent",
+            },
             run_id=run_id,
-            user_id=user_id,
-            focus_refs=focus_refs,
-            context_refs=context_refs,
-            memory_summary=memory_summary,
-            language=language,
-            as_of_time=explicit_as_of,
+        )
+        try:
+            tasks, plan_meta = self.planner.plan(
+                query=query,
+                request_mode=decision.mode.value,
+                session_id=session_id,
+                run_id=run_id,
+                user_id=user_id,
+                focus_refs=focus_refs,
+                context_refs=context_refs,
+                memory_summary=memory_summary,
+                language=language,
+                as_of_time=explicit_as_of,
+            )
+        except Exception as exc:
+            flow_event(
+                "WORKER_PLANNING_FAILED",
+                {
+                    "exception_type": type(exc).__name__,
+                    "message": str(exc),
+                    "diagnostics": getattr(exc, "diagnostics", {}),
+                },
+                run_id=run_id,
+                level="ERROR",
+            )
+            trace_exception(
+                "coordinator.worker_planning.failed",
+                exc,
+                run_id=run_id,
+            )
+            raise
+        flow_event(
+            "WORKER_PLANNING_COMPLETED",
+            {
+                "task_count": len(tasks),
+                "planner": plan_meta,
+                "tasks": [task.safe_for_coordinator() for task in tasks],
+            },
+            run_id=run_id,
+        )
+        if self.runtime_services is not None:
+            self.runtime_services.register_tasks(tasks)
+        flow_event(
+            "WORKER_DAG_REGISTERED",
+            {
+                "task_count": len(tasks),
+                "runtime_persistence": self.runtime_services is not None,
+                "tasks": [task.safe_for_coordinator() for task in tasks],
+            },
+            run_id=run_id,
+        )
+        flow_event(
+            "WORKER_EXECUTION_STARTED",
+            {
+                "task_count": len(tasks),
+                "parallel_execution_enabled": True,
+            },
+            run_id=run_id,
         )
         results, batches, timeline = self._run_dag(
             tasks,
@@ -308,6 +415,15 @@ class AgentCollaborationCoordinator:
             default_top_k=default_top_k,
             language=language,
             execution_context=context,
+        )
+        flow_event(
+            "WORKER_EXECUTION_COMPLETED",
+            {
+                "result_count": len(results),
+                "execution_batches": batches,
+                "timeline": timeline,
+            },
+            run_id=run_id,
         )
         for result in results.values():
             for update in result.memory_updates:
@@ -382,6 +498,19 @@ class AgentCollaborationCoordinator:
                 "focus_refs": [ref.to_dict() for ref in focus_refs],
                 "resolution_audit": resolution_audit,
                 "planner": plan_meta,
+                "worker_dag": {
+                    "contract_version": "worker_dag_snapshot.v1",
+                    "task_count": len(tasks),
+                    "tasks": [task.safe_for_coordinator() for task in tasks],
+                    "execution_batches": batches,
+                    "execution_order": [
+                        item.task_id for item in tasks if item.task_id in results
+                    ],
+                },
+                "runtime_persistence": {
+                    "agent_steps_connected": self.runtime_services is not None,
+                    "runtime_layer": "worker_dag",
+                },
                 "legacy_public_protocol_enabled": False,
             },
         }
@@ -406,14 +535,25 @@ class AgentCollaborationCoordinator:
             ready = [task for task in pending.values() if all(dep in results for dep in task.dependency_task_ids)]
             if not ready:
                 for task in pending.values():
-                    results[task.task_id] = GraphWorkerResult(
+                    result = GraphWorkerResult(
                         task_id=task.task_id,
                         agent_id=task.assigned_agent,
                         status=ResultStatus.NOT_EXECUTED,
+                        output_type=task.expected_output_type,
+                        data=None,
+                        error={
+                            "code": "unresolved_task_dependency",
+                            "message": "任务依赖无法满足。",
+                            "component": "worker_dag_executor",
+                            "retryable": False,
+                        },
                         focus_refs=task.focus_refs,
                         summary="任务依赖无法满足。",
                         warnings=["unresolved_task_dependency"],
                     )
+                    results[task.task_id] = result
+                    if self.runtime_services is not None:
+                        self.runtime_services.record_result(task, result)
                 break
             batch_index += 1
             batches.append({
@@ -423,6 +563,10 @@ class AgentCollaborationCoordinator:
                 "parallel": len(ready) > 1,
             })
             max_workers = min(4, len(ready))
+            if self.runtime_services is not None:
+                for task in ready:
+                    self.runtime_services.mark_ready(task)
+                    self.runtime_services.mark_running(task)
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {
                     pool.submit(
@@ -447,16 +591,34 @@ class AgentCollaborationCoordinator:
                             task_id=task.task_id,
                             agent_id=task.assigned_agent,
                             status=ResultStatus.FAILED,
+                            output_type=task.expected_output_type,
+                            data=None,
+                            error={
+                                "code": "worker_execution_failed",
+                                "message": str(exc),
+                                "component": task.assigned_agent,
+                                "retryable": True,
+                            },
                             focus_refs=task.focus_refs,
                             summary="Worker 执行失败。",
                             warnings=[f"{type(exc).__name__}:{exc}"],
                         )
                     results[task.task_id] = result
+                    if self.runtime_services is not None:
+                        self.runtime_services.record_result(task, result)
                     timeline.append({
                         "task_id": task.task_id,
+                        "worker_id": task.worker_id,
                         "agent_id": task.assigned_agent,
+                        "task_type": task.task_type,
                         "status": result.status.value,
+                        "output_type": result.output_type,
+                        "duration_ms": result.metadata.get("duration_ms"),
                         "summary": result.summary[:500],
+                        "warning_count": len(result.warnings),
+                        "evidence_count": len(result.evidence_refs),
+                        "artifact_count": len(result.artifact_refs),
+                        "error": result.error,
                     })
                     pending.pop(task.task_id, None)
         return results, batches, timeline

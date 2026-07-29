@@ -185,24 +185,25 @@ def load_current_ai_reliability_state(user_id, output_dir="."):
 
 
 def load_scheduler_status_summary(root="."):
-    import json
-    status_path = Path(root) / "runtime" / "jobs" / "latest_job_status.json"
-    if not status_path.exists():
-        return {"is_available": False, "overall_status": "unknown"}
     try:
-        data = json.loads(status_path.read_text(encoding="utf-8"))
+        from scheduler.runtime_scheduler import scheduler_public_status
+
+        status = scheduler_public_status()
         return {
             "is_available": True,
-            "job_id": data.get("job_id", ""),
-            "run_id": data.get("run_id", ""),
-            "trade_date": data.get("trade_date", ""),
-            "overall_status": data.get("overall_status", ""),
-            "recommendation_count": data.get("recommendation_count", 0),
-            "paper_order_count": data.get("paper_order_count", 0),
-            "finished_at": data.get("finished_at", ""),
+            "overall_status": status.get("last_status", "unknown"),
+            "trade_date": status.get("last_trade_date", ""),
+            "finished_at": status.get("last_finished_at", ""),
+            "next_run_time": status.get("next_run_time", ""),
+            "runtime_running": status.get("runtime_running", False),
+            "job_registered": status.get("job_registered", False),
+            "latest_signal_date": status.get("latest_signal_date", ""),
+            "expected_signal_date": status.get("expected_signal_date", ""),
+            "stale": status.get("stale", False),
+            "last_error": status.get("last_error", ""),
         }
-    except:
-        return {"is_available": True, "overall_status": "unknown"}
+    except Exception:
+        return {"is_available": False, "overall_status": "unknown"}
 
 
 
@@ -217,26 +218,33 @@ def run_ai_news_adjustment_from_latest(user_id="default", top_k=50, output_dir="
 
 
 
-def start_scheduler_manual_run(user_id=None, all_users=True, force=False, dry_run=False, output_dir=".", db_path=None):
-    import subprocess, sys, os
-    log_dir = Path("logs") / "scheduler"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = log_dir / "app_manual_run.out.log"
-    stderr_path = log_dir / "app_manual_run.err.log"
-    cmd = [sys.executable, "-m", "scheduler.scheduler_cli", "run", "--source", "manual", "--output-dir", str(output_dir)]
-    if db_path:
-        cmd.extend(["--db-path", str(db_path)])
-    if dry_run:
-        cmd.append("--dry-run")
-    if force:
-        cmd.append("--force")
-    if all_users:
-        cmd.append("--all-users")
-    elif user_id:
-        cmd.extend(["--user-id", str(user_id)])
-    with stdout_path.open("ab") as stdout, stderr_path.open("ab") as stderr:
-        proc = subprocess.Popen(cmd, cwd=str(Path(__file__).resolve().parents[1]), stdout=stdout, stderr=stderr, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    return {"pid": proc.pid, "command": " ".join(cmd)}
+def start_scheduler_manual_run(
+    user_id=None,
+    all_users=True,
+    force=False,
+    dry_run=False,
+    output_dir="outputs",
+    db_path=None,
+):
+    """在 Task Runtime 子进程中同步执行完整更新链路。
+
+    不再启动一个脱离 Task Runtime 的后台子进程，因此任务中心能够准确
+    展示成功、失败、超时和最终结果。
+    """
+
+    from scheduler.daily_worker import run_scheduled_daily_update
+
+    selected_users = None if all_users else ([str(user_id)] if user_id else None)
+    result = run_scheduled_daily_update(
+        user_ids=selected_users,
+        force=bool(force),
+        dry_run=bool(dry_run),
+        source="manual",
+        output_dir=str(output_dir or "outputs"),
+        db_path=db_path,
+        root=".",
+    )
+    return result.to_dict()
 
 
 

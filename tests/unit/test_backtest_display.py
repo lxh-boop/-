@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.services.backtest_display import build_display_date_options, is_prediction_only_date
+from application.support.backtest_display import build_display_date_options, is_prediction_only_date
 
 
 def test_latest_prediction_date_is_inserted_before_backtest_dates():

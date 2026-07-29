@@ -1,0 +1,57 @@
+{
+  "contract_version": "stage6.0",
+  "routes": [
+    "POST /api/v1/tasks",
+    "GET /api/v1/tasks",
+    "GET /api/v1/tasks/{task_id}",
+    "POST /api/v1/tasks/{task_id}/cancel",
+    "POST /api/v1/tasks/{task_id}/acknowledge",
+    "GET /api/v1/tasks/{task_id}/events"
+  ],
+  "active_statuses": [
+    "queued",
+    "running",
+    "cancelling"
+  ],
+  "terminal_statuses": [
+    "succeeded",
+    "failed",
+    "cancelled",
+    "timed_out",
+    "interrupted"
+  ],
+  "task_types": [
+    "agent.run",
+    "dashboard.rolling_update",
+    "dashboard.backtest",
+    "paper-trading.update",
+    "paper-trading.backfill",
+    "paper-profile.ai-news-adjustment",
+    "paper-profile.scheduler-manual",
+    "diagnostic.sleep",
+    "diagnostic.flaky"
+  ],
+  "sse_events": [
+    "task-event",
+    "task-complete"
+  ],
+  "resume": [
+    "after query parameter",
+    "Last-Event-ID request header"
+  ],
+  "required_task_fields": [
+    "task_id",
+    "task_type",
+    "status",
+    "owner_id",
+    "session_id",
+    "progress",
+    "message",
+    "created_at",
+    "updated_at",
+    "timeout_seconds",
+    "max_retries",
+    "attempt",
+    "cancel_requested"
+  ]
+}

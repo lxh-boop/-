@@ -1,0 +1,4 @@
+import { Table, Typography } from 'antd'
+import type { ColumnsType } from 'antd/es/table'
+import type { NewsEventRecord } from '../../types/news'
+export function NewsEventTable({ records }: { records: NewsEventRecord[] }) { const columns:ColumnsType<NewsEventRecord>=[{title:'日期',dataIndex:'date',width:110,render:v=>String(v??'').slice(0,10)},{title:'代码',dataIndex:'code',width:90},{title:'名称',dataIndex:'name',width:100},{title:'标题',dataIndex:'title',ellipsis:true,render:(v,r)=>(r.url?<Typography.Link href={String(r.url)} target="_blank" rel="noreferrer">{String(v??'')}</Typography.Link>:String(v??''))},{title:'来源',dataIndex:'source',width:110}]; return <Table<NewsEventRecord> size="small" scroll={{x:900}} pagination={{pageSize:20,showSizeChanger:true}} dataSource={records} columns={columns} rowKey={(r)=>String(r.event_id??`${r.code??''}-${r.date??''}-${r.title??''}`)}/> }

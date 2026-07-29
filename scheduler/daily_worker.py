@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import csv
 import json
+import os
 import shutil
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
@@ -18,6 +22,121 @@ from scheduler.user_job_runner import get_active_user_ids, run_user_daily_job
 
 PUBLIC_MARKER_DIR = Path("runtime") / "jobs" / "public_tasks"
 SCHEDULER_LOG_DIR = Path("logs") / "scheduler"
+
+
+def _csv_signal_date(path: str | Path) -> str:
+    path = Path(path)
+    if not path.exists():
+        return ""
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            row = next(csv.DictReader(handle), None) or {}
+        return str(row.get("date") or row.get("signal_date") or "")[:10]
+    except Exception:
+        return ""
+
+
+def _ranking_signal_date(output_dir: str | Path) -> str:
+    return _csv_signal_date(Path(output_dir) / "ranking_latest.csv")
+
+
+def run_market_update_from_local_config(
+    *,
+    trade_date: str,
+    output_dir: str | Path = "outputs",
+    root: str | Path = ".",
+    force: bool = False,
+    dry_run: bool = False,
+    skip_market_update: bool = False,
+) -> dict[str, Any]:
+    """先下载行情并生成目标交易日排名，再进入用户级任务。
+
+    Token 只从本地配置或环境变量读取，不写入状态文件和命令日志。
+    """
+
+    if dry_run or skip_market_update:
+        return {
+            "status": SchedulerStatus.SKIPPED,
+            "warnings": ["market update skipped by scheduler option."],
+            "metadata": {"signal_date": _ranking_signal_date(output_dir)},
+        }
+
+    current_signal_date = _ranking_signal_date(output_dir)
+    if current_signal_date == trade_date and not force:
+        return {
+            "status": SchedulerStatus.SKIPPED,
+            "warnings": [f"ranking already updated for {trade_date}."],
+            "metadata": {"signal_date": current_signal_date, "already_current": True},
+        }
+
+    from data_tushare import get_token
+    from local_config import load_local_config
+
+    config = load_local_config()
+    token = get_token()
+    model_backend = str(config.get("model_backend") or "zoo:chronos_bolt_small").strip()
+    model_version = str(config.get("model_version") or "latest").strip()
+    checkpoint = str(config.get("dft_unet_checkpoint_path") or "").strip()
+    timeout_seconds = max(1, int(config.get("scheduler_market_update_timeout_seconds") or 997200))
+
+    project_root = Path(root).resolve()
+    script = project_root / "daily_incremental_update.py"
+    if not script.exists():
+        raise FileNotFoundError(f"daily_incremental_update.py not found: {script}")
+
+    command = [
+        sys.executable,
+        str(script),
+        "--token",
+        token,
+        "--base-version",
+        model_version,
+        "--model-backend",
+        model_backend,
+    ]
+    if checkpoint:
+        command.extend(["--checkpoint-path", checkpoint])
+
+    log_dir = project_root / SCHEDULER_LOG_DIR
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stdout_path = log_dir / f"market_update_{stamp}.out.log"
+    stderr_path = log_dir / f"market_update_{stamp}.err.log"
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "1"
+    environment["PYTHONIOENCODING"] = "utf-8"
+
+    with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+        completed = subprocess.run(
+            command,
+            cwd=str(project_root),
+            env=environment,
+            stdout=stdout,
+            stderr=stderr,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"daily_incremental_update failed with return code {completed.returncode}; "
+            f"see {stderr_path}"
+        )
+
+    signal_date = _ranking_signal_date(output_dir)
+    if signal_date != trade_date:
+        raise RuntimeError(
+            f"ranking signal date mismatch: expected={trade_date}, actual={signal_date or 'missing'}"
+        )
+
+    return {
+        "status": SchedulerStatus.SUCCESS,
+        "metadata": {
+            "signal_date": signal_date,
+            "model_backend": model_backend,
+            "stdout_log": str(stdout_path),
+            "stderr_log": str(stderr_path),
+        },
+    }
 
 
 def _date_text(value: Any) -> str:
@@ -88,11 +207,23 @@ def run_public_daily_tasks(
     root: str | Path = ".",
 ) -> dict[str, Any]:
     warnings: list[str] = []
-    if _public_already_done(trade_date, root) and not force:
+    source_signal_date = _ranking_signal_date(output_dir)
+    shared_signal_date = _csv_signal_date(Path(output_dir) / "shared" / "ranking_latest.csv")
+    marker_dates_are_current = (
+        source_signal_date == trade_date and shared_signal_date == trade_date
+    ) or (not source_signal_date and not shared_signal_date)
+    if (
+        _public_already_done(trade_date, root)
+        and not force
+        and marker_dates_are_current
+    ):
         return {
             "status": SchedulerStatus.SKIPPED,
             "warnings": [f"public tasks already completed for {trade_date}."],
-            "metadata": {"public_task_once": True},
+            "metadata": {
+                "public_task_once": True,
+                "signal_date": source_signal_date,
+            },
         }
 
     ranking_path = _copy_ranking_to_shared(output_dir, dry_run=dry_run)
@@ -111,6 +242,7 @@ def run_public_daily_tasks(
         "status": SchedulerStatus.SUCCESS,
         "trade_date": trade_date,
         "ranking_output_path": ranking_path,
+        "signal_date": source_signal_date,
         "news_event_count": news_event_count,
         "news_chunk_count": news_chunk_count,
         "dry_run": dry_run,
@@ -145,11 +277,13 @@ def run_scheduled_daily_update(
     skip_training: bool = False,
     skip_news: bool = False,
     skip_paper_trading: bool = False,
+    skip_market_update: bool = False,
     source: str = "manual",
     top_k: int = 50,
     output_dir: str | Path = "outputs",
     db_path: str | Path | None = AGENT_QUANT_DB_PATH,
     root: str | Path = ".",
+    market_update_runner: Callable[..., dict[str, Any]] | None = None,
     public_task_runner: Callable[..., dict[str, Any]] | None = None,
     user_task_runner: Callable[..., dict[str, Any]] | None = None,
 ) -> JobStatus:
@@ -184,6 +318,27 @@ def run_scheduled_daily_update(
     )
     try:
         with lock:
+            # 单元测试常注入 public_task_runner；只有真实链路或显式注入
+            # market_update_runner 时才执行行情下载，避免测试触网。
+            should_run_market_update = market_update_runner is not None or public_task_runner is None
+            if should_run_market_update:
+                market_update_runner = market_update_runner or run_market_update_from_local_config
+                market_result = run_recorded_step(
+                    job,
+                    "market_update",
+                    lambda: market_update_runner(
+                        trade_date=resolved_trade_date,
+                        output_dir=output_dir,
+                        root=root,
+                        force=force,
+                        dry_run=dry_run,
+                        skip_market_update=skip_market_update,
+                    ),
+                    root=root,
+                )
+                market_meta = market_result.get("metadata") or {}
+                job.latest_signal_date = str(market_meta.get("signal_date") or "")
+
             public_task_runner = public_task_runner or run_public_daily_tasks
             public_result = run_recorded_step(
                 job,

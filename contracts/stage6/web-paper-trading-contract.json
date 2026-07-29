@@ -1,0 +1,55 @@
+{
+  "contract_version": "stage6.3",
+  "prefix": "/api/v1/web/paper-trading",
+  "read_routes": [
+    "GET /summary",
+    "GET /account",
+    "GET /positions",
+    "GET /orders",
+    "GET /profile",
+    "GET /cash-flows",
+    "GET /proposals",
+    "GET /proposals/{plan_id}"
+  ],
+  "protected_write_routes": [
+    "PUT /profile",
+    "POST /cash-flows/preview",
+    "POST /cash-flows/{cash_flow_id}/cancel",
+    "POST /backfill/preview",
+    "POST /proposals/{plan_id}/commit",
+    "POST /proposals/{plan_id}/reject"
+  ],
+  "write_requirements": [
+    "request_id",
+    "idempotency_key",
+    "explicit user confirmation",
+    "server-side state revalidation",
+    "server is the sole source of truth"
+  ],
+  "task_types": [
+    "paper-trading.update",
+    "paper-trading.backfill",
+    "paper-profile.ai-news-adjustment",
+    "paper-profile.scheduler-manual"
+  ],
+  "browser_storage_allowed": [
+    "owner_id",
+    "session_id",
+    "active task_id",
+    "last_event_id",
+    "route",
+    "non-sensitive filters"
+  ],
+  "browser_storage_forbidden": [
+    "account balance",
+    "positions",
+    "orders",
+    "cash flows",
+    "full profile",
+    "task result",
+    "task event payload",
+    "confirmation token",
+    "credential",
+    "server path"
+  ]
+}

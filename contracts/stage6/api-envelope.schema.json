@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OperationResponse",
+  "type": "object",
+  "required": [
+    "success",
+    "data",
+    "error",
+    "request_id"
+  ],
+  "properties": {
+    "success": {
+      "type": "boolean"
+    },
+    "data": {},
+    "error": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "code",
+            "message"
+          ],
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object"
+            }
+          }
+        }
+      ]
+    },
+    "request_id": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

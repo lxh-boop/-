@@ -18,7 +18,8 @@ def run_health_check(
     checks: dict[str, Any] = {
         "python": sys.executable,
         "root": str(root_path.resolve()),
-        "app_exists": (root_path / "app.py").exists(),
+        "api_entry_exists": (root_path / "run_agent_api.py").exists(),
+        "daily_update_exists": (root_path / "daily_incremental_update.py").exists(),
         "scheduler_package_exists": (root_path / "scheduler").exists(),
         "run_script_exists": (root_path / "scripts" / "run_scheduled_daily_update.bat").exists(),
         "latest_status_exists": bool(load_latest_job_status(root_path)),
@@ -38,5 +39,5 @@ def run_health_check(
     except Exception as exc:
         checks["calendar_ok"] = False
         checks["calendar_error"] = str(exc)
-    checks["overall_status"] = "success" if checks.get("app_exists") and checks.get("database_ok") and checks.get("calendar_ok") else "failed"
+    checks["overall_status"] = "success" if checks.get("api_entry_exists") and checks.get("daily_update_exists") and checks.get("database_ok") and checks.get("calendar_ok") else "failed"
     return checks

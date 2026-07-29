@@ -1,4 +1,4 @@
-from app.classic_services import list_daily_order_snapshot_dates, load_daily_order_snapshot
+from application.paper_profile_service import list_daily_order_snapshot_dates, load_daily_order_snapshot
 from pipelines.paper_trading_pipeline import run_paper_trading_pipeline
 from pipelines.schemas import PipelineContext
 

@@ -1,0 +1,1 @@
+import { ServiceHealthPanel } from './ServiceHealthPanel'; export function MessageBusHealthPanel({ data }: { data?: Record<string, unknown> }) { return <ServiceHealthPanel title="Message Bus" data={data}/> }

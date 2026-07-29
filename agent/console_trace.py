@@ -19,6 +19,7 @@ _CURRENT_RUN_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
 _LOCK = threading.RLock()
 _RUN_FILES: dict[str, Path] = {}
 _RUN_SEQUENCE: dict[str, int] = {}
+_RUN_FINALIZED: set[str] = set()
 
 _SECRET_KEY_PATTERN = re.compile(
     r"(?:api[_-]?key|token|secret|password|passwd|credential|"
@@ -61,6 +62,31 @@ _STAGE_LABELS = {
     "CRITIC": "结果审查",
     "UI": "页面输出",
     "EXCEPTION": "异常记录",
+    "GRAPH_RUNTIME_INITIALIZATION_STARTED": "金融图运行时初始化开始",
+    "GRAPH_RUNTIME_INITIALIZATION_COMPLETED": "金融图运行时初始化完成",
+    "GRAPH_RUNTIME_INITIALIZATION_FAILED": "金融图运行时初始化失败",
+    "MAIN_ENTRY_DECISION_STARTED": "MainAgent 入口判断开始",
+    "MAIN_ENTRY_DECISION_COMPLETED": "MainAgent 入口判断完成",
+    "GRAPH_REF_RESOLUTION_STARTED": "GraphRef 解析开始",
+    "GRAPH_REF_RESOLUTION_COMPLETED": "GraphRef 解析完成",
+    "WORKER_PLANNING_STARTED": "Worker DAG 规划开始",
+    "LOCAL_LLM_REQUEST_STARTED": "本地模型规划请求开始",
+    "LOCAL_LLM_RESPONSE_RECEIVED": "本地模型规划响应已返回",
+    "WORKER_PLAN_CANDIDATE_GENERATED": "候选 Worker DAG 已生成",
+    "WORKER_PLAN_VALIDATION_FAILED": "候选 Worker DAG 校验失败",
+    "WORKER_PLAN_REPAIR_STARTED": "完整 Worker DAG 重新规划开始",
+    "WORKER_PLAN_REPAIR_RESPONSE_RECEIVED": "重新规划响应已返回",
+    "WORKER_PLAN_REPAIR_CANDIDATE_GENERATED": "重新规划候选 DAG 已生成",
+    "WORKER_PLAN_REPAIR_SUCCEEDED": "重新规划通过",
+    "WORKER_PLAN_REPAIR_FAILED": "重新规划失败",
+    "WORKER_PLAN_ACCEPTED": "Worker DAG 候选已接受",
+    "WORKER_DAG_VALIDATED": "Worker DAG 合同校验通过",
+    "WORKER_PLANNING_COMPLETED": "Worker DAG 规划完成",
+    "WORKER_PLANNING_FAILED": "Worker DAG 规划失败",
+    "WORKER_DAG_REGISTERED": "Worker DAG 已登记",
+    "WORKER_EXECUTION_STARTED": "Worker DAG 执行开始",
+    "WORKER_EXECUTION_COMPLETED": "Worker DAG 执行完成",
+    "RUN_FAILED": "Agent Run 失败",
 }
 
 
@@ -412,11 +438,13 @@ def _path_for_run(
     with _LOCK:
         if start_new or run_id not in _RUN_FILES:
             question = _extract_question_text(payload)
-            stem = _question_filename_stem(question)
-            path = _deduplicated_markdown_path(stem)
+            question_stem = _question_filename_stem(question)
+            run_stem = _safe_file_name(run_id or _new_fallback_run_id())
+            path = _output_directory() / f"{question_stem}__{run_stem}.md"
             _RUN_FILES[run_id] = path
             _RUN_SEQUENCE[run_id] = 0
-            _write_document_header(path, run_id, question=question)
+            if not path.exists():
+                _write_document_header(path, run_id, question=question)
         return _RUN_FILES[run_id]
 
 
@@ -622,6 +650,327 @@ def trace_exception(
         payload,
         level="ERROR",
     )
+
+
+
+
+def _markdown_inline(value: Any, *, limit: int = 600) -> str:
+    raw = "" if value is None else str(value)
+    text = _redact_text(raw).replace("\r", " ").replace("\n", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text.replace("|", "\\|").replace("`", "'")
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return text or "-"
+
+
+def _markdown_json(value: Any) -> list[str]:
+    return ["```json", safe_json_dumps(value), "```"]
+
+
+def _as_mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _as_rows(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def finalize_flow_markdown(
+    *,
+    run_id: str,
+    question: str,
+    execution: dict[str, Any] | None,
+    runtime_status: str,
+    success: bool,
+    final_answer: str = "",
+    user_id: str = "",
+    session_id: str = "",
+    language: str = "",
+    llm_runtime: dict[str, Any] | None = None,
+) -> str:
+    """Append one complete, human-readable run archive to the flow Markdown.
+
+    Major trace events remain useful while the request is running. This final
+    snapshot guarantees that the saved Markdown still contains the Worker DAG,
+    every public WorkerResult, execution batches, evidence references, missing
+    context, errors and the final answer even when dense console tracing is off.
+    It never mutates the Worker DAG and never exposes private Tool arguments.
+    """
+    if not flow_trace_enabled():
+        return ""
+
+    canonical_run_id = str(run_id or "").strip() or _CURRENT_RUN_ID.get()
+    if not canonical_run_id:
+        canonical_run_id = _new_fallback_run_id()
+    payload = dict(execution or {})
+
+    try:
+        with _LOCK:
+            path = _path_for_run(
+                canonical_run_id,
+                start_new=False,
+                payload={"query": question},
+            )
+            marker = f"<!-- AGENT_RUN_FINAL_SNAPSHOT:{canonical_run_id} -->"
+            if canonical_run_id in _RUN_FINALIZED:
+                return str(path)
+            try:
+                if marker in path.read_text(encoding="utf-8"):
+                    _RUN_FINALIZED.add(canonical_run_id)
+                    return str(path)
+            except OSError:
+                pass
+
+            graph_runtime = _as_mapping(payload.get("graph_runtime"))
+            worker_dag = _as_mapping(graph_runtime.get("worker_dag"))
+            planned_tasks = _as_rows(worker_dag.get("tasks"))
+            task_results = _as_mapping(payload.get("task_results"))
+            graph_results = _as_mapping(payload.get("graph_worker_results"))
+            result_items = _as_rows(graph_results.get("items"))
+            if not result_items:
+                result_items = [
+                    dict(item)
+                    for item in task_results.values()
+                    if isinstance(item, dict)
+                ]
+            result_by_task = {
+                str(item.get("task_id") or ""): item
+                for item in result_items
+                if str(item.get("task_id") or "")
+            }
+            batches = _as_rows(payload.get("execution_batches"))
+            timeline = _as_rows(payload.get("agent_timeline"))
+            planner = _as_mapping(graph_runtime.get("planner"))
+            warnings = [str(item) for item in payload.get("warnings") or []]
+            errors = [str(item) for item in payload.get("errors") or []]
+            missing_context = _as_rows(payload.get("missing_context"))
+            failure = _as_mapping(payload.get("failure"))
+            execution_status = str(payload.get("execution_status") or runtime_status or "unknown")
+
+            lines: list[str] = [
+                marker,
+                "",
+                "# 运行总览",
+                "",
+                "| 字段 | 内容 |",
+                "|---|---|",
+                f"| Run ID | `{_markdown_inline(canonical_run_id)}` |",
+                f"| 用户问题 | {_markdown_inline(question, limit=1200)} |",
+                f"| 用户 | `{_markdown_inline(user_id)}` |",
+                f"| 会话 | `{_markdown_inline(session_id)}` |",
+                f"| 回复语言 | `{_markdown_inline(language)}` |",
+                f"| Runtime 状态 | `{_markdown_inline(runtime_status)}` |",
+                f"| 执行状态 | `{_markdown_inline(execution_status)}` |",
+                f"| 是否成功 | `{'true' if success else 'false'}` |",
+                f"| Worker 计划数 | `{len(planned_tasks)}` |",
+                f"| Worker 结果数 | `{len(result_items)}` |",
+                f"| 完成数 | `{graph_results.get('completed_count', 0)}` |",
+                f"| 失败数 | `{graph_results.get('failed_count', 0)}` |",
+                f"| 等待上下文数 | `{graph_results.get('waiting_context_count', 0)}` |",
+                f"| 内部运行计数 | `{payload.get('internal_tool_call_count', 0)}` |",
+                f"| 完成时间 | `{datetime.now().isoformat(timespec='milliseconds')}` |",
+                "",
+            ]
+
+            if llm_runtime:
+                lines.extend([
+                    "## LLM 运行配置（已脱敏）",
+                    "",
+                    *_markdown_json(llm_runtime),
+                    "",
+                ])
+
+            lines.extend([
+                "## MainAgent 规划信息",
+                "",
+                *_markdown_json(planner),
+                "",
+            ])
+            if failure:
+                lines.extend([
+                    "## 失败阶段与错误分类",
+                    "",
+                    *_markdown_json(failure),
+                    "",
+                ])
+            lines.extend([
+                "## Worker DAG",
+                "",
+            ])
+
+            if planned_tasks:
+                lines.extend([
+                    "| 顺序 | Task ID | Worker ID | Worker 角色 | Task Type | 目标 | 依赖 | 预期输出 | 结果状态 |",
+                    "|---:|---|---|---|---|---|---|---|---|",
+                ])
+                for index, task in enumerate(planned_tasks, start=1):
+                    task_id = str(task.get("task_id") or "")
+                    result = result_by_task.get(task_id, {})
+                    dependencies = ", ".join(
+                        str(item) for item in task.get("dependency_task_ids") or []
+                    ) or "-"
+                    lines.append(
+                        "| {index} | `{task_id}` | `{worker_id}` | `{agent}` | `{task_type}` | {objective} | {deps} | `{output}` | `{status}` |".format(
+                            index=index,
+                            task_id=_markdown_inline(task_id),
+                            worker_id=_markdown_inline(task.get("worker_id")),
+                            agent=_markdown_inline(task.get("assigned_agent")),
+                            task_type=_markdown_inline(task.get("task_type")),
+                            objective=_markdown_inline(task.get("objective"), limit=900),
+                            deps=_markdown_inline(dependencies),
+                            output=_markdown_inline(task.get("expected_output_type")),
+                            status=_markdown_inline(result.get("status") or task.get("status")),
+                        )
+                    )
+                lines.append("")
+                for task in planned_tasks:
+                    task_id = str(task.get("task_id") or "")
+                    lines.extend([
+                        f"### 任务 `{_markdown_inline(task_id)}` 的结构化输入",
+                        "",
+                        "- Worker：`{}` / `{}`".format(
+                            _markdown_inline(task.get("worker_id")),
+                            _markdown_inline(task.get("assigned_agent")),
+                        ),
+                        "- 任务类型：`{}`".format(_markdown_inline(task.get("task_type"))),
+                        "- 预期输出：`{}`".format(_markdown_inline(task.get("expected_output_type"))),
+                        "- 约束：{}".format(_markdown_inline(", ".join(map(str, task.get("constraints") or [])) or "-")),
+                        "",
+                        *_markdown_json(task.get("args") or {}),
+                        "",
+                    ])
+            else:
+                lines.extend(["未保存到可公开的 Worker DAG 快照。", ""])
+
+            lines.extend(["## 执行批次", ""])
+            if batches:
+                lines.extend([
+                    "| 批次 | Task IDs | Worker 角色 | 是否并行 |",
+                    "|---:|---|---|---|",
+                ])
+                for batch in batches:
+                    lines.append(
+                        "| `{}` | {} | {} | `{}` |".format(
+                            _markdown_inline(batch.get("batch_index")),
+                            _markdown_inline(", ".join(map(str, batch.get("task_ids") or []))),
+                            _markdown_inline(", ".join(map(str, batch.get("agents") or []))),
+                            _markdown_inline(batch.get("parallel")),
+                        )
+                    )
+                lines.append("")
+            else:
+                lines.extend(["没有可用的执行批次记录。", ""])
+
+            lines.extend(["## Worker 执行结果", ""])
+            if result_items:
+                lines.extend([
+                    "| Task ID | Worker | 状态 | 输出类型 | 耗时(ms) | 置信度 | 证据 | 产物 | 摘要 |",
+                    "|---|---|---|---|---:|---:|---:|---:|---|",
+                ])
+                for item in result_items:
+                    metadata = _as_mapping(item.get("metadata"))
+                    lines.append(
+                        "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | {} |".format(
+                            _markdown_inline(item.get("task_id")),
+                            _markdown_inline(item.get("agent_id")),
+                            _markdown_inline(item.get("status")),
+                            _markdown_inline(item.get("output_type")),
+                            _markdown_inline(metadata.get("duration_ms")),
+                            _markdown_inline(item.get("confidence")),
+                            len(item.get("evidence_refs") or []),
+                            len(item.get("artifact_refs") or []),
+                            _markdown_inline(item.get("summary"), limit=700),
+                        )
+                    )
+                lines.append("")
+
+                for item in result_items:
+                    task_id = str(item.get("task_id") or "unknown")
+                    metadata = _as_mapping(item.get("metadata"))
+                    lines.extend([
+                        f"### WorkerResult `{_markdown_inline(task_id)}`",
+                        "",
+                        "- Worker：`{}`".format(_markdown_inline(item.get("agent_id"))),
+                        "- 状态：`{}`".format(_markdown_inline(item.get("status"))),
+                        "- 输出类型：`{}`".format(_markdown_inline(item.get("output_type"))),
+                        "- 耗时：`{} ms`".format(_markdown_inline(metadata.get("duration_ms"))),
+                        "- 摘要：{}".format(_markdown_inline(item.get("summary"), limit=1800)),
+                        "",
+                    ])
+                    tool_execution = _as_mapping(metadata.get("tool_execution"))
+                    if tool_execution:
+                        lines.extend([
+                            "#### 私有 Tool 执行摘要",
+                            "",
+                            *_markdown_json(tool_execution),
+                            "",
+                        ])
+                    if item.get("error"):
+                        lines.extend(["#### 错误", "", *_markdown_json(item.get("error")), ""])
+                    if item.get("missing_items"):
+                        lines.extend(["#### 缺少上下文", "", *_markdown_json(item.get("missing_items")), ""])
+                    if item.get("warnings"):
+                        lines.extend(["#### 警告", "", *_markdown_json(item.get("warnings")), ""])
+                    if item.get("findings"):
+                        lines.extend(["#### 关键发现", "", *_markdown_json(item.get("findings")), ""])
+                    if item.get("recommendations"):
+                        lines.extend(["#### 建议", "", *_markdown_json(item.get("recommendations")), ""])
+                    if item.get("evidence_refs"):
+                        lines.extend(["#### 证据引用", "", *_markdown_json(item.get("evidence_refs")), ""])
+                    if item.get("graph_path_refs"):
+                        lines.extend(["#### 图关系路径", "", *_markdown_json(item.get("graph_path_refs")), ""])
+                    if item.get("artifact_refs"):
+                        lines.extend(["#### 产物引用", "", *_markdown_json(item.get("artifact_refs")), ""])
+                    if item.get("data") is not None:
+                        lines.extend(["#### 结构化业务输出", "", *_markdown_json(item.get("data")), ""])
+            else:
+                lines.extend(["没有 WorkerResult。", ""])
+
+            if timeline:
+                lines.extend(["## Worker 时间线", "", *_markdown_json(timeline), ""])
+
+            focus_refs = graph_runtime.get("focus_refs") or []
+            if focus_refs:
+                lines.extend(["## 已解析 GraphRef", "", *_markdown_json(focus_refs), ""])
+            resolution_audit = graph_runtime.get("resolution_audit")
+            if resolution_audit:
+                lines.extend(["## GraphRef 解析审计", "", *_markdown_json(resolution_audit), ""])
+
+            if missing_context:
+                lines.extend(["## 等待用户补充的信息", "", *_markdown_json(missing_context), ""])
+
+            lines.extend(["## 最终回答", ""])
+            if final_answer:
+                lines.extend([_redact_text(str(final_answer)), ""])
+            else:
+                lines.extend(["未生成最终回答。", ""])
+
+            if warnings:
+                lines.extend(["## 全局警告", "", *_markdown_json(warnings), ""])
+            if errors:
+                lines.extend(["## 全局错误", "", *_markdown_json(errors), ""])
+
+            lines.extend([
+                "## 运行边界说明",
+                "",
+                "- 本文档保存的是 MainAgent 可见的 Worker DAG、公开 WorkerResult 和安全化运行信息。",
+                "- Worker 私有 Tool 的原始参数、原始响应、密钥、数据库路径和内部推理不会写入本文档。",
+                "- `工具调用`的完整逐次持久化将在 Tool Runtime 接线阶段补充；当前仅保存 WorkerResult 中公开的 Tool 摘要。",
+                "",
+                "---",
+                "",
+            ])
+
+            with path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write("\n".join(lines))
+
+            _RUN_FINALIZED.add(canonical_run_id)
+            return str(path)
+    except Exception:
+        return ""
 
 
 def get_flow_markdown_path(run_id: str | None = None) -> str:
