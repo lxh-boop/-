@@ -21,6 +21,11 @@ body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSyst
 .paper-section-controls { margin-left: auto; }
 .paper-section-card--collapsed .ant-card-head { border-bottom: 0; }
 .paper-section-card .ant-card-extra .ant-btn { min-width: 48px; }
+.paper-history-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.paper-history-date-picker { min-height: 32px; padding: 4px 10px; color: #0f172a; background: #fff; border: 1px solid #d9d9d9; border-radius: 6px; font: inherit; }
+.paper-history-date-picker:hover { border-color: #4096ff; }
+.paper-history-date-picker:focus { border-color: #1677ff; outline: 2px solid rgba(5,145,255,.1); outline-offset: 0; }
+.paper-history-loading { display: flex; min-height: 160px; align-items: center; justify-content: center; }
 .simple-chart { width: 100%; overflow: hidden; }
 .simple-chart svg { width: 100%; min-height: 180px; }
 .chart-axis { stroke: #cbd5e1; stroke-width: 1; }

@@ -3,14 +3,21 @@ from __future__ import annotations
 import json
 import sys
 import types
+from dataclasses import replace
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from pydantic import ValidationError
 
 from application.web_paper_trading_service import WebPaperTradingApplicationService
+from application.web_read_service import web_read_service
+from portfolio.paper_account import create_default_account
+from portfolio.paper_order import create_paper_order
+from portfolio.paper_position import create_position
+from portfolio.storage import PortfolioStorage
 from server.api.main import create_app
-from server.api.presenters.paper_trading import present_write_result
+from server.api.presenters.paper_trading import present_daily_history, present_write_result
 from server.api.schemas.paper_trading import ProfileUpdateRequest, ProposalCommitRequest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +31,7 @@ def test_stage6_3_paper_routes_and_methods() -> None:
         f"{prefix}/account": {"get"},
         f"{prefix}/positions": {"get"},
         f"{prefix}/orders": {"get"},
+        f"{prefix}/history": {"get"},
         f"{prefix}/profile": {"get", "put"},
         f"{prefix}/cash-flows": {"get"},
         f"{prefix}/cash-flows/preview": {"post"},
@@ -125,7 +133,7 @@ def test_paper_sections_are_collapsible_and_layout_scrolls_independently() -> No
     layout_source = (ROOT / "frontend/src/layouts/AppLayout.tsx").read_text(encoding="utf-8")
     css_source = (ROOT / "frontend/src/styles/global.css").read_text(encoding="utf-8")
     for section_key in (
-        "account-summary", "task-actions", "user-profile", "asset-curve",
+        "account-summary", "task-actions", "user-profile", "asset-curve", "daily-history",
         "paper-records", "risk-diagnostics", "cash-flow", "backfill", "proposals",
     ):
         assert section_key in section_source
@@ -135,3 +143,104 @@ def test_paper_sections_are_collapsible_and_layout_scrolls_independently() -> No
     assert 'className="app-content-scroll"' in layout_source
     assert "overflow-y: auto" in css_source
     assert "html, body, #root { height: 100%; margin: 0; overflow: hidden; }" in css_source
+
+
+def test_daily_history_returns_exact_positions_trades_and_same_day_ohlc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_dir = tmp_path / "outputs"
+    storage = PortfolioStorage(
+        tmp_path / "agent.db",
+        output_dir=output_dir / "portfolio" / "u1",
+        use_database=False,
+    )
+    position = create_position(
+        "u1",
+        "000001",
+        stock_name="平安银行",
+        quantity=100,
+        cost_price=10,
+        current_price=11,
+        total_assets=100000,
+    )
+    account = replace(
+        create_default_account("u1", 100000),
+        cash=98900,
+        position_market_value=1100,
+        total_assets=100000,
+    )
+    order = create_paper_order(
+        user_id="u1",
+        trade_date="2026-07-28",
+        stock_code="000001",
+        stock_name="平安银行",
+        action="buy",
+        target_weight=0.011,
+        executed_price=10.8,
+        quantity=100,
+        reason="daily verification",
+    )
+    storage.write_daily_snapshot(
+        account=account,
+        positions=[position],
+        orders=[order],
+        trade_date="2026-07-28",
+    )
+    monkeypatch.setattr(
+        web_read_service,
+        "load_signal_ohlc_data",
+        lambda: pd.DataFrame(
+            [
+                {
+                    "date": "2026-07-28",
+                    "code": "000001",
+                    "open": 10.5,
+                    "high": 11.2,
+                    "low": 10.3,
+                    "close": 11.0,
+                }
+            ]
+        ),
+    )
+
+    service = WebPaperTradingApplicationService(output_dir=output_dir, db_path=None)
+    payload = present_daily_history(service.daily_history("u1", "2026-07-28"))
+
+    assert payload["available_dates"] == ["2026-07-28"]
+    assert payload["has_position_snapshot"] is True
+    assert payload["positions"]["total"] == 1
+    assert payload["operations"]["total"] == 1
+    assert payload["summary"] == {
+        "position_count": 1,
+        "operation_count": 1,
+        "buy_count": 1,
+        "sell_count": 0,
+        "ohlc_matched_count": 1,
+        "ohlc_missing_count": 0,
+    }
+    operation = payload["operations"]["records"][0]
+    assert operation["stock_code"] == "000001"
+    assert operation["action"] == "buy"
+    assert [operation[key] for key in ("open", "high", "low", "close")] == [10.5, 11.2, 10.3, 11.0]
+    assert operation["ohlc_available"] is True
+
+    missing_day = present_daily_history(service.daily_history("u1", "2026-07-29"))
+    assert missing_day["has_position_snapshot"] is False
+    assert missing_day["positions"]["total"] == 0
+    assert missing_day["operations"]["total"] == 0
+
+
+def test_daily_history_frontend_uses_one_date_and_shows_ohlc() -> None:
+    component = (ROOT / "frontend/src/components/paper/DailyHistoryPanel.tsx").read_text(encoding="utf-8")
+    api = (ROOT / "frontend/src/api/paperTradingApi.ts").read_text(encoding="utf-8")
+    page = (ROOT / "frontend/src/pages/paper/PaperTradingPage.tsx").read_text(encoding="utf-8")
+
+    assert 'type="date"' in component
+    assert "当日买入卖出操作" in component
+    assert "当日收盘后历史持仓" in component
+    for label in ("开盘", "最高", "最低", "收盘"):
+        assert label in component
+    assert "paperTradingApi.history" in component
+    assert "trade_date: tradeDate" in api
+    assert "<DailyHistoryPanel" in page

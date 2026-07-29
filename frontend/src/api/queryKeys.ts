@@ -10,6 +10,7 @@ export const queryKeys = {
   settings: ['web', 'settings'] as const,
   monitor: ['web', 'monitor'] as const,
   paperTrading: (userId: string) => ['web', 'paper-trading', userId] as const,
+  paperHistory: (userId: string, tradeDate: string) => ['web', 'paper-trading', 'history', userId, tradeDate] as const,
   paperProfile: (userId: string) => ['web', 'paper-trading', 'profile', userId] as const,
   paperProposals: (userId: string) => ['web', 'paper-trading', 'proposals', userId] as const,
   tasks: (ownerId: string, sessionId = '') => ['tasks', ownerId, sessionId] as const,

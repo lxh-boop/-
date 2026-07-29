@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -130,6 +130,168 @@ class WebPaperTradingApplicationService:
             "backfill_status": load_paper_backfill_status(user_id, output_dir=self.output_dir) or {},
             "ai_reliability": load_current_ai_reliability_state(user_id, output_dir=self.output_dir) or {},
             "scheduler": load_scheduler_status_summary(self.output_dir) or {},
+        }
+
+    @staticmethod
+    def _trade_date(value: Any) -> str:
+        text = str(value or "").strip()
+        try:
+            return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
+        except ValueError as exc:
+            raise ValueError("invalid_trade_date") from exc
+
+    @staticmethod
+    def _normalized_code_series(series: Any) -> Any:
+        text = series.astype(str).str.strip()
+        extracted = text.str.extract(r"(\d{6})", expand=False)
+        return extracted.where(extracted.notna(), text).str.zfill(6)
+
+    @staticmethod
+    def _normalized_date_series(series: Any) -> Any:
+        import pandas as pd
+
+        text = series.astype(str).str.strip()
+        digits = text.str.replace(r"[^0-9]", "", regex=True).str.slice(0, 8)
+        compact = (
+            digits.str.slice(0, 4)
+            + "-"
+            + digits.str.slice(4, 6)
+            + "-"
+            + digits.str.slice(6, 8)
+        )
+        parsed = pd.to_datetime(text, errors="coerce").dt.strftime("%Y-%m-%d")
+        return compact.where(digits.str.len() == 8, parsed)
+
+    def _attach_daily_ohlc(self, orders: Any, trade_date: str) -> Any:
+        import pandas as pd
+
+        data = orders.copy()
+        for column in ("open", "high", "low", "close"):
+            if column in data.columns:
+                data = data.drop(columns=[column])
+            data[column] = None
+        data["ohlc_available"] = False
+        if data.empty or "stock_code" not in data.columns:
+            return data
+
+        from application.web_read_service import web_read_service
+
+        market = web_read_service.load_signal_ohlc_data()
+        required = {"code", "date", "open", "high", "low", "close"}
+        if market is None or getattr(market, "empty", True) or not required.issubset(set(market.columns)):
+            return data
+
+        daily = market.loc[:, ["code", "date", "open", "high", "low", "close"]].copy()
+        daily["_history_code"] = self._normalized_code_series(daily["code"])
+        daily["_history_date"] = self._normalized_date_series(daily["date"])
+        daily = daily[daily["_history_date"] == trade_date]
+        daily = daily.drop_duplicates(["_history_code", "_history_date"], keep="last")
+        daily = daily.drop(columns=["code", "date", "_history_date"])
+
+        data["_history_code"] = self._normalized_code_series(data["stock_code"])
+        data = data.drop(columns=["open", "high", "low", "close", "ohlc_available"]).merge(
+            daily,
+            how="left",
+            on="_history_code",
+            validate="many_to_one",
+        )
+        data["ohlc_available"] = data[["open", "high", "low", "close"]].notna().all(axis=1)
+        return data.drop(columns=["_history_code"])
+
+    def daily_history(self, user_id: str, trade_date: str) -> dict[str, Any]:
+        import pandas as pd
+
+        from portfolio.paper_account import (
+            load_daily_order_snapshot,
+            load_daily_position_snapshot,
+            load_paper_trading_snapshot,
+        )
+
+        user_id = self._user_id(user_id)
+        selected_date = self._trade_date(trade_date)
+        base_snapshot = load_paper_trading_snapshot(
+            user_id,
+            output_dir=self.output_dir,
+            db_path=self.db_path,
+        )
+        position_dates = {
+            str(item)
+            for item in (base_snapshot.get("position_snapshot_dates") or [])
+            if str(item or "").strip()
+        }
+        order_dates = {
+            str(item)
+            for item in (base_snapshot.get("order_snapshot_dates") or [])
+            if str(item or "").strip()
+        }
+        available_dates = sorted(position_dates | order_dates, reverse=True)
+
+        positions = load_daily_position_snapshot(
+            user_id,
+            selected_date,
+            output_dir=self.output_dir,
+            fallback=False,
+        )
+        orders = load_daily_order_snapshot(
+            user_id,
+            selected_date,
+            output_dir=self.output_dir,
+        )
+        if orders.empty and self.db_path and selected_date in order_dates:
+            try:
+                from portfolio.storage import PortfolioStorage
+
+                storage = PortfolioStorage(
+                    db_path=self.db_path,
+                    output_dir=self.output_dir / "portfolio" / user_id,
+                    use_database=True,
+                )
+                database_orders = [
+                    row
+                    for row in storage.repo.list_paper_orders(user_id=user_id)
+                    if str(row.get("trade_date") or "") == selected_date
+                ]
+                orders = pd.DataFrame(database_orders)
+            except Exception:
+                orders = pd.DataFrame()
+
+        if not orders.empty:
+            action = orders.get("action", pd.Series("", index=orders.index)).astype(str).str.lower()
+            paper_action = orders.get("paper_action", pd.Series("", index=orders.index)).astype(str).str.lower()
+            quantity = pd.to_numeric(orders.get("quantity", 0), errors="coerce").fillna(0)
+            orders = orders[
+                (action.isin(["buy", "sell"]) | paper_action.isin(["paper_buy", "paper_sell", "paper_reduce"]))
+                & (quantity > 0)
+            ].copy()
+        operations = self._attach_daily_ohlc(orders, selected_date)
+        if not operations.empty:
+            operations = operations.sort_values(["action", "stock_code"], kind="stable")
+
+        actions = (
+            operations.get("action", pd.Series("", index=operations.index))
+            .astype(str)
+            .str.lower()
+        )
+        ohlc_available = (
+            operations.get("ohlc_available", pd.Series(False, index=operations.index))
+            .fillna(False)
+            .astype(bool)
+        )
+        return {
+            "user_id": user_id,
+            "trade_date": selected_date,
+            "available_dates": available_dates,
+            "has_position_snapshot": selected_date in position_dates,
+            "positions": positions,
+            "operations": operations,
+            "summary": {
+                "position_count": int(len(positions)),
+                "operation_count": int(len(operations)),
+                "buy_count": int((actions == "buy").sum()),
+                "sell_count": int((actions == "sell").sum()),
+                "ohlc_matched_count": int(ohlc_available.sum()),
+                "ohlc_missing_count": int((~ohlc_available).sum()),
+            },
         }
 
     def profile(self, user_id: str) -> dict[str, Any]:

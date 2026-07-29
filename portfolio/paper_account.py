@@ -345,7 +345,7 @@ def load_daily_order_snapshot(user_id, trade_date, output_dir='.'):
             return _read_csv(path)
     return pd.DataFrame()
 
-def load_daily_position_snapshot(user_id, trade_date, output_dir='.'):
+def load_daily_position_snapshot(user_id, trade_date, output_dir='.', fallback=True):
     root = _portfolio_output_dir(user_id, output_dir)
     token = re.sub(r"\D", "", str(trade_date))[:8]
     exact_candidates = _dated_csv_candidates(root, "positions", "positions", trade_date)
@@ -353,6 +353,10 @@ def load_daily_position_snapshot(user_id, trade_date, output_dir='.'):
         df = _read_csv(path)
         if not df.empty:
             return df
+    if exact_candidates and not fallback:
+        return _read_csv(exact_candidates[0])
+    if not fallback:
+        return pd.DataFrame()
     prior = []
     for path in _dated_csv_candidates(root, "positions", "positions"):
         date_token = re.sub(r"\D", "", _date_from_snapshot_name(path, "positions"))[:8]

@@ -10,6 +10,7 @@ import { EmptyState } from '../../components/common/EmptyState'
 import { AccountSummary } from '../../components/paper/AccountSummary'
 import { AssetCurve } from '../../components/paper/AssetCurve'
 import { CashFlowPanel } from '../../components/paper/CashFlowPanel'
+import { DailyHistoryPanel } from '../../components/paper/DailyHistoryPanel'
 import { BackfillPanel } from '../../components/paper/BackfillPanel'
 import { PaperTables, RiskAndDiagnostics } from '../../components/paper/PaperTables'
 import { PaperTaskActions } from '../../components/paper/PaperTaskActions'
@@ -60,6 +61,10 @@ export function PaperTradingPage() {
   }
 
   const data = snapshot.data
+  const historyDates = [
+    ...data.position_snapshot_dates,
+    ...data.order_snapshot_dates,
+  ].map((value) => String(value ?? '')).filter(Boolean)
   return (
     <PaperSectionProvider>
       <Space direction="vertical" size="large" style={{ width: '100%' }}>
@@ -92,6 +97,7 @@ export function PaperTradingPage() {
       <PaperTaskActions profileComplete={data.profile_complete} />
       <UserProfileForm userId={userId} profile={data.profile} options={data.profile_options} complete={data.profile_complete} />
       <AssetCurve data={data.nav_history} />
+      <DailyHistoryPanel userId={userId} availableDates={historyDates} />
       <PaperTables positions={data.positions} orders={data.orders} decisions={data.decisions} cashFlows={data.cash_flows} />
       <RiskAndDiagnostics risk={data.risk_report} diagnostics={data.execution_diagnostics} settings={data.trading_settings} />
       <CashFlowPanel userId={userId} />

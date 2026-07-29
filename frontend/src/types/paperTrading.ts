@@ -24,6 +24,25 @@ export interface PaperTradingSnapshot {
   scheduler: GenericRecord
 }
 
+export interface PaperTradingHistorySummary {
+  position_count: number
+  operation_count: number
+  buy_count: number
+  sell_count: number
+  ohlc_matched_count: number
+  ohlc_missing_count: number
+}
+
+export interface PaperTradingDayHistory {
+  user_id: string
+  trade_date: string
+  available_dates: string[]
+  has_position_snapshot: boolean
+  positions: TablePayload<GenericRecord>
+  operations: TablePayload<GenericRecord>
+  summary: PaperTradingHistorySummary
+}
+
 export interface PaperProfilePayload {
   user_id: string
   profile: GenericRecord

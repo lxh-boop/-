@@ -30,6 +30,19 @@ def present_snapshot(value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def present_daily_history(value: dict[str, Any]) -> dict[str, Any]:
+    data = dict(value or {})
+    return {
+        "user_id": str(data.get("user_id") or ""),
+        "trade_date": str(data.get("trade_date") or ""),
+        "available_dates": to_browser_value(data.get("available_dates") or []),
+        "has_position_snapshot": bool(data.get("has_position_snapshot")),
+        "positions": table_payload(data.get("positions")),
+        "operations": table_payload(data.get("operations")),
+        "summary": to_browser_value(data.get("summary") or {}),
+    }
+
+
 def present_profile(value: dict[str, Any]) -> dict[str, Any]:
     data = dict(value or {})
     return {

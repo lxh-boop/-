@@ -9,6 +9,7 @@ import type {
   PaperProfilePayload,
   PaperProposal,
   PaperProposalList,
+  PaperTradingDayHistory,
   PaperTradingSnapshot,
   ProfileUpdateRequest,
   ProposalCommitRequest,
@@ -26,6 +27,7 @@ async function send<T>(method: 'post' | 'put', url: string, body: unknown): Prom
 
 export const paperTradingApi = {
   summary: (userId: string) => getWeb<PaperTradingSnapshot>(`${BASE}/summary`, { params: { user_id: userId } }),
+  history: (userId: string, tradeDate: string) => getWeb<PaperTradingDayHistory>(`${BASE}/history`, { params: { user_id: userId, trade_date: tradeDate } }),
   profile: (userId: string) => getWeb<PaperProfilePayload>(`${BASE}/profile`, { params: { user_id: userId } }),
   updateProfile: (request: ProfileUpdateRequest) => send<Record<string, unknown>>('put', `${BASE}/profile`, request),
   proposals: (userId: string) => getWeb<PaperProposalList>(`${BASE}/proposals`, { params: { user_id: userId } }),

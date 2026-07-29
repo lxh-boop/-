@@ -9,6 +9,7 @@ from fastapi import APIRouter, Query
 from application.web_paper_trading_service import web_paper_trading_service
 from server.api.contracts import OperationResponse
 from server.api.presenters.paper_trading import (
+    present_daily_history,
     present_profile,
     present_proposals,
     present_snapshot,
@@ -33,6 +34,7 @@ _SAFE_VALUE_ERRORS = {
     "start_date_required", "proposal_not_found", "confirmation_text_mismatch",
     "confirmation_token_missing_on_server", "cash_flow_cancel_confirmation_required",
     "paper_backfill_requires_task_runtime",
+    "invalid_trade_date",
 }
 
 def _safe_reason(exc: Exception) -> str:
@@ -84,6 +86,18 @@ def positions(user_id: str = Query("refactor_test", min_length=1)) -> OperationR
 @router.get("/orders", response_model=OperationResponse)
 def orders(user_id: str = Query("refactor_test", min_length=1)) -> OperationResponse:
     return _call(lambda: present_snapshot(web_paper_trading_service.snapshot(user_id))["orders"])
+
+
+@router.get("/history", response_model=OperationResponse)
+def history(
+    user_id: str = Query("refactor_test", min_length=1),
+    trade_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+) -> OperationResponse:
+    return _call(
+        lambda: present_daily_history(
+            web_paper_trading_service.daily_history(user_id, trade_date)
+        )
+    )
 
 
 @router.get("/profile", response_model=OperationResponse)

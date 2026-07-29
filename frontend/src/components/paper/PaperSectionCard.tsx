@@ -7,6 +7,7 @@ const DEFAULT_COLLAPSED: Record<string, boolean> = {
   'task-actions': false,
   'user-profile': false,
   'asset-curve': true,
+  'daily-history': false,
   'paper-records': false,
   'risk-diagnostics': true,
   'cash-flow': true,
