@@ -451,7 +451,7 @@ def validate_task_plan(goal: UserGoal, plan: TaskPlan, *, selected_capabilities:
         intents = {item.intent for item in plan.tasks}
         if "portfolio_risk" not in intents:
             errors.append("recommendation_missing_portfolio_risk")
-        if not ({"ranking", "stock_rag", "stock_news", "stock_analysis"} & intents or any(item.intent.startswith("mcp.") for item in plan.tasks)):
+        if not ({"ranking", "stock_rag", "stock_news", "stock_lookup"} & intents or any(item.intent.startswith("mcp.") for item in plan.tasks)):
             errors.append("recommendation_missing_market_evidence")
     return PlanValidationResult(valid=not errors, errors=errors, warnings=warnings, blocked=bool(errors), requires_approval=requires_approval)
 
@@ -659,7 +659,7 @@ def build_goal_planning_trace(raw_message: str, old_decomposition: IntentDecompo
         is_fallback
         and validation.valid
         and len(plan.tasks) == 1
-        and plan.tasks[0].intent in {"portfolio_state", "ranking", "stock_analysis", "general_help"}
+        and plan.tasks[0].intent in {"portfolio_state", "ranking", "stock_lookup", "general_help"}
     )
     fallback_diagnostics = dict(old_decomposition.diagnostics or {})
     flow_event(

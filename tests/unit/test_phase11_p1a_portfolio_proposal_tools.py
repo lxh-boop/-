@@ -6,7 +6,9 @@ from agent.capability_index import CapabilityIndexRepository
 from agent.agent_specs import RISK_OPERATION
 from agent.session.pending_action_store import get_pending_plan
 from agent.tool_engine import AGENT_MAIN, AGENT_READ, OP_PROPOSAL, OP_READ, OP_WRITE, execute_tool, get_tool_registry_v2
-from agent.tools.position_recommendation_tool import recommend_position_weight
+from application.use_cases.position_recommendation import (
+    recommend_position_weight,
+)
 from agent.tools.rebalance_plan_tool import preview_add_stock_to_paper
 from agent.write_gateway import execute_confirmed_plan_v2
 from agent_control_center_utils import write_agent_fixture

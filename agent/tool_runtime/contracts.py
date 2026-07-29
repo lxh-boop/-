@@ -14,6 +14,7 @@ OP_SYSTEM = "system"
 AGENT_MAIN = "main_agent"
 AGENT_READ = "read_worker"
 AGENT_WRITE = "write_worker"
+AGENT_WORKER = "worker_agent"
 
 TOOL_RESULT_SCHEMA_VERSION = "tool-result-v1"
 
@@ -84,11 +85,14 @@ class ToolDefinition:
     input_schema: dict[str, Any]
     output_schema: dict[str, Any]
     execution_handler: Callable[[dict[str, Any], dict[str, Any]], Any]
+    argument_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     supported_actions: list[str] = field(default_factory=list)
     supported_objects: list[str] = field(default_factory=list)
     produced_outputs: list[str] = field(default_factory=list)
+    required_dependency_outputs: list[str] = field(default_factory=list)
     operation_type: str = OP_READ
     allowed_agent_types: list[str] = field(default_factory=lambda: [AGENT_MAIN, AGENT_READ])
+    allowed_capability_ids: list[str] = field(default_factory=list)
     permission_scope: str = OP_READ
     requires_approval: bool = False
     runtime_policy: dict[str, Any] = field(default_factory=dict)
@@ -106,4 +110,5 @@ class ToolDefinition:
     def public_view(self) -> dict[str, Any]:
         data = asdict(self)
         data.pop("execution_handler", None)
+        data.pop("argument_builder", None)
         return data

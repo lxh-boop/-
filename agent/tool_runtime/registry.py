@@ -9,6 +9,7 @@ from .contracts import (
     OP_READ,
     OP_SYSTEM,
     OP_WRITE,
+    TOOL_VISIBILITY_PUBLIC,
     TOOL_VISIBILITIES,
     ToolDefinition,
 )
@@ -65,6 +66,13 @@ class ToolRegistry:
             raise ValueError(f"invalid_operation_type:{definition.name}")
         if definition.visibility not in TOOL_VISIBILITIES:
             raise ValueError(f"invalid_tool_visibility:{definition.name}")
+        if (
+            definition.visibility == "worker_private"
+            and not definition.allowed_capability_ids
+        ):
+            raise ValueError(
+                f"worker_private_tool_requires_capability_scope:{definition.name}"
+            )
         if definition.mutates_business_state and not definition.requires_approval:
             raise ValueError(
                 f"business_state_mutation_requires_approval:{definition.name}"
@@ -112,8 +120,14 @@ class ToolRegistry:
                     definition.input_schema.get("required") or []
                 ),
                 "produced_outputs": list(definition.produced_outputs),
+                "required_dependency_outputs": list(
+                    definition.required_dependency_outputs
+                ),
                 "operation_type": definition.operation_type,
                 "allowed_agent_types": list(definition.allowed_agent_types),
+                "allowed_capability_ids": list(
+                    definition.allowed_capability_ids
+                ),
                 "requires_approval": bool(definition.requires_approval),
                 "version": definition.version,
                 "test_status": "passed",
@@ -127,5 +141,8 @@ class ToolRegistry:
                 "idempotency": definition.idempotency,
                 "audit_level": definition.audit_level,
             }
-            for definition in self.list(agent_type=agent_type)
+            for definition in self.list(
+                agent_type=agent_type,
+                visibility=TOOL_VISIBILITY_PUBLIC,
+            )
         ]

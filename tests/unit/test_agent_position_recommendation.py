@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from agent.tools.position_recommendation_tool import recommend_position_weight
+from application.use_cases.position_recommendation import (
+    recommend_position_weight,
+)
 from agent_control_center_utils import write_agent_fixture
 
 

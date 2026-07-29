@@ -20,7 +20,7 @@ def test_stage5b_frontend_page_files_are_removed() -> None:
         assert not (root / name).exists()
 
 
-def test_backend_agent_and_pipeline_files_are_kept() -> None:
+def test_current_backend_agent_and_pipeline_files_are_kept() -> None:
     kept = [
         "database",
         "rag",
@@ -28,13 +28,11 @@ def test_backend_agent_and_pipeline_files_are_kept() -> None:
         "portfolio",
         "pipelines",
         "skills",
-        "agent/pipeline_tool.py",
-        "agent/recommendation_tool.py",
-        "agent/portfolio_tool.py",
-        "agent/rag_tool.py",
-        "agent/report_tool.py",
-        "agent/decision_log_tool.py",
-        "agent/agent_registry.py",
+        "agent/executor.py",
+        "agent/tool_engine.py",
+        "agent/collaboration/planner.py",
+        "agent/collaboration/integration.py",
+        "agent/worker_tools",
     ]
 
     for path in kept:

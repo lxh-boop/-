@@ -7,6 +7,7 @@ authorizes, validates, executes, and audits registered capabilities.
 from .contracts import (
     AGENT_MAIN,
     AGENT_READ,
+    AGENT_WORKER,
     AGENT_WRITE,
     OP_PROPOSAL,
     OP_READ,
@@ -34,6 +35,7 @@ from .validation import (
 __all__ = [
     "AGENT_MAIN",
     "AGENT_READ",
+    "AGENT_WORKER",
     "AGENT_WRITE",
     "OP_PROPOSAL",
     "OP_READ",

@@ -60,7 +60,9 @@ AI 只能做解释、证据检索、信号融合和 paper trading 计划生成�
 
 - `scoring/schemas.py`：合规免责声明和输出字段过滤。
 - `pipelines/daily_update_pipeline.py`：prediction -> rag -> scoring -> paper -> report 的受控流程。
-- `agent/tools/tool_registry.py`、`agent/tools/tool_schemas.py`：Agent 工具边界。
+- `agent/tool_engine.py`、`agent/tool_runtime/`：规范工具注册、权限、审批、校验和执行边界。
+- `agent/worker_tools/`：按 capability 隔离的 Worker 私有原子工具目录。
+- `agent/tools/*_adapters.py`、`application/use_cases/`：Agent 工具适配与可复用业务函数边界。
 - `portfolio/storage.py`：模拟盘落盘统一入口。
 
 ## 废弃字段和旧逻辑

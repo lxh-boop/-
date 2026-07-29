@@ -11,7 +11,9 @@ from agent.logic_integrity import (
 from agent.replan_execution import consume_readonly_replan
 from agent.runtime_reliability import RuntimeBudget, RuntimeBudgetExceeded, RuntimePolicy
 from agent.top_k import resolve_business_top_k
-from agent.tools.portfolio_comparison_tools import _allocation_validation_feedback
+from application.use_cases.portfolio_comparison import (
+    _allocation_validation_feedback,
+)
 
 
 def test_llm_budget_limits_are_disabled_without_disabling_tool_limit():

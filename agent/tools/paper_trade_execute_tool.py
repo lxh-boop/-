@@ -14,9 +14,9 @@ from agent.session.confirmation_manager import (
     mark_plan_revalidation_failed,
     validate_confirmation,
 )
-from agent.tools._common import is_valid_agent_price, now_text, safe_float
+from application.use_cases.common import is_valid_agent_price, now_text, safe_float
 from agent.tools.audit_tool import write_agent_action_log, write_agent_confirmation_log
-from agent.tools.portfolio_state_tool import query_portfolio_state
+from agent.services.portfolio_service import portfolio_service
 from agent.tools.tool_schemas import PaperTradeExecutionResult, ToolPermission, ToolResult
 from pipelines.paper_trading_pipeline import run_paper_trading_pipeline
 from pipelines.schemas import PipelineContext, PipelineStatus
@@ -654,7 +654,11 @@ def execute_confirmed_paper_trade_plan(
         )
     before = dict(plan.get("before") or plan.get("before_state_summary") or {})
     if before:
-        current_state = query_portfolio_state(user_id, output_dir=output_dir, db_path=db_path)
+        current_state = portfolio_service.get_portfolio_state(
+            user_id,
+            output_dir=output_dir,
+            db_path=db_path,
+        )
         mismatches: list[str] = []
         for field in ["cash", "total_assets", "position_count"]:
             if field not in before:

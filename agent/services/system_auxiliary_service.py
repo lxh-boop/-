@@ -3,15 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from agent.tools.report_tool import query_latest_reports
-from agent.tools.scheduler_tool import query_scheduler_status
+from application.use_cases.system_queries import (
+    list_latest_reports,
+    read_scheduler_status,
+)
 
 
 class SystemAuxiliaryService:
     """Read-only/system helpers exposed to the Agent through v2 tools."""
 
     def scheduler_status(self, *, root: str | Path = ".") -> dict[str, Any]:
-        data = query_scheduler_status(root)
+        data = read_scheduler_status(root)
         success = str(data.get("status") or "").lower() in {"success", "missing_status"}
         return {
             "success": success,
@@ -27,7 +29,7 @@ class SystemAuxiliaryService:
         }
 
     def list_latest_reports(self, *, output_dir: str | Path = "outputs") -> dict[str, Any]:
-        data = query_latest_reports(output_dir)
+        data = list_latest_reports(output_dir)
         success = str(data.get("status") or "").lower() in {"success", "no_reports"}
         return {
             "success": success,

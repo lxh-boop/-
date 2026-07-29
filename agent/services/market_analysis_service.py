@@ -6,7 +6,7 @@ from typing import Any
 
 import pandas as pd
 
-from agent.tools._common import (
+from application.use_cases.common import (
     dataframe_records,
     first_present,
     latest_trade_date,
@@ -14,7 +14,7 @@ from agent.tools._common import (
     safe_int,
 )
 from agent.top_k import DEFAULT_TOOL_TOP_K, resolve_requested_top_k
-from agent.tools.tool_schemas import ToolPermission, ToolResult
+from application.contracts import BusinessResult
 
 
 CLASSIC_AI_COLUMNS = [
@@ -460,12 +460,10 @@ class MarketAnalysisService:
         db_path: str | Path | None = None,
         top_k: int = 50,
         include_rag: bool = True,
-        *,
-        tool_name: str = "market.analyze_stock",
-    ) -> ToolResult:
-        from agent.tools.stock_analysis_tool import _analyze_stock_impl
+    ) -> BusinessResult:
+        from application.use_cases.stock_analysis import analyze_stock
 
-        result = _analyze_stock_impl(
+        result = analyze_stock(
             user_id,
             stock_code,
             as_of_date=as_of_date,
@@ -498,15 +496,12 @@ class MarketAnalysisService:
                 "not_executed": True,
             }
         )
-        return ToolResult(
+        return BusinessResult(
             success=bool(result.success),
             message=str(result.message or ""),
             data=data,
             warnings=list(result.warnings or []),
             errors=list(result.errors or []),
-            permission=ToolPermission.READ,
-            tool_name=tool_name,
-            disclaimer=result.disclaimer,
             status=result.status,
         )
 
@@ -554,7 +549,7 @@ class MarketAnalysisService:
                 "not_executed": True,
             },
             "warnings": warnings,
-            "tool_name": "market.compare_stocks",
+            "function_name": "market_analysis_service.compare_stocks",
         }
 
     def _canonical_ranking(self, ranking: pd.DataFrame) -> pd.DataFrame:

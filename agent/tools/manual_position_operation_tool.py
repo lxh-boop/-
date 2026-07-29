@@ -9,17 +9,17 @@ from pathlib import Path
 from typing import Any
 
 from agent.session.confirmation_manager import create_confirmation_plan
-from agent.tools._common import normalize_stock_code, safe_float
+from application.use_cases.common import normalize_stock_code, safe_float
 from agent.tools.audit_tool import write_agent_action_log, write_agent_confirmation_log
-from agent.tools.portfolio_state_tool import query_portfolio_state
-from agent.tools.portfolio_risk_tool import query_portfolio_risk
-from agent.tools.ranking_tool import query_ranking
+from agent.services.market_analysis_service import market_analysis_service
+from agent.services.portfolio_risk_service import portfolio_risk_service
+from agent.services.portfolio_service import portfolio_service
 from agent.tools.rebalance_plan_tool import (
     preview_add_stock_to_paper,
     preview_adjust_position_to_weight,
 )
 from agent.tools.tool_schemas import ToolPermission, ToolResult
-from agent.tools.user_profile_tool import query_user_profile
+from application.use_cases.system_queries import read_user_profile
 from portfolio.trading_cost_config import calculate_trade_cost, default_trading_cost_config
 
 
@@ -187,21 +187,32 @@ def _preview_stable_portfolio_rebalance(
             tool_name="manual_position_operation_tool",
         )
 
-    profile_context = query_user_profile(user_id, db_path=db_path, output_dir=output_dir)
+    profile_context = read_user_profile(
+        user_id,
+        db_path=db_path,
+        output_dir=output_dir,
+    )
     constraints = dict(profile_context.get("constraints") or {})
     max_single = max(0.01, min(1.0, safe_float(constraints.get("max_single_position"), 0.08)))
     max_industry = max(max_single, min(1.0, safe_float(constraints.get("max_industry_position"), 0.30)))
     requested_cash = None if cash_weight is None else max(0.0, min(1.0, float(cash_weight)))
     minimum_cash = max(current_cash / total_assets, requested_cash or 0.0)
 
-    ranking = query_ranking(top_k=max(10, int(top_k or 50)), output_dir=output_dir)
+    ranking = market_analysis_service.get_ranking(
+        top_k=max(10, int(top_k or 50)),
+        output_dir=output_dir,
+    )
     ranking_rows = [dict(item or {}) for item in (ranking.get("records") or [])]
     ranking_by_code = {
         normalize_stock_code(row.get("code") or row.get("stock_code")): row
         for row in ranking_rows
         if normalize_stock_code(row.get("code") or row.get("stock_code"))
     }
-    current_risk = query_portfolio_risk(user_id, output_dir=output_dir, db_path=db_path)
+    current_risk = portfolio_risk_service.analyze_current_risk(
+        user_id,
+        output_dir=output_dir,
+        db_path=db_path,
+    )
     cost_config = default_trading_cost_config(user_id)
 
     before_positions: list[dict[str, Any]] = []
@@ -491,7 +502,11 @@ def preview_manual_position_operation(
     session_id: str = "",
 ) -> ToolResult:
     code = normalize_stock_code(stock_code)
-    state = query_portfolio_state(user_id, output_dir=output_dir, db_path=db_path)
+    state = portfolio_service.get_portfolio_state(
+        user_id,
+        output_dir=output_dir,
+        db_path=db_path,
+    )
     if not bool(state.get("safe_to_continue", state.get("consistency_status") != "rejected")):
         return ToolResult(
             success=False,

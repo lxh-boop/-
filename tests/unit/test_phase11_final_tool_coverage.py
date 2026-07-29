@@ -6,7 +6,6 @@ import pandas as pd
 
 from agent.capability_index import build_trusted_capability_index
 from agent.tool_engine import AGENT_MAIN, AGENT_READ, OP_WRITE, execute_tool, get_tool_registry_v2
-from agent.tools.tool_registry import get_tool_registry
 from agent_control_center_utils import write_agent_fixture
 from database.repositories import NewsRepository
 
@@ -17,15 +16,6 @@ def _v2_name_set() -> set[str]:
     for definition in registry.list():
         names.update(definition.legacy_names)
     return names
-
-
-def test_final_all_legacy_registry_entries_are_covered_by_v2_aliases() -> None:
-    legacy_names = set(get_tool_registry().keys())
-    v2_names = _v2_name_set()
-
-    assert legacy_names <= v2_names
-    assert "strategy_builder_tool" in v2_names
-    assert "strategy_management_tool" in v2_names
 
 
 def test_final_capability_index_is_built_from_v2_registry_only() -> None:
@@ -57,7 +47,7 @@ def test_final_write_tools_require_approval_and_mcp_write_is_not_exposed() -> No
         agent_type=AGENT_MAIN,
     )
     blocked_mcp = execute_tool(
-        "mcp.readonly.invoke",
+        "evidence.invoke_mcp_readonly",
         {"mcp_tool_name": "mcp.local_financial_evidence.unsafe_write_trade", "arguments": {"stock_code": "000001"}},
         context={"mcp": {"servers": []}},
         agent_type=AGENT_READ,
@@ -70,20 +60,22 @@ def test_final_write_tools_require_approval_and_mcp_write_is_not_exposed() -> No
 
 
 def test_final_agent_default_path_has_no_read_tool_direct_fallbacks() -> None:
-    multi_task_source = Path("agent/orchestration/multi_task_executor.py").read_text(encoding="utf-8")
+    specialist_source = Path(
+        "agent/collaboration/specialist_runtime.py"
+    ).read_text(encoding="utf-8")
     executor_source = Path("agent/executor.py").read_text(encoding="utf-8")
 
-    forbidden_multi_task_calls = [
+    forbidden_worker_calls = [
         "query_portfolio_state(",
         "query_portfolio_risk(",
         "query_stock_news(",
         "query_stock_rag(",
     ]
-    for marker in forbidden_multi_task_calls:
-        assert marker not in multi_task_source
+    for marker in forbidden_worker_calls:
+        assert marker not in specialist_source
 
     assert "prepare_strategy_change(" not in executor_source
-    assert '"strategy_builder_tool"' in executor_source
+    assert "execute_unified_agent_request(" in executor_source
 
 
 def test_final_representative_tools_create_artifacts(tmp_path: Path) -> None:
@@ -115,9 +107,9 @@ def test_final_representative_tools_create_artifacts(tmp_path: Path) -> None:
     context = {"user_id": "u1", "output_dir": output_dir, "db_path": db_path, "session_id": "s_final"}
     results = [
         execute_tool("ranking", {"top_k": 1}, context=context, agent_type=AGENT_READ),
-        execute_tool("stock_analysis", {"user_id": "u1", "stock_code": "600519", "include_rag": False}, context=context, agent_type=AGENT_READ),
+        execute_tool("stock_lookup", {"user_id": "u1", "stock_code": "600519"}, context=context, agent_type=AGENT_READ),
         execute_tool("stock_news", {"stock_code": "600519", "as_of_date": "2026-06-12"}, context=context, agent_type=AGENT_READ),
-        execute_tool("portfolio_state", {"user_id": "u1"}, context=context, agent_type=AGENT_READ),
+        execute_tool("portfolio.read_snapshot", {"user_id": "u1"}, context=context, agent_type=AGENT_READ),
         execute_tool("portfolio.analyze_risk", {"user_id": "u1"}, context=context, agent_type=AGENT_READ),
         execute_tool("portfolio.preview_rebalance", {"user_id": "u1", "stock_code": "600519"}, context=context, agent_type=AGENT_MAIN),
     ]
@@ -126,8 +118,9 @@ def test_final_representative_tools_create_artifacts(tmp_path: Path) -> None:
     assert all(result.artifact_id for result in results)
 
 
-def test_final_legacy_wrappers_have_removal_plan_comments() -> None:
-    wrappers = [
+def test_removed_nonwrite_compatibility_wrappers_do_not_return() -> None:
+    removed_paths = [
+        "agent/tools/tool_registry.py",
         "agent/tools/ranking_tool.py",
         "agent/tools/stock_lookup_tool.py",
         "agent/tools/stock_analysis_tool.py",
@@ -135,9 +128,12 @@ def test_final_legacy_wrappers_have_removal_plan_comments() -> None:
         "agent/tools/stock_rag_tool.py",
         "agent/tools/portfolio_state_tool.py",
         "agent/tools/portfolio_risk_tool.py",
+        "agent/tools/position_recommendation_tool.py",
+        "agent/tools/python_sandbox_tool.py",
+        "agent/tools/replacement_recommendation_tool.py",
+        "agent/tools/report_tool.py",
+        "agent/tools/scheduler_tool.py",
+        "agent/tools/user_profile_tool.py",
     ]
 
-    for path in wrappers:
-        source = Path(path).read_text(encoding="utf-8")
-        assert "Compatibility wrapper" in source
-        assert "planned_removal_phase=post_phase11_1_legacy_cleanup" in source
+    assert all(not Path(path).exists() for path in removed_paths)

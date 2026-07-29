@@ -356,7 +356,7 @@ class CriticEngine:
             approval_refs=list(approval_refs or []),
             revision_instruction=self._revision_instruction(action),
             replan_hint="Use existing read-only ReplanPolicy; do not auto-commit." if action == CriticAction.REPLAN_READONLY else "",
-            handoff_hint="Record only; Phase 17 router will decide specialist routing." if action == CriticAction.HANDOFF_REQUESTED else "",
+            handoff_hint="Record only; the Main Agent decides any follow-up capability." if action == CriticAction.HANDOFF_REQUESTED else "",
             requires_user_confirmation=action == CriticAction.REQUIRE_APPROVAL,
             metadata=self.sanitizer.sanitize_for_context(metadata or {}),
         )

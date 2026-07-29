@@ -1,8 +1,4 @@
-"""Regression tests for the stable GraphProviderAdapter facade.
-
-The suite covers payload normalization, private identifier resolution, facade
-delegation, and preservation of the original dataclass fields.
-"""
+"""Regression tests for atomic GraphProviderAdapter operations."""
 
 from __future__ import annotations
 
@@ -12,11 +8,13 @@ from unittest.mock import Mock
 
 from agent.graph.contracts import GraphNodeKind, GraphRef
 from agent.graph.provider_adapter import GraphProviderAdapter
+from agent.graph.providers.portfolio import PortfolioGraphProvider
 from agent.graph.providers.common import (
     ProviderIdentityResolver,
     records_from_payload,
     sources_from_payload,
 )
+from agent_control_center_utils import write_agent_fixture
 
 
 def _object_ref() -> GraphRef:
@@ -61,8 +59,12 @@ def test_graph_provider_adapter_delegates_to_domain_adapters() -> None:
     adapter._portfolio_provider = Mock()
     adapter._risk_provider = Mock()
     adapter._evidence_provider.analyze_entities.return_value = {"success": True}
-    adapter._evidence_provider.retrieve_evidence.return_value = {"success": True}
-    adapter._portfolio_provider.load_portfolio_snapshot.return_value = {"success": True}
+    adapter._evidence_provider.search_evidence.return_value = {"success": True}
+    adapter._evidence_provider.ingest_evidence.return_value = {"success": True}
+    adapter._portfolio_provider.read_portfolio_snapshot.return_value = {
+        "success": True
+    }
+    adapter._portfolio_provider.materialize_portfolio_snapshot.return_value = {"success": True}
     adapter._risk_provider.analyze_risk.return_value = {"success": True}
     ref = _object_ref()
 
@@ -72,22 +74,29 @@ def test_graph_provider_adapter_delegates_to_domain_adapters() -> None:
         output_dir="outputs",
         db_path=None,
     ) == {"success": True}
-    assert adapter.retrieve_evidence(
+    assert adapter.search_evidence(
         [ref],
         query="分析",
         top_k=5,
         output_dir="outputs",
         db_path=None,
-        source_task_id="task-1",
-        source_agent_id="EVIDENCE_RETRIEVER",
     ) == {"success": True}
-    assert adapter.load_portfolio_snapshot(
+    assert adapter.ingest_evidence(
+        [{"focus_ref": ref.to_dict(), "records": []}],
+        source_task_id="task-1",
+        source_agent_id="worker",
+    ) == {"success": True}
+    assert adapter.read_portfolio_snapshot(
         user_id="u1",
         output_dir="outputs",
         db_path=None,
+    ) == {"success": True}
+    assert adapter.materialize_portfolio_snapshot(
+        {"success": True},
+        user_id="u1",
         as_of_time="",
         source_task_id="task-2",
-        source_agent_id="PORTFOLIO_ANALYST",
+        source_agent_id="worker",
     ) == {"success": True}
     assert adapter.analyze_risk(
         user_id="u1",
@@ -96,8 +105,10 @@ def test_graph_provider_adapter_delegates_to_domain_adapters() -> None:
     ) == {"success": True}
 
     adapter._evidence_provider.analyze_entities.assert_called_once()
-    adapter._evidence_provider.retrieve_evidence.assert_called_once()
-    adapter._portfolio_provider.load_portfolio_snapshot.assert_called_once()
+    adapter._evidence_provider.search_evidence.assert_called_once()
+    adapter._evidence_provider.ingest_evidence.assert_called_once()
+    adapter._portfolio_provider.read_portfolio_snapshot.assert_called_once()
+    adapter._portfolio_provider.materialize_portfolio_snapshot.assert_called_once()
     adapter._risk_provider.analyze_risk.assert_called_once()
 
 
@@ -107,3 +118,23 @@ def test_graph_provider_adapter_keeps_original_dataclass_fields() -> None:
         "evidence_ingestion",
         "portfolio_graph",
     ]
+
+
+def test_portfolio_graph_provider_reads_atomic_snapshot(tmp_path) -> None:
+    output_dir, db_path = write_agent_fixture(
+        tmp_path,
+        with_position=True,
+        price=10.0,
+    )
+    provider = PortfolioGraphProvider(portfolio_graph=SimpleNamespace())
+
+    snapshot = provider.read_portfolio_snapshot(
+        user_id="u1",
+        output_dir=output_dir,
+        db_path=db_path,
+    )
+
+    assert snapshot["success"] is True
+    assert snapshot["position_count"] == 1
+    assert snapshot["account_summary"]["total_assets"] > 0
+    assert "orders" not in snapshot

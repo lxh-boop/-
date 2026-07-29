@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.session.confirmation_manager import create_confirmation_plan, mark_plan_executed, validate_confirmation
-from agent.tools._common import now_text, safe_float
+from application.use_cases.common import now_text, safe_float
 from agent.tools.audit_tool import write_agent_action_log, write_agent_confirmation_log
 from agent.tools.tool_schemas import ToolPermission, ToolResult
 from portfolio.cash_flow import add_cash_flow, parse_date_text

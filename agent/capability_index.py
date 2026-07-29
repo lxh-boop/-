@@ -4,7 +4,7 @@ import hashlib
 import json
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from agent.agent_specs import (
@@ -13,21 +13,18 @@ from agent.agent_specs import (
     REPORTING,
     RISK_OPERATION,
     SUPERVISOR,
-    get_agent_spec,
-    list_agent_specs,
 )
 from agent.tool_engine import OP_READ, OP_SYSTEM, ToolDefinition, get_tool_registry_v2
-from agent.tools.tool_registry import ToolCategory, ToolSpec, get_tool_registry
-from agent.tools.tool_schemas import ToolPermission
+from agent.tool_runtime import TOOL_VISIBILITY_PUBLIC
 
 
 INDEX_BUILDER_VERSION = "phase10.3-capability-index-v1"
-REGISTRY_VERSION = "tool-registry-v2+legacy-preview-v1"
+REGISTRY_VERSION = "tool-registry-v2"
 PERMISSION_VERSION = "agent-allowlist-v1"
 MCP_CONFIG_VERSION = "mcp-allowlist-v1"
 
 CORE_CAPABILITY_IDS = {
-    "tool:portfolio_state",
+    "tool:portfolio.read_snapshot",
     "tool:portfolio_risk",
     "tool:ranking",
     "tool:scheduler_status",
@@ -37,25 +34,21 @@ CORE_CAPABILITY_IDS = {
 OUTPUTS_BY_TOOL: dict[str, set[str]] = {
     "portfolio_state": {"portfolio_state", "position_count", "account_summary"},
     "portfolio_risk": {"current_risk", "risk_factors", "limitations"},
-    "portfolio.get_state": {"portfolio_state", "position_count", "account_summary", "positions", "orders"},
-    "portfolio.get_account_summary": {"account_summary", "cash_state", "account"},
-    "portfolio.get_positions": {"positions", "position_weights", "position_count"},
-    "portfolio.get_orders": {"orders", "order_count", "latest_trade_date"},
+    "portfolio.read_snapshot": {"portfolio_snapshot", "position_count", "account_summary", "positions", "position_weights"},
+    "portfolio.list_orders": {"orders", "order_count", "latest_trade_date"},
+    "portfolio.calculate_target_portfolio": {"target_portfolio", "target_positions", "current_risk_snapshot", "target_risk_snapshot", "limitations"},
+    "portfolio.save_target_artifact": {"target_portfolio_ref", "artifact_id"},
     "portfolio.analyze_risk": {"current_risk", "risk_factors", "limitations", "risk_summary"},
     "portfolio.compare_risk_before_after": {"risk_before_after", "delta", "summary", "limitations"},
     "ranking": {"market_evidence", "evidence", "candidate_stocks", "reasons", "limitations"},
     "stock_lookup": {"stock_lookup", "market_evidence", "evidence", "reasons", "limitations"},
     "classic_stock_score": {"stock_lookup", "market_evidence", "evidence", "reasons", "limitations"},
     "classic_ranking": {"market_evidence", "evidence", "candidate_stocks", "signal_summary", "reasons", "limitations"},
-    "market.compare_stocks": {"stock_comparison", "market_evidence", "evidence", "reasons", "limitations"},
     "stock_news": {"market_evidence", "evidence", "news_events", "reasons", "limitations"},
     "stock_rag": {"market_evidence", "evidence", "rag_contexts", "reasons", "limitations"},
     "news_search": {"market_evidence", "evidence", "news_events", "sources", "reasons", "limitations"},
     "rag_search": {"market_evidence", "evidence", "rag_contexts", "sources", "limitations"},
-    "evidence.get_stock_evidence": {"market_evidence", "evidence", "sources", "reasons", "limitations"},
-    "evidence.get_market_evidence": {"market_evidence", "evidence", "sources", "reasons", "limitations"},
-    "mcp_market_risk_summary": {"market_evidence", "evidence", "mcp_sources", "sources", "limitations"},
-    "stock_analysis": {"stock_analysis", "market_evidence", "evidence", "reasons", "limitations"},
+    "evidence.invoke_mcp_readonly": {"market_evidence", "evidence", "mcp_sources", "sources", "limitations"},
     "position_recommendation": {"target_position", "reasons", "limitations"},
     "replacement_recommendation": {"replacement_candidates", "score_comparison", "risk_comparison", "reasons", "limitations"},
     "manual_position_operation_tool": {"operation_preview", "risk_impact", "confirmation_request"},
@@ -71,7 +64,6 @@ OUTPUTS_BY_TOOL: dict[str, set[str]] = {
     "scheduler_status": {"scheduler_status"},
     "user_profile": {"user_profile", "constraints", "risk_assessment", "investment_goal"},
     "python_sandbox_analysis": {"sandbox_result", "calculation", "warnings"},
-    "mcp_tool": {"market_evidence", "evidence", "mcp_sources", "limitations"},
     "report": {"report_summary"},
     "report_latest": {"report_summary"},
 }
@@ -79,25 +71,21 @@ OUTPUTS_BY_TOOL: dict[str, set[str]] = {
 ACTION_BY_TOOL: dict[str, set[str]] = {
     "portfolio_state": {"query_portfolio_state"},
     "portfolio_risk": {"analyze_portfolio_risk", "recommend_portfolio", "recommend_portfolio_adjustment"},
-    "portfolio.get_state": {"query_portfolio_state"},
-    "portfolio.get_account_summary": {"query_portfolio_state"},
-    "portfolio.get_positions": {"query_portfolio_state"},
-    "portfolio.get_orders": {"query_portfolio_state"},
+    "portfolio.read_snapshot": {"query_portfolio_state"},
+    "portfolio.list_orders": {"query_portfolio_orders"},
+    "portfolio.calculate_target_portfolio": {"recommend_portfolio", "recommend_portfolio_adjustment"},
+    "portfolio.save_target_artifact": {"persist_derived_artifact"},
     "portfolio.analyze_risk": {"analyze_portfolio_risk", "recommend_portfolio", "recommend_portfolio_adjustment"},
     "portfolio.compare_risk_before_after": {"analyze_portfolio_risk", "recommend_portfolio", "recommend_portfolio_adjustment"},
     "ranking": {"recommend_portfolio", "recommend_portfolio_adjustment", "explain_previous_plan", "explain_portfolio_decision"},
     "stock_lookup": {"query_stock", "analyze_stock", "explain_previous_plan"},
     "classic_stock_score": {"query_stock", "analyze_stock", "explain_previous_plan"},
     "classic_ranking": {"recommend_portfolio", "recommend_portfolio_adjustment", "explain_previous_plan"},
-    "market.compare_stocks": {"compare_stocks", "analyze_stock", "explain_previous_plan"},
     "stock_news": {"explain_previous_plan", "explain_portfolio_decision"},
     "stock_rag": {"explain_previous_plan", "explain_portfolio_decision"},
     "news_search": {"retrieve_evidence", "explain_previous_plan", "explain_portfolio_decision"},
     "rag_search": {"retrieve_evidence", "explain_previous_plan", "explain_portfolio_decision"},
-    "evidence.get_stock_evidence": {"retrieve_evidence", "explain_previous_plan", "explain_portfolio_decision"},
-    "evidence.get_market_evidence": {"retrieve_evidence", "explain_previous_plan", "explain_portfolio_decision"},
-    "mcp_market_risk_summary": {"retrieve_evidence"},
-    "stock_analysis": {"analyze_stock"},
+    "evidence.invoke_mcp_readonly": {"retrieve_evidence"},
     "position_recommendation": {"recommend_position"},
     "replacement_recommendation": {"recommend_replacement"},
     "manual_position_operation_tool": {"preview_write_operation"},
@@ -113,7 +101,6 @@ ACTION_BY_TOOL: dict[str, set[str]] = {
     "scheduler_status": {"query_scheduler_status"},
     "user_profile": {"query_user_profile"},
     "python_sandbox_analysis": {"run_readonly_python_analysis"},
-    "mcp_tool": {"retrieve_evidence"},
     "report": {"query_report"},
     "report_latest": {"query_report"},
 }
@@ -277,78 +264,13 @@ def _input_names(schema: dict[str, Any] | None, *, required: bool) -> list[str]:
     return [str(name) for name in properties if name not in required_set]
 
 
-def _permission_scope(spec: ToolSpec) -> str:
-    if spec.permission == ToolPermission.READ:
-        return "read"
-    if spec.permission == ToolPermission.PREVIEW:
-        return "preview"
-    return "write"
-
-
-def _allowed_agents_for_tool(tool_name: str, spec: ToolSpec) -> list[str]:
-    allowed: set[str] = set()
-    for item in list_agent_specs():
-        if tool_name in set(item.get("tool_whitelist") or []):
-            allowed.add(str(item.get("role") or ""))
-    if spec.permission == ToolPermission.READ and tool_name in {"ranking", "portfolio_state", "portfolio_risk", "scheduler_status", "report"}:
-        allowed.add(SUPERVISOR)
-    if spec.permission == ToolPermission.PREVIEW:
-        allowed.add(RISK_OPERATION)
-    if spec.permission == ToolPermission.WRITE:
-        allowed.add(RISK_OPERATION)
-    if tool_name.startswith("mcp."):
-        allowed.add(MARKET_INTELLIGENCE)
-    return sorted(allowed)
-
-
-def _record_from_tool(name: str, spec: ToolSpec) -> CapabilityRecord:
-    produced = sorted(OUTPUTS_BY_TOOL.get(name) or {"tool_result"})
-    actions = sorted(ACTION_BY_TOOL.get(name) or {"fallback_intent"})
-    module_name = getattr(spec.handler, "__module__", "")
-    content = {
-        "name": name,
-        "permission": spec.permission,
-        "description": spec.description,
-        "produced_outputs": produced,
-        "actions": actions,
-        "allowed_agents": _allowed_agents_for_tool(name, spec),
-        "schema": spec.input_schema,
-    }
-    return CapabilityRecord(
-        capability_id=f"tool:{name}",
-        name=name,
-        description=spec.description,
-        supported_goal_actions=actions,
-        supported_objects=["current_portfolio"] if "portfolio" in name or name in {"ranking", "position_recommendation"} else [],
-        required_inputs=_input_names(spec.input_schema, required=True),
-        optional_inputs=_input_names(spec.input_schema, required=False),
-        produced_outputs=produced,
-        read_or_write="read" if spec.permission == ToolPermission.READ else "write",
-        tool_or_workflow="tool",
-        registered_tool_names=[name],
-        allowed_agent_types=_allowed_agents_for_tool(name, spec),
-        permission_scope=_permission_scope(spec),
-        requires_approval=bool(spec.requires_confirmation),
-        runtime_policy={
-            "timeout_seconds": spec.timeout_seconds,
-            "retry_policy": dict(spec.retry_policy or {}),
-            "concurrency_safe": bool(spec.concurrency_safe),
-        },
-        fallback_capabilities=[],
-        implementation_files=[module_name] if module_name else [],
-        version="1",
-        test_status="passed",
-        enabled=True,
-        sensitivity="normal" if spec.permission == ToolPermission.READ else "restricted",
-        content_hash=_hash_payload(content),
-    )
-
-
 def _allowed_agents_for_unified_tool(definition: ToolDefinition) -> list[str]:
     name = str(definition.name or "")
     allowed: set[str] = {SUPERVISOR}
     if name.startswith("market."):
         allowed.update({MARKET_INTELLIGENCE, PORTFOLIO_ANALYSIS, REPORTING})
+    elif name.startswith("evidence."):
+        allowed.update({MARKET_INTELLIGENCE, REPORTING})
     elif name.startswith("portfolio."):
         if definition.operation_type == OP_READ:
             allowed.update({PORTFOLIO_ANALYSIS, REPORTING})
@@ -416,44 +338,6 @@ def _record_from_unified_tool(definition: ToolDefinition) -> CapabilityRecord:
     )
 
 
-def _workflow_records() -> list[CapabilityRecord]:
-    content = {
-        "workflow": "readonly_target_portfolio_allocation",
-        "tools": ["portfolio_state", "portfolio_risk", "ranking"],
-        "outputs": ["target_portfolio_allocation", "target_portfolio", "current_vs_target"],
-    }
-    return [
-        CapabilityRecord(
-            capability_id="workflow:readonly_target_portfolio_allocation",
-            name="readonly_target_portfolio_allocation",
-            description="Combine portfolio state, risk and ranking evidence into a read-only target portfolio allocation.",
-            supported_goal_actions=[
-                "generate_target_portfolio_allocation",
-                "recommend_portfolio",
-                "recommend_portfolio_adjustment",
-            ],
-            supported_objects=["current_portfolio", "market_evidence"],
-            required_inputs=["portfolio_state", "portfolio_risk", "ranking"],
-            optional_inputs=[],
-            produced_outputs=["target_portfolio_allocation", "target_portfolio", "current_vs_target", "reasons", "limitations"],
-            read_or_write="read",
-            tool_or_workflow="workflow",
-            registered_tool_names=["portfolio_state", "portfolio_risk", "ranking"],
-            allowed_agent_types=[SUPERVISOR, PORTFOLIO_ANALYSIS, REPORTING],
-            permission_scope="read",
-            requires_approval=False,
-            runtime_policy={"concurrency_safe": True, "uses_existing_task_outputs": True},
-            fallback_capabilities=["tool:ranking", "tool:stock_news", "tool:stock_rag"],
-            implementation_files=["agent.orchestration.result_aggregator"],
-            version="1",
-            test_status="passed",
-            enabled=True,
-            sensitivity="normal",
-            content_hash=_hash_payload(content),
-        )
-    ]
-
-
 def build_trusted_capability_index(
     *,
     include_mcp: bool = False,
@@ -461,11 +345,15 @@ def build_trusted_capability_index(
 ) -> CapabilityIndex:
     """Trusted builder: builds an index from registered tools and allowlists only."""
 
-    records = [_record_from_unified_tool(definition) for definition in get_tool_registry_v2().list()]
-    records.extend(_workflow_records())
+    records = [
+        _record_from_unified_tool(definition)
+        for definition in get_tool_registry_v2().list(
+            visibility=TOOL_VISIBILITY_PUBLIC
+        )
+    ]
     records = [record for record in records if record.enabled and record.allowed_agent_types]
     content_hash = _hash_payload([record.to_dict(agent_view=False) for record in records])
-    generated_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     index_version = f"capidx-{content_hash[:12]}"
     return CapabilityIndex(
         index_version=index_version,

@@ -10,7 +10,7 @@
 
 - 真实检索入口：`rag.hybrid_retriever.HybridRetriever`
 - 日更 RAG 入口：`pipelines/rag_pipeline.py`
-- Agent 轻量 RAG 工具：`agent/tools/stock_rag_tool.py` 和 `agent/rag_tool.py`
+- Agent RAG 工具：由 `agent/tool_engine.py` 注册，并通过 `agent/tools/evidence_adapters.py` 调用统一证据服务
 - Reranker：`rag/reranker.py`，安装 `sentence-transformers` 且 CrossEncoder 可用时启用，否则按 `hybrid_score` fallback
 - LLM 客户端：`llm_client.LLMClient`
 - 新闻 chunk：`rag/schemas.py::RagChunk` 与 SQLite `news_chunk`

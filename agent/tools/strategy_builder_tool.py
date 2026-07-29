@@ -7,7 +7,7 @@ from typing import Any
 
 from agent.session.confirmation_manager import create_confirmation_plan
 from agent.tools.audit_tool import write_agent_action_log, write_agent_confirmation_log
-from agent.tools._common import now_text, safe_int
+from application.use_cases.common import now_text, safe_int
 from agent.tools.tool_schemas import ToolPermission, ToolResult
 from strategies.adapters.hierarchical_top10_strategy import HierarchicalTop10Strategy
 from strategies.registry import StrategyManifest, get_strategy_registry

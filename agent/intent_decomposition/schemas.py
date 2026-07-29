@@ -30,7 +30,6 @@ EXECUTABLE_INTENTS = {
     "ranking",
     "portfolio_state",
     "portfolio_risk",
-    "stock_analysis",
     "stock_news",
     "stock_rag",
     "position_recommendation",
@@ -53,8 +52,7 @@ EXECUTABLE_INTENTS = {
     "classic_stock_score",
     "classic_ranking",
     "python_sandbox_analysis",
-    "portfolio.design_target_portfolio",
-    "portfolio.construct_target_portfolio",
+    "portfolio.calculate_target_portfolio",
     "portfolio.load_target_portfolio",
     "portfolio.compare_portfolios",
 }

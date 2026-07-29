@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-import agent.tools.portfolio_comparison_tools as portfolio_tools
-from agent.tools.portfolio_comparison_tools import (
+import application.use_cases.portfolio_comparison as portfolio_tools
+from agent.tool_engine import get_tool_registry_v2
+from agent.tool_runtime import TOOL_VISIBILITY_SYSTEM_PRIVATE
+from application.use_cases.portfolio_comparison import (
     TargetPortfolioStore,
-    compare_portfolios_adapter,
-    construct_target_portfolio_adapter,
-    design_target_portfolio_adapter,
-    load_target_portfolio_adapter,
+    calculate_target_portfolio,
+    compare_portfolios,
+    design_target_portfolio,
+    load_target_portfolio,
+    save_target_portfolio_artifact,
 )
 
 
@@ -54,8 +58,25 @@ def _ranking() -> dict:
     }
 
 
-def test_construct_requires_llm_design_instead_of_asking_user_to_design(tmp_path: Path):
-    result = construct_target_portfolio_adapter(
+def test_target_portfolio_tools_separate_calculation_from_persistence():
+    registry = get_tool_registry_v2()
+    calculation = registry.get("portfolio.calculate_target_portfolio")
+    persistence = registry.get("portfolio.save_target_artifact")
+
+    assert calculation is not None
+    assert calculation.operation_type == "read"
+    assert persistence is not None
+    assert persistence.operation_type == "system"
+    assert persistence.visibility == TOOL_VISIBILITY_SYSTEM_PRIVATE
+    assert persistence.side_effects == [
+        "derived_target_portfolio_artifact_write"
+    ]
+    assert registry.get("portfolio.construct_target_portfolio") is None
+    assert registry.get("construct_target_portfolio") is None
+
+
+def test_calculation_requires_llm_design_instead_of_asking_user_to_design(tmp_path: Path):
+    result = calculate_target_portfolio(
         {
             "current_portfolio": _current_portfolio(),
             "ranking": _ranking(),
@@ -76,6 +97,9 @@ def test_construct_requires_llm_design_instead_of_asking_user_to_design(tmp_path
 
 def test_llm_design_uses_real_sources_and_does_not_ask_for_user_parameters(monkeypatch, tmp_path: Path):
     class FakeDesignClient:
+        last_usage = {}
+        is_available = True
+
         def __init__(self, api_key=None, base_url=None, model=None):
             self.api_key = api_key or "test-key"
             self.base_url = base_url or ""
@@ -110,8 +134,17 @@ def test_llm_design_uses_real_sources_and_does_not_ask_for_user_parameters(monke
               }
             }"""
 
-    monkeypatch.setattr(portfolio_tools, "LLMClient", FakeDesignClient)
-    designed = design_target_portfolio_adapter(
+        def generate_json(self, *, messages, **kwargs):
+            del kwargs
+            return json.loads(self.chat(messages))
+
+    fake_design_service = FakeDesignClient()
+    monkeypatch.setattr(
+        portfolio_tools,
+        "_runtime_llm_service",
+        lambda context: fake_design_service,
+    )
+    designed = design_target_portfolio(
         {
             "query": "推荐一个更稳健的持仓",
             "user_goal": {"action": "construct", "constraints": ["more_stable"]},
@@ -139,7 +172,7 @@ def test_llm_design_uses_real_sources_and_does_not_ask_for_user_parameters(monke
     assert design["design_rationale"]
 
 
-def test_construct_save_load_and_compare_are_read_only(tmp_path: Path):
+def test_calculate_save_load_and_compare_are_read_only(tmp_path: Path):
     context = {
         "output_dir": tmp_path,
         "conversation_id": "conversation-1",
@@ -148,7 +181,7 @@ def test_construct_save_load_and_compare_are_read_only(tmp_path: Path):
         "run_id": "run-1",
         "task_id": "task-5",
     }
-    constructed = construct_target_portfolio_adapter(
+    calculated = calculate_target_portfolio(
         {
             "user_id": "u1",
             "current_portfolio": _current_portfolio(),
@@ -174,22 +207,35 @@ def test_construct_save_load_and_compare_are_read_only(tmp_path: Path):
         },
         context,
     )
-    assert constructed["success"] is True
-    assert constructed["data"]["not_executed"] is True
-    assert constructed["data"]["target_risk_snapshot"]["max_single_weight"] < 0.45
-    assert constructed["data"]["target_risk_snapshot"]["concentration_hhi"] < 0.405
-    artifact_id = constructed["data"]["artifact_id"]
+    assert calculated["success"] is True
+    assert calculated["data"]["not_executed"] is True
+    assert calculated["data"]["target_risk_snapshot"]["max_single_weight"] < 0.45
+    assert calculated["data"]["target_risk_snapshot"]["concentration_hhi"] < 0.405
+    assert TargetPortfolioStore(tmp_path).list_refs(
+        user_id="u1",
+        conversation_id="conversation-1",
+    ) == []
+
+    saved = save_target_portfolio_artifact(
+        {
+            "user_id": "u1",
+            "target_portfolio": calculated["data"]["target_portfolio"],
+        },
+        context,
+    )
+    assert saved["success"] is True
+    artifact_id = saved["data"]["artifact_id"]
 
     refs = TargetPortfolioStore(tmp_path).list_refs(user_id="u1", conversation_id="conversation-1")
     assert [item["artifact_id"] for item in refs] == [artifact_id]
 
-    loaded = load_target_portfolio_adapter(
+    loaded = load_target_portfolio(
         {"user_id": "u1", "artifact_id": artifact_id},
         context,
     )
     assert loaded["success"] is True
 
-    compared = compare_portfolios_adapter(
+    compared = compare_portfolios(
         {
             "current_portfolio": _current_portfolio(),
             "target_portfolio": loaded["data"]["target_portfolio"],
@@ -204,7 +250,7 @@ def test_construct_save_load_and_compare_are_read_only(tmp_path: Path):
 
 
 def test_load_without_unique_reference_asks_user(tmp_path: Path):
-    result = load_target_portfolio_adapter(
+    result = load_target_portfolio(
         {"user_id": "u1"},
         {"output_dir": tmp_path, "conversation_id": "empty"},
     )
@@ -212,31 +258,8 @@ def test_load_without_unique_reference_asks_user(tmp_path: Path):
     assert result["data"]["need_clarification"] is True
 
 
-def test_task_argument_sources_pass_structured_portfolios():
-    from agent.orchestration.argument_resolver import resolve_task_arguments
-
-    task_results = {
-        "task_1": {"data": {"positions": [{"stock_code": "000001"}]}},
-        "task_2": {"data": {"target_portfolio": {"target_positions": [{"stock_code": "000002"}]}}},
-    }
-    args = resolve_task_arguments(
-        {
-            "intent": "portfolio.compare_portfolios",
-            "parameters": {
-                "current_portfolio_source": "$task_1.data",
-                "target_portfolio_source": "$task_2.data.target_portfolio",
-            },
-        },
-        task_results=task_results,
-        context={"user_id": "u1"},
-        default_top_k=10,
-    )
-    assert args["current_portfolio"]["positions"][0]["stock_code"] == "000001"
-    assert args["target_portfolio"]["target_positions"][0]["stock_code"] == "000002"
-
-
 def test_failed_llm_design_returns_replan_instead_of_asking_user_to_design(tmp_path: Path):
-    result = construct_target_portfolio_adapter(
+    result = calculate_target_portfolio(
         {
             "current_portfolio": _current_portfolio(),
             "ranking": _ranking(),
@@ -264,8 +287,11 @@ def test_failed_llm_design_returns_replan_instead_of_asking_user_to_design(tmp_p
     assert result["data"]["validation_stage"] == "construction_precondition_validation"
 
 
-def test_construct_returns_auditable_replan_request_after_deterministic_failure(monkeypatch, tmp_path: Path):
+def test_calculation_returns_auditable_replan_request_after_deterministic_failure(monkeypatch, tmp_path: Path):
     class FakeRedesignClient:
+        last_usage = {}
+        is_available = True
+
         def __init__(self, api_key=None, base_url=None, model=None):
             self.api_key = api_key
 
@@ -289,8 +315,17 @@ def test_construct_returns_auditable_replan_request_after_deterministic_failure(
               }
             }"""
 
-    monkeypatch.setattr(portfolio_tools, "LLMClient", FakeRedesignClient)
-    result = construct_target_portfolio_adapter(
+        def generate_json(self, *, messages, **kwargs):
+            del kwargs
+            return json.loads(self.chat(messages))
+
+    fake_redesign_service = FakeRedesignClient()
+    monkeypatch.setattr(
+        portfolio_tools,
+        "_runtime_llm_service",
+        lambda context: fake_redesign_service,
+    )
+    result = calculate_target_portfolio(
         {
             "query": "推荐一个更稳健的持仓",
             "user_goal": {"action": "construct"},

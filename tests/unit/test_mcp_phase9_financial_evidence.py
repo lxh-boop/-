@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import sqlite3
 
-from agent.executor import _normalise_readonly_multi_agent_tasks
 from agent.mcp.client_manager import call_stats, reset_call_stats
 from agent.mcp.config import build_mcp_context_from_local_config
 from agent.mcp.discovery import discover_mcp_tools, discovery_stats, reset_discovery_cache
@@ -14,10 +13,8 @@ from agent.mcp.registry_bridge import (
     list_mcp_tool_specs,
     select_relevant_mcp_tools,
 )
-from agent.orchestration.multi_task_executor import execute_multi_intent_plan
 from agent.runtime import AgentRuntimeRecorder
-from agent.runtime_reliability import RuntimePolicy
-from agent.tools.tool_registry import get_tool_registry, list_tools
+from agent.tool_engine import OP_READ, get_tool_registry_v2
 
 
 def _ranking_fixture(tmp_path):
@@ -60,18 +57,42 @@ def test_mcp_discovery_success_for_enabled_example() -> None:
     assert default_example_tool_name() in mapped
 
 
-def test_mcp_schema_maps_to_existing_tool_spec() -> None:
+def test_mcp_schema_maps_to_v2_tool_definition() -> None:
     spec = get_mcp_tool_spec(default_example_tool_name(), _ctx())
 
     assert spec is not None
     assert spec.name.startswith("mcp.local_financial_evidence.")
-    assert spec.read_only is True
-    assert spec.permission == "read"
+    assert spec.operation_type == OP_READ
+    assert spec.mutates_business_state is False
+    assert spec.enabled is True
     assert "query" in spec.input_schema["properties"]
 
 
+def test_mcp_v2_tool_definition_executes_readonly_handler(tmp_path) -> None:
+    output_dir = _ranking_fixture(tmp_path)
+    context = {
+        **_ctx(),
+        "output_dir": str(output_dir),
+    }
+    spec = get_mcp_tool_spec(default_example_tool_name(), context)
+
+    assert spec is not None
+    result = spec.execution_handler(
+        {"query": "stable portfolio", "top_k": 1},
+        context,
+    )
+
+    assert result["success"] is True
+    assert spec.operation_type == OP_READ
+    assert spec.mutates_business_state is False
+    assert result["data"]["untrusted_evidence"] is True
+
+
 def test_mcp_namespace_does_not_conflict_with_local_registry() -> None:
-    local_names = set(get_tool_registry())
+    registry = get_tool_registry_v2()
+    local_names = {definition.name for definition in registry.list()}
+    for definition in registry.list():
+        local_names.update(definition.legacy_names)
     mcp_names = {spec.name for spec in list_mcp_tool_specs(_ctx())}
 
     assert default_example_tool_name() in mcp_names
@@ -79,7 +100,7 @@ def test_mcp_namespace_does_not_conflict_with_local_registry() -> None:
 
 
 def test_disabled_server_is_not_listed_or_discovered_by_default_page_tools() -> None:
-    assert list_tools()  # default local list still works
+    assert get_tool_registry_v2().list()
     assert discovery_stats()["discovery_count"] == {}
     assert select_relevant_mcp_tools(query="stable portfolio", context=_ctx(False)) == []
 
@@ -114,20 +135,6 @@ def test_argument_validation_failure_does_not_send_call() -> None:
     assert "mcp_args_invalid" in ",".join(result.errors)
     assert result.data["call_attempted"] is False
     assert call_stats() == {}
-
-
-def test_mcp_readonly_call_uses_runtime_policy_metadata(tmp_path) -> None:
-    output_dir = _ranking_fixture(tmp_path)
-    plan = {"tasks": [{"task_id": "task_mcp", "intent": default_example_tool_name(), "parameters": {"query": "stable portfolio", "top_k": 2}}]}
-
-    result = execute_multi_intent_plan(plan, user_id="u1", output_dir=output_dir, context=_ctx())
-    call = result["tool_calls"][0]
-
-    assert result["success"] is True
-    assert call["tool_name"] == default_example_tool_name()
-    assert call["runtime_reliability"]["tool_name"] == default_example_tool_name()
-    assert call["mcp"]["provider_type"] == "mcp"
-    assert call["mcp"]["circuit_state"] == "closed"
 
 
 def test_prompt_injection_text_is_only_untrusted_data(tmp_path) -> None:
@@ -173,91 +180,23 @@ def test_mcp_tool_calls_and_sources_are_recorded_without_secrets(tmp_path) -> No
     assert "local_financial_evidence" in source_row[1]
 
 
-def test_mcp_timeout_falls_back_to_local_ranking(tmp_path) -> None:
-    output_dir = _ranking_fixture(tmp_path)
-    name = default_example_tool_name()
-    plan = {"tasks": [{"task_id": "task_mcp", "intent": name, "parameters": {"query": "stable portfolio", "top_k": 2}}]}
-    policy = RuntimePolicy.default().to_dict()
-    policy["tool_timeout_seconds"] = 0.05
-    policy["max_retry_attempts"] = 1
-    policy["tool_overrides"] = {name: {"tool_timeout_seconds": 0.05, "max_retry_attempts": 1}}
-
-    result = execute_multi_intent_plan(
-        plan,
-        user_id="u1",
-        output_dir=output_dir,
-        context=_ctx(True, mcp_fail_mode="timeout", mcp_timeout_sleep_seconds=0.2, runtime_policy=policy),
-    )
-
-    assert result["success"] is True
-    assert any(call["tool_name"] == "ranking" for call in result["tool_calls"])
-    assert result["replan_audit"][0]["trigger_reason"] == "mcp_evidence_use_local_ranking_fallback"
-    assert result["tool_calls"][0]["mcp"]["fallback_used"] is True
-
-
-def test_mcp_dependency_failure_opens_circuit_and_falls_back(tmp_path) -> None:
-    output_dir = _ranking_fixture(tmp_path)
-    name = default_example_tool_name()
-    policy = RuntimePolicy.default().to_dict()
-    policy["max_retry_attempts"] = 1
-    policy["circuit_failure_threshold"] = 1
-    plan = {"tasks": [{"task_id": "task_mcp", "intent": name, "parameters": {"query": "stable portfolio", "top_k": 2}}]}
-
-    result = execute_multi_intent_plan(
-        plan,
-        user_id="u1",
-        output_dir=output_dir,
-        context=_ctx(True, mcp_fail_mode="dependency", runtime_policy=policy),
-    )
-
-    assert result["success"] is True
-    assert result["tool_calls"][0]["runtime_reliability"]["error_type"] == "dependency"
-    assert result["tool_calls"][0]["runtime_reliability"]["circuit_state"] == "open"
-    assert any(call["tool_name"] == "ranking" for call in result["tool_calls"])
-
-
-def test_stable_recommendation_planner_selects_mcp_when_available() -> None:
-    market_tasks, portfolio_tasks = _normalise_readonly_multi_agent_tasks(
-        query="Recommend a more robust paper portfolio holding",
-        decomposition={"tasks": [{"intent": "portfolio_state"}, {"intent": "portfolio_risk"}, {"intent": "ranking"}]},
-        default_top_k=5,
-        context=_ctx(),
-    )
-
-    assert market_tasks[0]["intent"] == default_example_tool_name()
-    assert [task["intent"] for task in portfolio_tasks] == ["portfolio_state", "portfolio_risk"]
-
-
-def test_mcp_unavailable_uses_local_ranking_candidate() -> None:
-    market_tasks, _ = _normalise_readonly_multi_agent_tasks(
-        query="Recommend a more robust paper portfolio holding",
-        decomposition={"tasks": [{"intent": "portfolio_state"}, {"intent": "portfolio_risk"}, {"intent": "ranking"}]},
-        default_top_k=5,
-        context=_ctx(False),
-    )
-
-    assert market_tasks[0]["intent"] == "ranking"
-
-
-def test_pure_holdings_query_does_not_select_mcp() -> None:
-    market_tasks, portfolio_tasks = _normalise_readonly_multi_agent_tasks(
-        query="current positions",
-        decomposition={"tasks": [{"intent": "portfolio_state"}]},
-        default_top_k=5,
-        context=_ctx(),
-    )
-
-    assert market_tasks == []
-    assert [task["intent"] for task in portfolio_tasks] == ["portfolio_state"]
-
-
 def test_page_tool_listing_does_not_trigger_mcp_discovery() -> None:
     reset_discovery_cache()
 
-    tools = list_tools()
+    tools = [
+        definition.public_view()
+        for definition in get_tool_registry_v2().list()
+    ]
 
     assert tools
-    assert all(not tool["name"].startswith("mcp.") for tool in tools)
+    assert any(
+        tool["name"] == "evidence.invoke_mcp_readonly"
+        for tool in tools
+    )
+    assert all(
+        not tool["name"].startswith("mcp.local_financial_evidence.")
+        for tool in tools
+    )
     assert discovery_stats()["discovery_count"] == {}
 
 

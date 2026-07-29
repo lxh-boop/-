@@ -3,7 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from agent.tools.tool_schemas import ToolPermission, ToolResult
+from agent.tools.tool_schemas import (
+    PAPER_AGENT_DISCLAIMER,
+    ToolPermission,
+    ToolResult,
+)
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -15,7 +19,7 @@ def _as_dict(value: Any) -> dict[str, Any]:
 
 
 def _wrap_result(
-    result: ToolResult,
+    result: Any,
     *,
     tool_name: str,
     permission: str | None = None,
@@ -32,12 +36,21 @@ def _wrap_result(
         data=data,
         warnings=merged_warnings,
         errors=list(result.errors or []),
-        permission=permission or result.permission,
+        permission=permission or getattr(
+            result,
+            "permission",
+            ToolPermission.READ,
+        ),
         tool_name=tool_name,
-        disclaimer=result.disclaimer,
-        status=result.status,
-        requires_confirmation=bool(result.requires_confirmation),
-        confirmation_token=result.confirmation_token,
+        disclaimer=str(
+            getattr(result, "disclaimer", PAPER_AGENT_DISCLAIMER)
+            or PAPER_AGENT_DISCLAIMER
+        ),
+        status=str(getattr(result, "status", "") or ""),
+        requires_confirmation=bool(
+            getattr(result, "requires_confirmation", False)
+        ),
+        confirmation_token=getattr(result, "confirmation_token", None),
     )
 
 
@@ -59,7 +72,9 @@ class PortfolioProposalService:
         db_path: str | Path | None = None,
         top_k: int = 50,
     ) -> ToolResult:
-        from agent.tools.position_recommendation_tool import recommend_position_weight
+        from application.use_cases.position_recommendation import (
+            recommend_position_weight,
+        )
 
         result = recommend_position_weight(
             user_id,
@@ -106,7 +121,9 @@ class PortfolioProposalService:
         db_path: str | Path | None = None,
         limit: int = 3,
     ) -> ToolResult:
-        from agent.tools.replacement_recommendation_tool import recommend_replacements
+        from application.use_cases.replacement_recommendation import (
+            recommend_replacements,
+        )
 
         result = recommend_replacements(
             user_id,
@@ -283,7 +300,12 @@ class PortfolioProposalService:
             data_patch=patch,
         )
 
-    def _proposal_contract(self, result: ToolResult, *, tool_name: str) -> ToolResult:
+    def _proposal_contract(
+        self,
+        result: Any,
+        *,
+        tool_name: str,
+    ) -> ToolResult:
         data = dict(result.data or {})
         before = _as_dict(data.get("before"))
         after = _as_dict(data.get("after"))

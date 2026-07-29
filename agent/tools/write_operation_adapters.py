@@ -14,9 +14,6 @@ from agent.tools.strategy_workflow_tools import (
     create_strategy_binding_rollback_plan,
     create_strategy_apply_plan,
     preview_current_strategy_position_change,
-    get_active_strategy_proposal,
-    get_strategy_audit_trace,
-    get_strategy_context,
     prepare_strategy_implementation,
     save_strategy_proposal_draft,
 )
@@ -40,58 +37,6 @@ def _db_path(context: dict[str, Any]) -> str | Path | None:
 
 def _session_id(context: dict[str, Any]) -> str:
     return str(context.get("session_id") or context.get("conversation_id") or "")
-
-
-def strategy_get_context_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
-    user_id = str(_context_value(args, context, "user_id", "default"))
-    return get_strategy_context(
-        user_id=user_id,
-        account_id=str(
-            _context_value(args, context, "account_id", f"paper_{user_id}")
-        ),
-        conversation_id=str(
-            _context_value(args, context, "conversation_id", _session_id(context))
-        ),
-        output_dir=_output_dir(context),
-        db_path=_db_path(context),
-    )
-
-
-def strategy_get_active_proposal_adapter(
-    args: dict[str, Any],
-    context: dict[str, Any],
-) -> Any:
-    user_id = str(_context_value(args, context, "user_id", "default"))
-    return get_active_strategy_proposal(
-        user_id=user_id,
-        account_id=str(
-            _context_value(args, context, "account_id", f"paper_{user_id}")
-        ),
-        conversation_id=str(
-            _context_value(args, context, "conversation_id", _session_id(context))
-        ),
-        db_path=_db_path(context),
-    )
-
-
-def strategy_get_audit_trace_adapter(
-    args: dict[str, Any],
-    context: dict[str, Any],
-) -> Any:
-    return get_strategy_audit_trace(
-        user_id=str(_context_value(args, context, "user_id", "default")),
-        proposal_id=str(args.get("proposal_id") or ""),
-        implementation_id=str(args.get("implementation_id") or ""),
-        plan_id=str(args.get("plan_id") or ""),
-        commit_id=str(args.get("commit_id") or ""),
-        binding_id=str(args.get("binding_id") or ""),
-        run_id=str(_context_value(args, context, "run_id", "")),
-        conversation_id=str(
-            _context_value(args, context, "conversation_id", _session_id(context))
-        ),
-        output_dir=_output_dir(context),
-        db_path=_db_path(context),
-    )
 
 
 def strategy_save_proposal_draft_adapter(

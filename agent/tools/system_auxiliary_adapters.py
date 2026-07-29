@@ -1,9 +1,10 @@
+"""Agent-only system tools backed by read-only application operations."""
+
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
-from agent.services.mcp_readonly_client import mcp_readonly_client
 from agent.services.python_sandbox_service import python_sandbox_service
 from agent.services.system_auxiliary_service import system_auxiliary_service
 from agent.services.user_profile_service import user_profile_service
@@ -39,7 +40,10 @@ def _int_value(value: Any, default: int) -> int:
         return int(default)
 
 
-def user_profile_get_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_user_profile_query_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     return user_profile_service.get_user_profile(
         str(_context_value(args, context, "user_id", "default")),
         output_dir=_output_dir(context),
@@ -47,7 +51,10 @@ def user_profile_get_adapter(args: dict[str, Any], context: dict[str, Any]) -> A
     )
 
 
-def python_sandbox_analysis_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_python_sandbox_analysis_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     return python_sandbox_service.run_analysis(
         str(args.get("code") or ""),
         snapshot=dict(args.get("snapshot") or {}),
@@ -57,23 +64,27 @@ def python_sandbox_analysis_adapter(args: dict[str, Any], context: dict[str, Any
     )
 
 
-def scheduler_status_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_scheduler_status_query_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     return system_auxiliary_service.scheduler_status(
         root=args.get("root") or context.get("root") or ".",
     )
 
 
-def report_list_latest_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
+def execute_latest_report_list_tool(
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> Any:
     return system_auxiliary_service.list_latest_reports(
         output_dir=args.get("output_dir") or _output_dir(context),
     )
 
 
-def mcp_readonly_invoke_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
-    tool_name = str(args.get("mcp_tool_name") or args.get("tool_name") or "")
-    arguments = args.get("arguments") if isinstance(args.get("arguments"), dict) else {}
-    return mcp_readonly_client.invoke(
-        tool_name,
-        arguments,
-        context=context,
-    )
+__all__ = [
+    "execute_latest_report_list_tool",
+    "execute_python_sandbox_analysis_tool",
+    "execute_scheduler_status_query_tool",
+    "execute_user_profile_query_tool",
+]

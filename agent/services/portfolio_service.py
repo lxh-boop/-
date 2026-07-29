@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from agent.tools._common import portfolio_user_dir, safe_float
+from application.use_cases.common import portfolio_user_dir, safe_float
 from portfolio.portfolio_snapshot import (
     PortfolioSnapshotConsistencyError,
     build_portfolio_snapshot,
@@ -104,13 +104,26 @@ class PortfolioService:
     def _storage(self, user_id: str, output_dir: str | Path, db_path: str | Path | None) -> PortfolioStorage:
         return PortfolioStorage(db_path, output_dir=portfolio_user_dir(output_dir, user_id))
 
-    def _sources(self, user_id: str, output_dir: str | Path, db_path: str | Path | None) -> list[dict[str, Any]]:
+    def _portfolio_sources(
+        self,
+        user_id: str,
+        output_dir: str | Path,
+        db_path: str | Path | None,
+    ) -> list[dict[str, Any]]:
         storage = self._storage(user_id, output_dir, db_path)
         return [
             _source("paper_account_latest", storage.account_latest_path),
             _source("paper_positions_latest", storage.positions_latest_path),
-            _source("paper_orders_latest", storage.orders_latest_path),
         ]
+
+    def _order_sources(
+        self,
+        user_id: str,
+        output_dir: str | Path,
+        db_path: str | Path | None,
+    ) -> list[dict[str, Any]]:
+        storage = self._storage(user_id, output_dir, db_path)
+        return [_source("paper_orders_latest", storage.orders_latest_path)]
 
     def _snapshot(
         self,
@@ -122,7 +135,7 @@ class PortfolioService:
         user = str(user_id or "default")
         account = self.account_repository.load_account(user, output_dir=output_dir, db_path=db_path)
         positions = self.portfolio_repository.load_positions(user, output_dir=output_dir, db_path=db_path)
-        sources = self._sources(user, output_dir, db_path)
+        sources = self._portfolio_sources(user, output_dir, db_path)
         try:
             return build_portfolio_snapshot(
                 account,
@@ -267,7 +280,7 @@ class PortfolioService:
             "orders": rows,
             "order_count": len(rows),
             "latest_trade_date": latest_trade_date,
-            "sources": self._sources(user, output_dir, db_path),
+            "sources": self._order_sources(user, output_dir, db_path),
             "not_executed": True,
             "mutation_performed": False,
         }
@@ -340,7 +353,7 @@ class PortfolioService:
             "mutation_performed": False,
         }
 
-    def get_portfolio_state(
+    def read_portfolio_snapshot(
         self,
         user_id: str,
         *,
@@ -352,7 +365,6 @@ class PortfolioService:
         account_dict = dict(snapshot.get("account") or {})
         position_rows = [dict(item) for item in (snapshot.get("positions") or [])]
         active_positions = _active_positions(position_rows)
-        orders = self.get_current_orders(user, output_dir=output_dir, db_path=db_path)
         total_assets = safe_float(snapshot.get("total_assets"), 0.0)
         weights = {
             str(row.get("stock_code") or ""): safe_float(row.get("market_value"), 0.0) / total_assets
@@ -371,21 +383,30 @@ class PortfolioService:
         }
         summary = {
             "position_count": len(active_positions),
-            "order_count": orders["order_count"],
             "cash": account_summary["cash"],
             "total_assets": account_summary["total_assets"],
             "position_market_value": account_summary["position_market_value"],
             "cash_ratio": account_summary["cash_ratio"],
         }
+        safe_to_continue = bool(
+            snapshot.get(
+                "safe_to_continue",
+                snapshot.get("consistency_status") != "rejected",
+            )
+        )
         return {
+            "success": safe_to_continue,
+            "message": (
+                "Portfolio snapshot read."
+                if safe_to_continue
+                else "Portfolio snapshot is inconsistent."
+            ),
             "user_id": user,
             "account": account_dict,
             "account_summary": account_summary,
             "positions": position_rows,
             "active_positions": active_positions,
-            "orders": orders["orders"],
             "position_count": len(active_positions),
-            "order_count": orders["order_count"],
             "cash": summary["cash"],
             "total_assets": summary["total_assets"],
             "cash_state": {
@@ -396,7 +417,7 @@ class PortfolioService:
             },
             "position_weights": weights,
             "summary": summary,
-            "as_of_date": str(snapshot.get("as_of_date") or orders.get("latest_trade_date") or ""),
+            "as_of_date": str(snapshot.get("as_of_date") or ""),
             "sources": list(snapshot.get("source_metadata") or []),
             "consistency_status": snapshot.get("consistency_status"),
             "consistency_warnings": list(snapshot.get("warnings") or []),
@@ -407,11 +428,51 @@ class PortfolioService:
             "portfolio_snapshot": snapshot,
             "status": str(snapshot.get("status") or "success"),
             "error_code": str(snapshot.get("error_code") or ""),
-            "safe_to_continue": bool(snapshot.get("safe_to_continue", snapshot.get("consistency_status") != "rejected")),
+            "safe_to_continue": safe_to_continue,
             "safe_to_answer": bool(snapshot.get("safe_to_answer", snapshot.get("consistency_status") != "rejected")),
             "safe_to_write": bool(snapshot.get("safe_to_write", snapshot.get("consistency_status") != "rejected")),
             "not_executed": True,
             "mutation_performed": False,
+        }
+
+    def get_portfolio_state(
+        self,
+        user_id: str,
+        *,
+        output_dir: str | Path = "outputs",
+        db_path: str | Path | None = None,
+    ) -> dict[str, Any]:
+        """Return the UI/business aggregate; Agent tools use atomic reads."""
+
+        user = str(user_id or "default")
+        snapshot = self.read_portfolio_snapshot(
+            user,
+            output_dir=output_dir,
+            db_path=db_path,
+        )
+        orders = self.get_current_orders(
+            user,
+            output_dir=output_dir,
+            db_path=db_path,
+        )
+        summary = {
+            **dict(snapshot.get("summary") or {}),
+            "order_count": int(orders.get("order_count") or 0),
+        }
+        return {
+            **snapshot,
+            "orders": list(orders.get("orders") or []),
+            "order_count": int(orders.get("order_count") or 0),
+            "summary": summary,
+            "as_of_date": str(
+                snapshot.get("as_of_date")
+                or orders.get("latest_trade_date")
+                or ""
+            ),
+            "sources": [
+                *list(snapshot.get("sources") or []),
+                *list(orders.get("sources") or []),
+            ],
         }
 
 

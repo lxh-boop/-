@@ -1,9 +1,4 @@
-"""Evidence-domain bridge from GraphRefs to existing evidence services.
-
-Entity analysis and evidence retrieval stay behind this private adapter so
-provider symbols never enter public Agent contracts. The current retrieval path
-also ingests returned evidence into the financial graph.
-"""
+"""Atomic evidence-domain operations behind the GraphRef boundary."""
 
 from __future__ import annotations
 
@@ -62,7 +57,7 @@ class EvidenceGraphProvider:
             "results": results,
         }
 
-    def retrieve_evidence(
+    def search_evidence(
         self,
         refs: list[GraphRef],
         *,
@@ -70,16 +65,12 @@ class EvidenceGraphProvider:
         top_k: int,
         output_dir: str | Path,
         db_path: str | Path | None,
-        source_task_id: str,
-        source_agent_id: str,
         as_of_time: str = "",
     ) -> dict[str, Any]:
         from agent.services.evidence_service import EvidenceService
 
         service = EvidenceService()
-        graph_evidence_refs: list[GraphRef] = []
         results: list[dict[str, Any]] = []
-        ingestion_results: list[dict[str, Any]] = []
         for ref in refs:
             code = self.identity_resolver.provider_symbol(ref)
             raw = service.get_stock_evidence(
@@ -91,6 +82,44 @@ class EvidenceGraphProvider:
                 db_path=db_path,
             )
             rows = records_from_payload(raw)
+            results.append(
+                {
+                    "focus_ref": ref.to_dict(),
+                    "success": bool(raw.get("success")),
+                    "message": str(raw.get("message") or ""),
+                    "records": rows,
+                    "sources": sources_from_payload(raw),
+                    "warnings": list(raw.get("warnings") or []),
+                    "errors": list(raw.get("errors") or []),
+                }
+            )
+        return {
+            "success": bool(results) and any(
+                item["success"] for item in results
+            ),
+            "results": results,
+        }
+
+    def ingest_evidence(
+        self,
+        search_results: list[dict[str, Any]],
+        *,
+        source_task_id: str,
+        source_agent_id: str,
+    ) -> dict[str, Any]:
+        graph_evidence_refs: list[GraphRef] = []
+        ingestion_results: list[dict[str, Any]] = []
+        for search_result in search_results:
+            raw_ref = search_result.get("focus_ref")
+            if not isinstance(raw_ref, dict):
+                continue
+            ref = GraphRef.from_dict(raw_ref)
+            code = self.identity_resolver.provider_symbol(ref)
+            rows = [
+                dict(row)
+                for row in search_result.get("records") or []
+                if isinstance(row, dict)
+            ]
             for index, row in enumerate(rows, start=1):
                 evidence_class = str(row.get("evidence_type") or row.get("source_type") or "news")
                 try:
@@ -119,20 +148,9 @@ class EvidenceGraphProvider:
                         ingestion_results[-1]["patch_id"] = patch_id
                 except Exception as exc:
                     ingestion_results.append({"error": f"{type(exc).__name__}:{exc}", "record_index": index})
-            results.append(
-                {
-                    "focus_ref": ref.to_dict(),
-                    "success": bool(raw.get("success")),
-                    "message": str(raw.get("message") or ""),
-                    "records": rows,
-                    "sources": sources_from_payload(raw),
-                    "warnings": list(raw.get("warnings") or []),
-                    "errors": list(raw.get("errors") or []),
-                }
-            )
         return {
-            "success": bool(results) and any(item["success"] for item in results),
-            "results": results,
+            "success": bool(ingestion_results)
+            and any("error" not in item for item in ingestion_results),
             "evidence_refs": [item.to_dict() for item in graph_evidence_refs],
             "ingestion_results": ingestion_results,
         }

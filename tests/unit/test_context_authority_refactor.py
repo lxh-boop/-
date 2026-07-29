@@ -25,8 +25,6 @@ from agent.memory.conversation_state_manager import (
     RELATION_NEW_GOAL,
     resolve_turn_from_messages,
 )
-from agent.collaboration_v2.specialist_runtime import _artifact_refs
-from agent.orchestration.multi_task_executor import _artifact_ref_from_result
 
 
 def _history() -> list[ConversationMessage]:
@@ -124,52 +122,3 @@ def test_freshness_request_uses_current_state() -> None:
 
     assert turn.relation_type == RELATION_CONTINUATION
     assert turn.reference_mode == "current_state"
-
-
-def test_multi_task_boundary_preserves_persisted_artifact_ref() -> None:
-    ref = _artifact_ref_from_result(
-        {
-            "artifact_id": "artifact_tool_1",
-            "metadata": {
-                "artifact_ref": {
-                    "artifact_id": "artifact_tool_1",
-                    "artifact_type": "tool_result",
-                    "producer_id": "stock_analysis",
-                }
-            },
-        }
-    )
-
-    assert ref == {
-        "artifact_id": "artifact_tool_1",
-        "artifact_type": "tool_result",
-        "producer_id": "stock_analysis",
-    }
-
-
-def test_specialist_boundary_deduplicates_artifact_refs() -> None:
-    refs = _artifact_refs(
-        {
-            "task_results": {
-                "task_1": {
-                    "artifact_id": "artifact_tool_1",
-                    "artifact_refs": [
-                        {
-                            "artifact_id": "artifact_tool_1",
-                            "artifact_type": "tool_result",
-                        }
-                    ],
-                    "metadata": {
-                        "artifact_ref": {
-                            "artifact_id": "artifact_tool_1",
-                            "artifact_type": "tool_result",
-                        }
-                    },
-                    "data": {},
-                }
-            }
-        }
-    )
-
-    assert len(refs) == 1
-    assert refs[0]["artifact_id"] == "artifact_tool_1"

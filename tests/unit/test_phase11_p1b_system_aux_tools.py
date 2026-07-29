@@ -6,8 +6,8 @@ from agent.capability_index import CapabilityIndexRepository
 from agent.mcp.config import build_mcp_context_from_local_config
 from agent.mcp.discovery import reset_discovery_cache
 from agent.mcp.registry_bridge import default_example_tool_name
-from agent.orchestration.multi_task_executor import _execute_single, execute_multi_intent_plan
 from agent.tool_engine import AGENT_MAIN, AGENT_READ, OP_READ, OP_SYSTEM, execute_tool, get_tool_registry_v2
+from agent.tool_runtime import TOOL_VISIBILITY_SYSTEM_PRIVATE
 
 
 def _mcp_context() -> dict:
@@ -36,14 +36,14 @@ def setup_function() -> None:
     reset_discovery_cache()
 
 
-def test_p1b_system_aux_tools_are_registered_with_legacy_aliases() -> None:
+def test_p1b_system_aux_tools_have_canonical_names_and_visibility() -> None:
     registry = get_tool_registry_v2()
     expected = {
         "user.profile.get": (OP_READ, ["user_profile"]),
-        "sandbox.python_analysis": (OP_SYSTEM, ["python_sandbox_analysis"]),
+        "sandbox.python_analysis": (OP_SYSTEM, []),
         "system.scheduler_status": (OP_SYSTEM, ["scheduler_status"]),
         "report.list_latest": (OP_READ, ["report", "report_latest"]),
-        "mcp.readonly.invoke": (OP_READ, ["mcp_tool"]),
+        "evidence.invoke_mcp_readonly": (OP_READ, []),
     }
 
     for name, (operation_type, aliases) in expected.items():
@@ -52,6 +52,11 @@ def test_p1b_system_aux_tools_are_registered_with_legacy_aliases() -> None:
         assert definition.operation_type == operation_type
         for alias in aliases:
             assert registry.get(alias).name == name
+
+    assert (
+        registry.get("sandbox.python_analysis").visibility
+        == TOOL_VISIBILITY_SYSTEM_PRIVATE
+    )
 
 
 def test_user_profile_v2_is_readonly_and_saves_artifact(tmp_path) -> None:
@@ -71,7 +76,7 @@ def test_user_profile_v2_is_readonly_and_saves_artifact(tmp_path) -> None:
 
 def test_python_sandbox_v2_blocks_business_state_writes(tmp_path) -> None:
     result = execute_tool(
-        "python_sandbox_analysis",
+        "sandbox.python_analysis",
         {
             "code": "RESULT = {'total': sum(SNAPSHOT['values'])}",
             "snapshot": {"values": [2, 3, 5]},
@@ -95,88 +100,35 @@ def test_python_sandbox_v2_blocks_business_state_writes(tmp_path) -> None:
     assert "sandbox_security_rejected" in ",".join(blocked.errors)
 
 
-def test_scheduler_and_report_aliases_execute_through_v2(tmp_path) -> None:
-    scheduler = _execute_single(
-        "scheduler_status",
-        {},
-        output_dir=tmp_path / "outputs",
-        db_path=tmp_path / "agent.db",
-        default_top_k=10,
-        execution_context={"user_id": "u1", "root": str(tmp_path)},
-    )
-    report = _execute_single(
-        "report_latest",
-        {},
-        output_dir=tmp_path / "outputs",
-        db_path=tmp_path / "agent.db",
-        default_top_k=10,
-        execution_context={"user_id": "u1"},
-    )
-
-    assert scheduler["success"] is True
-    assert scheduler["tool_engine"]["canonical_tool_name"] == "system.scheduler_status"
-    assert scheduler["artifact_id"]
-    assert report["success"] is True
-    assert report["tool_engine"]["canonical_tool_name"] == "report.list_latest"
-
-
-def test_multi_task_scheduler_uses_v2_system_tool(tmp_path) -> None:
-    result = execute_multi_intent_plan(
-        {"tasks": [{"task_id": "task_1", "intent": "scheduler_status", "parameters": {}, "depends_on": []}]},
-        user_id="u1",
-        output_dir=tmp_path / "outputs",
-        db_path=tmp_path / "agent.db",
-        context={"user_id": "u1", "root": str(tmp_path)},
-    )
-
-    assert result["success"] is True
-    assert result["tool_calls"][0]["tool_name"] == "scheduler_status"
-    assert result["task_results"]["task_1"]["success"] is True
-
-
 def test_mcp_readonly_bridge_executes_and_blocks_unsafe_write(tmp_path) -> None:
     output_dir = tmp_path / "outputs"
     _ranking_fixture(output_dir)
     context = {**_mcp_context(), "output_dir": output_dir, "user_id": "u1"}
     result = execute_tool(
-        "mcp.readonly.invoke",
+        "evidence.invoke_mcp_readonly",
         {"mcp_tool_name": default_example_tool_name(), "arguments": {"query": "stable portfolio", "top_k": 1}},
         context=context,
         agent_type=AGENT_READ,
     )
     blocked = execute_tool(
-        "mcp.readonly.invoke",
+        "evidence.invoke_mcp_readonly",
         {"mcp_tool_name": "mcp.local_financial_evidence.unsafe_write_trade", "arguments": {"stock_code": "600176"}},
         context=context,
         agent_type=AGENT_READ,
     )
 
     assert result.success is True
-    assert result.metadata["canonical_tool_name"] == "mcp.readonly.invoke"
+    assert (
+        result.metadata["canonical_tool_name"]
+        == "evidence.invoke_mcp_readonly"
+    )
     assert result.data["mutation_performed"] is False
     assert result.data["mcp_canonical_tool"] == default_example_tool_name()
     assert blocked.success is False
     assert "mcp_readonly_tool_not_allowed" in blocked.errors
 
 
-def test_dynamic_mcp_intent_goes_through_v2_bridge_in_multi_task(tmp_path) -> None:
-    output_dir = tmp_path / "outputs"
-    _ranking_fixture(output_dir)
-    name = default_example_tool_name()
-    result = execute_multi_intent_plan(
-        {"tasks": [{"task_id": "task_mcp", "intent": name, "parameters": {"query": "stable portfolio", "top_k": 1}}]},
-        user_id="u1",
-        output_dir=output_dir,
-        db_path=tmp_path / "agent.db",
-        context=_mcp_context(),
-    )
-
-    assert result["success"] is True
-    assert result["tool_calls"][0]["tool_name"] == name
-    assert result["task_results"]["task_mcp"]["data"]["v2_bridge_tool_name"] == "mcp.readonly.invoke"
-
-
-def test_capability_index_exposes_p1b_tools() -> None:
+def test_capability_index_hides_system_private_tools() -> None:
     repo = CapabilityIndexRepository()
     supervisor = repo.query(
         agent_identity="supervisor",
@@ -191,5 +143,8 @@ def test_capability_index_exposes_p1b_tools() -> None:
         permission_scope="read",
     )
 
-    assert any("sandbox.python_analysis" in item["registered_tool_names"] for item in supervisor)
+    assert not any(
+        "sandbox.python_analysis" in item["registered_tool_names"]
+        for item in supervisor
+    )
     assert any("user.profile.get" in item["registered_tool_names"] for item in portfolio)

@@ -5,20 +5,23 @@ Each module accepts an already assigned ``GraphAgentTask`` and returns one
 main coordinator.
 """
 
-from .diagnostic import run_diagnostic
-from .evidence import run_evidence
-from .graph_impact import run_graph_impact
-from .portfolio import run_portfolio
-from .report_writer import run_report_writer
-from .risk import run_risk
-from .strategy_guard import run_strategy_guard
+from .diagnostic import compose_diagnostic_result
+from .evidence import compose_evidence_result, provided_evidence_result
+from .graph_impact import compose_graph_impact_result
+from .market import compose_market_result
+from .portfolio import compose_portfolio_result
+from .report_composer import run_report_composer
+from .risk import compose_risk_result
+from .strategy_proposal import compose_strategy_proposal_result
 
 __all__ = [
-    "run_diagnostic",
-    "run_evidence",
-    "run_graph_impact",
-    "run_portfolio",
-    "run_report_writer",
-    "run_risk",
-    "run_strategy_guard",
+    "compose_diagnostic_result",
+    "compose_evidence_result",
+    "compose_graph_impact_result",
+    "compose_market_result",
+    "compose_portfolio_result",
+    "compose_risk_result",
+    "compose_strategy_proposal_result",
+    "provided_evidence_result",
+    "run_report_composer",
 ]

@@ -6,11 +6,15 @@ from typing import Any
 from uuid import uuid4
 
 from agent.session.confirmation_manager import create_confirmation_plan
-from agent.tools._common import first_present, is_valid_agent_price, safe_float
+from application.use_cases.common import first_present, is_valid_agent_price, safe_float
 from agent.tools.audit_tool import write_agent_action_log, write_agent_confirmation_log
-from agent.tools.portfolio_state_tool import query_portfolio_state
-from agent.tools.position_recommendation_tool import recommend_position_weight
-from agent.tools.replacement_recommendation_tool import recommend_replacements
+from agent.services.portfolio_service import portfolio_service
+from application.use_cases.position_recommendation import (
+    recommend_position_weight,
+)
+from application.use_cases.replacement_recommendation import (
+    recommend_replacements,
+)
 from agent.tools.tool_schemas import PaperTradePreview, ToolPermission, ToolResult
 from portfolio.target_weight_allocator import TRADE_LOT_SIZE, round_a_share_quantity
 
@@ -34,7 +38,11 @@ def preview_add_stock_to_paper(
     )
     recommendation = dict(recommendation_result.data)
     analysis = dict(recommendation.get("analysis") or {})
-    state = query_portfolio_state(user_id, output_dir=output_dir, db_path=db_path)
+    state = portfolio_service.get_portfolio_state(
+        user_id,
+        output_dir=output_dir,
+        db_path=db_path,
+    )
     if not bool(state.get("safe_to_continue", state.get("consistency_status") != "rejected")):
         return ToolResult(
             success=False,
@@ -252,7 +260,11 @@ def preview_adjust_position_to_weight(
 ) -> ToolResult:
     _ = top_k
     code = _stock_code(stock_code)
-    state = query_portfolio_state(user_id, output_dir=output_dir, db_path=db_path)
+    state = portfolio_service.get_portfolio_state(
+        user_id,
+        output_dir=output_dir,
+        db_path=db_path,
+    )
     if not bool(state.get("safe_to_continue", state.get("consistency_status") != "rejected")):
         return ToolResult(
             success=False,

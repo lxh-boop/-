@@ -10,7 +10,7 @@ from agent.session.confirmation_manager import (
     validate_confirmation,
 )
 from agent.session.pending_action_store import update_pending_plan
-from agent.tools._common import now_text, safe_float
+from application.use_cases.common import now_text, safe_float
 from agent.tools.audit_tool import write_agent_action_log, write_agent_confirmation_log
 from agent.tools.tool_schemas import ToolPermission, ToolResult
 from pipelines.paper_backfill_pipeline import run_paper_trading_backfill

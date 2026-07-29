@@ -20,23 +20,31 @@ class PortfolioGraphProvider:
 
     portfolio_graph: PortfolioGraphService
 
-    def load_portfolio_snapshot(
+    def read_portfolio_snapshot(
         self,
         *,
         user_id: str,
         output_dir: str | Path,
         db_path: str | Path | None,
-        as_of_time: str,
-        source_task_id: str,
-        source_agent_id: str,
     ) -> dict[str, Any]:
         from agent.services.portfolio_service import PortfolioService
 
-        raw = PortfolioService().get_portfolio_state(
+        return PortfolioService().read_portfolio_snapshot(
             user_id=user_id,
             output_dir=output_dir,
             db_path=db_path,
         )
+
+    def materialize_portfolio_snapshot(
+        self,
+        portfolio_payload: dict[str, Any],
+        *,
+        user_id: str,
+        as_of_time: str,
+        source_task_id: str,
+        source_agent_id: str,
+    ) -> dict[str, Any]:
+        raw = dict(portfolio_payload or {})
         if not raw.get("success"):
             return {
                 "success": False,

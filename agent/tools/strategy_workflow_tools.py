@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from agent.services.strategy_context_service import StrategyContextService
 from agent.services.strategy_proposal_service import StrategyProposalService
 from agent.services.strategy_implementation_service import (
     StrategyImplementationService,
@@ -12,7 +11,6 @@ from agent.services.strategy_review_service import StrategyReviewService
 from agent.services.strategy_apply_service import StrategyApplyService
 from agent.services.strategy_binding_service import StrategyBindingService
 from agent.services.strategy_position_service import StrategyPositionService
-from agent.services.strategy_audit_service import StrategyAuditService
 from agent.tools.tool_schemas import ToolPermission, ToolResult
 
 
@@ -35,71 +33,6 @@ def _scope(
     scoped_user = str(user_id or "default")
     scoped_account = str(account_id or f"paper_{scoped_user}")
     return scoped_user, scoped_account, str(conversation_id or "")
-
-
-def get_strategy_context(
-    *,
-    user_id: str,
-    account_id: str = "",
-    conversation_id: str = "",
-    output_dir: str | Path = "outputs",
-    db_path: str | Path | None = None,
-) -> ToolResult:
-    scoped_user, scoped_account, scoped_conversation = _scope(
-        user_id=user_id,
-        account_id=account_id,
-        conversation_id=conversation_id,
-    )
-    context = StrategyContextService(
-        db_path=db_path,
-        output_dir=output_dir,
-    ).load(
-        user_id=scoped_user,
-        account_id=scoped_account,
-        conversation_id=scoped_conversation,
-    )
-    return ToolResult(
-        success=True,
-        message="已读取长期策略讨论上下文。",
-        data={"strategy_conversation_context": context.to_dict()},
-        permission=ToolPermission.READ,
-        tool_name="strategy.get_context",
-    )
-
-
-def get_active_strategy_proposal(
-    *,
-    user_id: str,
-    account_id: str = "",
-    conversation_id: str = "",
-    db_path: str | Path | None = None,
-) -> ToolResult:
-    scoped_user, scoped_account, scoped_conversation = _scope(
-        user_id=user_id,
-        account_id=account_id,
-        conversation_id=conversation_id,
-    )
-    service = StrategyProposalService(db_path)
-    proposal = service.get_active(
-        user_id=scoped_user,
-        account_id=scoped_account,
-        conversation_id=scoped_conversation,
-    )
-    versions = (
-        service.list_versions(proposal.proposal_id, user_id=scoped_user)
-        if proposal
-        else []
-    )
-    return ToolResult(
-        success=True,
-        message="已读取当前会话的策略方案草案。",
-        data={
-            "proposal": proposal.to_dict() if proposal else {},
-            "versions": [item.to_dict() for item in versions],
-        },
-        permission=ToolPermission.READ,
-        tool_name="strategy.get_active_proposal",
-    )
 
 
 def save_strategy_proposal_draft(
@@ -315,7 +248,6 @@ def commit_strategy_apply_plan(
         conversation_id=conversation_id,
     )
 
-
 def create_strategy_activation_plan(
     *,
     user_id: str,
@@ -423,39 +355,4 @@ def commit_current_strategy_position_change(
         plan_id=plan_id,
         confirmation_token=confirmation_token,
         conversation_id=conversation_id,
-    )
-
-
-def get_strategy_audit_trace(
-    *,
-    user_id: str,
-    proposal_id: str = "",
-    implementation_id: str = "",
-    plan_id: str = "",
-    commit_id: str = "",
-    binding_id: str = "",
-    run_id: str = "",
-    conversation_id: str = "",
-    db_path: str | Path | None = None,
-    output_dir: str | Path = "outputs",
-) -> ToolResult:
-    trace = StrategyAuditService(
-        db_path=db_path,
-        output_dir=output_dir,
-    ).trace(
-        user_id=user_id,
-        proposal_id=proposal_id,
-        implementation_id=implementation_id,
-        plan_id=plan_id,
-        commit_id=commit_id,
-        binding_id=binding_id,
-        run_id=run_id,
-        conversation_id=conversation_id,
-    )
-    return ToolResult(
-        success=True,
-        message="已重建策略调整审计链。",
-        data={"strategy_audit_trace": trace},
-        permission=ToolPermission.READ,
-        tool_name="strategy.get_audit_trace",
     )
