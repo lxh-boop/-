@@ -182,4 +182,3 @@ def test_project_root_has_priority_over_existing_stale_absolute_path(
     resolved = model_zoo_backend.resolve_zoo_local_path(entry.name)
 
     assert resolved == project_model_dir.resolve()
-

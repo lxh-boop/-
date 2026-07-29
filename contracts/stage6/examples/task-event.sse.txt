@@ -4,4 +4,3 @@ data: {"sequence":1,"task_id":"task_example","event_type":"queued","data":{"prog
 
 event: task-complete
 data: {"task":{"task_id":"task_example","status":"succeeded"}}
-
