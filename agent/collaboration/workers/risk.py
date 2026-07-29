@@ -23,6 +23,8 @@ def run_risk(
     dependency_results: dict[str, dict[str, Any]],
     output_dir: str | Path,
     db_path: str | Path | None,
+    *,
+    resolved_inputs: dict[str, Any] | None = None,
 ) -> GraphWorkerResult:
     portfolio_task_ids = task.input_task_ids("portfolio_state")
     related_task_ids = task.input_task_ids("related_analysis")

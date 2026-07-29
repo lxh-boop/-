@@ -16,6 +16,7 @@ from .models import (
     ResultStatus,
     SessionMemoryItem,
     TaskStatus,
+    WorkerTaskContract,
 )
 
 
@@ -53,6 +54,7 @@ __all__ = [
     "ResultStatus",
     "SessionMemoryItem",
     "TaskStatus",
+    "WorkerTaskContract",
     "clear_financial_graph_agent_session",
     "execute_control_action",
     "execute_unified_agent_request",

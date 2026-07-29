@@ -16,34 +16,31 @@ def require_text(path: str, *needles: str) -> None:
 def main() -> int:
     require_text(
         "agent/collaboration/models.py",
-        "authoritative_arg_bindings",
-        "runtime_bound_args",
-        "x-runtime-bound-args",
-        "selection_requirements",
+        '"args_schema": public_args_schema',
+        '"semantic_inputs_schema"',
+        '"default_args"',
+        "def default_args_for",
     )
     require_text(
         "agent/collaboration/agent_directory.py",
-        '"focus_ref_ids": "focus_ref_ids"',
-        '"user_id": "user_id"',
-        '"reply_language": "reply_language"',
-        "普通实体分析不需要本 Worker",
+        'default_args={"top_k": 10}',
+        '"default": 10',
+        "用户未指定时使用10",
     )
     require_text(
         "agent/collaboration/planner.py",
-        "TASK_INPUT_VALUE_SCHEMA",
-        "_authoritative_runtime_values",
-        "_prepare_payload",
-        "WORKER_PLAN_AUTHORITATIVE_ARGS_BOUND",
-        "runtime_bound_args",
-        "至少选择 W01 的外部实体研究任务、W02 的 query_stock_prediction 内部模型预测任务和最终报告 Worker",
-        "inputs 只能包含上述上游 WorkerResult 引用对象",
+        "def _validate_planner_field_placement",
+        "planner_field_placement_error",
+        "args_schema 只描述要写入任务 args",
+        "semantic_inputs_schema 只描述要写入任务 inputs",
+        "args.top_k 写10",
+        "repair_guidance=",
     )
     require_text(
-        "agent/collaboration/worker_contracts.py",
-        "additional_properties = schema.get",
-        "elif isinstance(additional_properties, dict)",
+        "core/llm/service.py",
+        'repair_guidance: str = ""',
+        "本次精确修复要求",
     )
-
     planner_text = (ROOT / "agent/collaboration/planner.py").read_text(
         encoding="utf-8-sig"
     )
@@ -58,13 +55,15 @@ def main() -> int:
             raise AssertionError(f"forbidden DAG mutation:{forbidden}")
 
     report = {
-        "phase": "01.3.1",
+        "phase": "01.4.1",
         "status": "passed",
-        "runtime_args_bound_by_code": True,
-        "semantic_inputs_only_reference_worker_results": True,
-        "focus_ref_ids_not_llm_required": True,
-        "dependency_compiler_preserved": True,
-        "worker_selection_owner": "main_agent",
+        "public_args_schema": True,
+        "public_semantic_inputs_schema": True,
+        "legacy_input_schema_hidden_from_main_agent": True,
+        "precise_field_placement_error": True,
+        "repair_guidance_contains_contract_rules": True,
+        "default_top_k": 10,
+        "main_agent_owns_worker_dag": True,
         "dag_mutation_after_planning": False,
         "timeout_changed": False,
     }

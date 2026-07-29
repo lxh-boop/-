@@ -24,6 +24,8 @@ def run_report_writer(
     task: GraphAgentTask,
     dependency_results: dict[str, dict[str, Any]],
     language: str,
+    *,
+    resolved_inputs: dict[str, Any] | None = None,
 ) -> GraphWorkerResult:
     requested_task_ids = task.input_task_ids("upstream_results")
     selected_dependency_results = {
@@ -31,29 +33,46 @@ def run_report_writer(
         for task_id, payload in dependency_results.items()
         if not requested_task_ids or task_id in set(requested_task_ids)
     }
-    safe_results = [
-        {
-            "contract_version": str(
-                item.get("contract_version") or "graph_worker_result.v1"
-            ),
-            "task_id": str(item.get("task_id") or ""),
-            "agent_id": str(item.get("agent_id") or ""),
-            "status": str(item.get("status") or ""),
-            "output_type": str(item.get("output_type") or ""),
-            "data": safe_public_value(item.get("data")),
-            "error": safe_public_value(item.get("error")),
-            "focus_refs": safe_public_value(item.get("focus_refs") or []),
-            "summary": str(item.get("summary") or "")[:2000],
-            "findings": safe_public_value(item.get("findings") or []),
-            "recommendations": safe_public_value(item.get("recommendations") or []),
-            "evidence_refs": safe_public_value(item.get("evidence_refs") or []),
-            "graph_path_refs": safe_public_value(item.get("graph_path_refs") or []),
-            "warnings": safe_public_value(item.get("warnings") or []),
-            "missing_items": safe_public_value(item.get("missing_items") or []),
-            "confidence": item.get("confidence"),
-        }
-        for item in dependency_result_items(selected_dependency_results)
-    ]
+    explicit_items: list[dict[str, Any]] = []
+    for role_value in dict(resolved_inputs or {}).values():
+        values = role_value if isinstance(role_value, list) else [role_value]
+        for value in values:
+            if isinstance(value, dict):
+                explicit_items.append(value)
+    if explicit_items:
+        safe_results = [
+            {
+                "task_id": str(item.get("from_task_id") or ""),
+                "status": str(item.get("status") or ""),
+                "output_type": str(item.get("output_type") or ""),
+                "payload_schema": str(item.get("payload_schema") or ""),
+                "payload_version": str(item.get("payload_version") or ""),
+                "payload": safe_public_value(item.get("payload")),
+                "summary": str(item.get("summary") or "")[:2000],
+                "evidence_refs": safe_public_value(item.get("evidence_refs") or []),
+                "artifact_refs": safe_public_value(item.get("artifact_refs") or []),
+                "confidence": item.get("confidence"),
+            }
+            for item in explicit_items
+        ]
+    else:
+        safe_results = [
+            {
+                "contract_version": str(item.get("contract_version") or "graph_worker_result.v1"),
+                "task_id": str(item.get("task_id") or ""),
+                "agent_id": str(item.get("agent_id") or ""),
+                "status": str(item.get("status") or ""),
+                "output_type": str(item.get("output_type") or ""),
+                "payload_schema": str(item.get("payload_schema") or ""),
+                "payload_version": str(item.get("payload_version") or ""),
+                "payload": safe_public_value(item.get("payload", item.get("data"))),
+                "summary": str(item.get("summary") or "")[:2000],
+                "evidence_refs": safe_public_value(item.get("evidence_refs") or []),
+                "artifact_refs": safe_public_value(item.get("artifact_refs") or []),
+                "confidence": item.get("confidence"),
+            }
+            for item in dependency_result_items(selected_dependency_results)
+        ]
     if not safe_results:
         return GraphWorkerResult(
             task_id=task.task_id,
@@ -97,7 +116,7 @@ def run_report_writer(
                 "content": json.dumps(
                     {
                         "objective": str(task.args.get("report_goal") or task.objective),
-                        "worker_results": safe_results,
+                        "resolved_worker_inputs": safe_results,
                     },
                     ensure_ascii=False,
                     default=str,

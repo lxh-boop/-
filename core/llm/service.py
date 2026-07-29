@@ -179,13 +179,16 @@ class LLMService:
         validator: Callable[[dict[str, Any]], None] | None = None,
         operation: str = "",
         event_callback: Callable[[str, dict[str, Any]], None] | None = None,
+        repair_guidance: str = "",
     ) -> dict[str, Any]:
         """Generate JSON and perform exactly one full-plan repair request.
 
-        ``event_callback`` exposes only bounded lifecycle diagnostics. It does not
-        alter the existing timeout, retry count, model binding, or validation
-        policy. The first invalid plan is discarded; a successful repair must
-        still return a complete independently valid JSON object.
+        ``event_callback`` exposes only bounded lifecycle diagnostics.
+        ``repair_guidance`` adds caller-owned contract guidance to the single
+        existing repair attempt; it does not alter timeout, retry count, model
+        binding, or validation policy. The first invalid plan is discarded; a
+        successful repair must still return a complete independently valid JSON
+        object.
         """
 
         effective_operation = operation or "primary"
@@ -277,7 +280,8 @@ class LLMService:
                         "上一个完整计划未通过 JSON 或合同校验，必须丢弃原计划并重新生成完整结果。"
                         f"校验错误：{type(first_exc).__name__}: {str(first_exc)[:1200]}。"
                         "请保持原用户目标不变，严格按照系统给出的 schema 和能力合同重新输出一个 JSON 对象。"
-                        "不要只修补单个字段，不要 Markdown，不要解释，不要猜测缺失信息。"
+                        + (f"本次精确修复要求：{str(repair_guidance)[:2400]}。" if str(repair_guidance or "").strip() else "")
+                        + "不要只修补单个字段，不要 Markdown，不要解释，不要猜测缺失信息。"
                     ),
                 },
             ]

@@ -11,6 +11,7 @@ from agent.tool_runtime import (
 )
 
 from .evidence import build_evidence_tool_definitions
+from .internal_system import build_internal_system_tool_definitions
 
 
 @dataclass(frozen=True)
@@ -67,4 +68,7 @@ def build_worker_tool_registry(
 ) -> ToolRegistry:
     """Build private tool definitions against run-scoped dependencies."""
 
-    return ToolRegistry(build_evidence_tool_definitions(provider))
+    return ToolRegistry([
+        *build_evidence_tool_definitions(provider),
+        *build_internal_system_tool_definitions(provider),
+    ])

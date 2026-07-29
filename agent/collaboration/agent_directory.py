@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from .models import AgentCapabilityCard, GraphAgentTask, GraphWorkerResult
+from .models import (
+    AgentCapabilityCard,
+    GraphAgentTask,
+    GraphWorkerResult,
+    WorkerTaskContract,
+)
 from .worker_contracts import (
     WorkerContractViolation,
     array_schema,
@@ -122,54 +127,213 @@ class AgentDirectory:
             AgentCapabilityCard(
                 worker_id=W02,
                 agent_id=PORTFOLIO_ANALYST,
-                role=PORTFOLIO_ANALYST,
-                description="读取并分析当前用户的权威账户、持仓、现金与组合结构。",
-                responsibility="形成可复用的当前组合快照与组合结构分析结果。",
+                role="INTERNAL_SYSTEM_RETRIEVER",
+                description=(
+                    "读取本系统已经存在的权威结构化数据，包括模型预测、排名、"
+                    "模型指标、回测、当前策略、用户画像、账户与持仓。"
+                ),
+                responsibility=(
+                    "只查询并标准化系统内部事实，不检索外部新闻，不生成风险结论、"
+                    "买卖建议、Proposal 或任何业务写入。"
+                ),
                 accepted_task_types=[
+                    "query_stock_prediction",
+                    "query_latest_ranking",
+                    "query_model_metrics",
+                    "query_backtest_summary",
+                    "query_selected_strategy",
+                    "query_portfolio_state",
                     "load_portfolio_snapshot",
                     "analyze_portfolio",
                     "analyze_portfolio_fit",
                     "compare_portfolios",
+                    "query_account_state",
+                    "query_user_profile",
                     "resolve_context",
                 ],
-                input_schema=object_schema(
-                    {
-                        "user_id": string_schema(min_length=1),
-                        "as_of_time": {"type": "string"},
-                        "portfolio_ref_ids": _ref_ids(min_items=0),
-                    },
-                    required=["user_id"],
-                ),
-                authoritative_arg_bindings={
-                    "user_id": "user_id",
-                    "as_of_time": "as_of_time",
-                },
-                selection_requirements=[
-                    "仅当用户明确要求组合、账户或持仓分析，或另一个已选择 Worker 明确需要 PortfolioAnalysisResult 时选择。",
-                ],
-                output_schema=worker_result_schema(
-                    "PortfolioAnalysisResult",
-                    data_schema=object_schema(
-                        {
-                            "portfolio_ref": _free_object(),
-                            "holding_refs": array_schema(_free_object()),
-                            "portfolio_summary": _free_object(),
-                            "unresolved_positions": array_schema(_free_object()),
-                        },
-                        required=["portfolio_ref", "holding_refs", "portfolio_summary"],
-                        additional_properties=True,
+                task_contracts=[
+                    WorkerTaskContract(
+                        task_type="query_stock_prediction",
+                        description="查询已解析证券在最新模型预测排名中的结构化结果。",
+                        input_schema=object_schema(
+                            {
+                                "focus_ref_ids": _ref_ids(),
+                                "top_k": {
+                                    "type": "integer",
+                                    "default": 10,
+                                    "description": "默认值为10；用户未指定时使用10。",
+                                },
+                                "model_name": {
+                                    "type": "string",
+                                    "description": "仅在用户明确指定模型时填写，否则省略并读取当前激活模型。",
+                                },
+                                "trade_date": {
+                                    "type": "string",
+                                    "description": "仅在用户明确指定日期时填写，否则查询最新可用日期。",
+                                },
+                            },
+                            required=["focus_ref_ids"],
+                        ),
+                        default_args={"top_k": 10},
+                        output_schema=worker_result_schema(
+                            "ModelPredictionResult",
+                            data_schema=object_schema(
+                                {
+                                    "security_ref": _free_object(),
+                                    "found": {"type": "boolean"},
+                                    "record": _free_object(),
+                                    "data_date": {"type": "string"},
+                                    "rank": {"type": ["integer", "null"]},
+                                    "is_topk": {"type": "boolean"},
+                                    "total_count": {"type": "integer"},
+                                    "source_id": {"type": "string"},
+                                    "reason": {"type": "string"},
+                                },
+                                required=[
+                                    "security_ref", "found", "record", "data_date",
+                                    "rank", "is_topk", "total_count", "source_id", "reason",
+                                ],
+                                additional_properties=True,
+                            ),
+                        ),
+                        output_type="ModelPredictionResult",
+                        authoritative_arg_bindings={"focus_ref_ids": "focus_ref_ids"},
+                        selection_requirements=[
+                            "用户要求分析、查询或解释某只证券的模型预测、评分、排名或TopK状态时选择。",
+                        ],
+                        private_tool_ids=["internal.prediction.get_stock"],
                     ),
-                ),
-                output_types=["PortfolioAnalysisResult"],
+                    WorkerTaskContract(
+                        task_type="query_latest_ranking",
+                        description="查询本系统最新预测排名。",
+                        input_schema=object_schema(
+                            {
+                                "top_k": {
+                                    "type": "integer",
+                                    "default": 10,
+                                    "description": "默认值为10；用户未指定时使用10。",
+                                },
+                                "model_name": {
+                                    "type": "string",
+                                    "description": "仅在用户明确指定模型时填写，否则省略。",
+                                },
+                            },
+                            required=[],
+                        ),
+                        default_args={"top_k": 10},
+                        output_schema=worker_result_schema("RankingResult", data_schema=_free_object()),
+                        output_type="RankingResult",
+                        private_tool_ids=["internal.ranking.get_latest"],
+                    ),
+                    WorkerTaskContract(
+                        task_type="query_model_metrics",
+                        description="查询当前模型指标。",
+                        input_schema=object_schema({"model_name": {"type": "string"}}, required=[]),
+                        output_schema=worker_result_schema("ModelMetricsResult", data_schema=_free_object()),
+                        output_type="ModelMetricsResult",
+                        private_tool_ids=["internal.model.get_metrics"],
+                    ),
+                    WorkerTaskContract(
+                        task_type="query_backtest_summary",
+                        description="查询模型或策略的历史回测摘要。",
+                        input_schema=object_schema(
+                            {
+                                "model_name": {"type": "string"},
+                                "top_k": {"type": "integer"},
+                                "holding_period": {"type": "integer"},
+                            },
+                            required=[],
+                        ),
+                        output_schema=worker_result_schema("BacktestSummaryResult", data_schema=_free_object()),
+                        output_type="BacktestSummaryResult",
+                        private_tool_ids=["internal.backtest.get_summary"],
+                    ),
+                    WorkerTaskContract(
+                        task_type="query_selected_strategy",
+                        description="查询当前选定策略配置。",
+                        input_schema=object_schema({}, required=[]),
+                        output_schema=worker_result_schema("SelectedStrategyResult", data_schema=_free_object()),
+                        output_type="SelectedStrategyResult",
+                        private_tool_ids=["internal.strategy.get_selected"],
+                    ),
+                    *[
+                        WorkerTaskContract(
+                            task_type=task_type,
+                            description="读取当前用户的权威组合快照。",
+                            input_schema=object_schema(
+                                {
+                                    "user_id": string_schema(min_length=1),
+                                    "as_of_time": {"type": "string"},
+                                    "portfolio_ref_ids": _ref_ids(min_items=0),
+                                },
+                                required=["user_id"],
+                            ),
+                            output_schema=worker_result_schema(
+                                "PortfolioAnalysisResult",
+                                data_schema=object_schema(
+                                    {
+                                        "portfolio_ref": _free_object(),
+                                        "holding_refs": array_schema(_free_object()),
+                                        "portfolio_summary": _free_object(),
+                                        "unresolved_positions": array_schema(_free_object()),
+                                    },
+                                    required=["portfolio_ref", "holding_refs", "portfolio_summary"],
+                                    additional_properties=True,
+                                ),
+                            ),
+                            output_type="PortfolioAnalysisResult",
+                            authoritative_arg_bindings={"user_id": "user_id", "as_of_time": "as_of_time"},
+                            private_tool_ids=["internal.portfolio.get_state"],
+                        )
+                        for task_type in [
+                            "query_portfolio_state", "load_portfolio_snapshot", "analyze_portfolio",
+                            "analyze_portfolio_fit", "compare_portfolios", "resolve_context",
+                        ]
+                    ],
+                    WorkerTaskContract(
+                        task_type="query_account_state",
+                        description="查询当前用户账户资金摘要。",
+                        input_schema=object_schema({"user_id": string_schema(min_length=1)}, required=["user_id"]),
+                        output_schema=worker_result_schema("AccountStateResult", data_schema=_free_object()),
+                        output_type="AccountStateResult",
+                        authoritative_arg_bindings={"user_id": "user_id"},
+                        private_tool_ids=["internal.account.get_state"],
+                    ),
+                    WorkerTaskContract(
+                        task_type="query_user_profile",
+                        description="查询当前用户的权威风险画像与偏好。",
+                        input_schema=object_schema({"user_id": string_schema(min_length=1)}, required=["user_id"]),
+                        output_schema=worker_result_schema("UserProfileResult", data_schema=_free_object()),
+                        output_type="UserProfileResult",
+                        authoritative_arg_bindings={"user_id": "user_id"},
+                        private_tool_ids=["internal.user_profile.get"],
+                    ),
+                ],
+                input_schema=object_schema({}, required=[], additional_properties=True),
+                output_schema=worker_result_schema("PortfolioAnalysisResult", data_schema=_free_object()),
+                output_types=[
+                    "ModelPredictionResult", "RankingResult", "ModelMetricsResult",
+                    "BacktestSummaryResult", "SelectedStrategyResult",
+                    "PortfolioAnalysisResult", "AccountStateResult", "UserProfileResult",
+                ],
+                selection_requirements=[
+                    "用于查询本系统内部权威数据；同一DAG可创建多个W02任务，但每个任务必须声明独立task_type和output_type。",
+                    "普通证券综合分析至少查询对应证券的ModelPredictionResult；组合、账户和画像仅在用户目标需要时查询。",
+                ],
                 non_responsibilities=[
-                    "普通金融实体研究",
-                    "组合风险评估",
-                    "生成或执行调整方案",
+                    "外部新闻、公告或研报检索", "组合风险结论", "新闻影响判断",
+                    "买卖建议", "生成或执行调整方案", "修改任何系统数据",
                 ],
                 side_effects=["derived_portfolio_graph_snapshot_only"],
+                private_tool_ids=[
+                    "internal.prediction.get_stock", "internal.ranking.get_latest",
+                    "internal.model.get_metrics", "internal.backtest.get_summary",
+                    "internal.strategy.get_selected", "internal.portfolio.get_state",
+                    "internal.account.get_state", "internal.user_profile.get",
+                ],
                 private_worker_prompt=(
-                    "你负责读取和分析用户当前组合状态。使用运行时已经确认的 user_id，"
-                    "不得改写账户、持仓或策略。最终必须返回 PortfolioAnalysisResult WorkerResult。"
+                    "你是本系统内部权威数据查询Worker。根据task_type只调用对应的只读私有工具，"
+                    "返回任务合同指定的强类型结果。不得检索外部新闻，不得生成风险结论、建议或写操作。"
                 ),
             ),
             AgentCapabilityCard(
@@ -527,8 +691,9 @@ class AgentDirectory:
     def safe_catalog(self) -> list[dict[str, Any]]:
         return [card.safe_for_coordinator() for card in self.list_cards()]
 
-    def private_tool_ids(self, identifier: str) -> list[str]:
-        return list(self.get(identifier).private_tool_ids)
+    def private_tool_ids(self, identifier: str, task_type: str = "") -> list[str]:
+        card = self.get(identifier)
+        return card.private_tools_for(task_type) if task_type else list(card.private_tool_ids)
 
     def private_worker_prompt(self, identifier: str) -> str:
         return self.get(identifier).private_worker_prompt
@@ -548,15 +713,19 @@ class AgentDirectory:
             if task in card.accepted_task_types
         ]
 
-    def validate_task_args(self, identifier: str, args: dict[str, Any]) -> None:
+    def validate_task_args(
+        self, identifier: str, args: dict[str, Any], *, task_type: str = ""
+    ) -> None:
         card = self.get(identifier)
-        validate_schema(dict(args or {}), card.input_schema, path="$.args")
+        schema = card.task_contract(task_type).input_schema if task_type else card.input_schema
+        validate_schema(dict(args or {}), schema, path="$.args")
 
     def validate_task_inputs(
         self,
         identifier: str,
         inputs: dict[str, Any],
         *,
+        task_type: str = "",
         task_id: str = "",
         output_type_by_task: dict[str, str] | None = None,
         path: str = "$.inputs",
@@ -569,8 +738,12 @@ class AgentDirectory:
         """
 
         card = self.get(identifier)
+        contract = card.task_contract(task_type) if task_type else None
         raw_inputs = dict(inputs or {})
-        bindings = dict(card.upstream_input_bindings or {})
+        bindings = dict(
+            contract.upstream_input_bindings if contract is not None
+            else card.upstream_input_bindings or {}
+        )
         unknown_roles = sorted(set(raw_inputs) - set(bindings))
         if unknown_roles:
             raise WorkerContractViolation(
@@ -667,15 +840,71 @@ class AgentDirectory:
                     derived.append(from_task_id)
         return derived
 
-    def validate_result(self, result: GraphWorkerResult) -> None:
+    def validate_result(self, result: GraphWorkerResult, *, task_type: str = "") -> None:
         card = self.get(result.agent_id)
         if result.output_type not in card.output_types:
             raise WorkerContractViolation(
-                "undeclared_worker_output_type",
-                "$.output_type",
-                result.output_type,
+                "undeclared_worker_output_type", "$.output_type", result.output_type
             )
-        validate_schema(result.safe_for_coordinator(), card.output_schema)
+        contract = card.task_contract(task_type) if task_type else None
+        if contract is not None and contract.output_type and result.output_type != contract.output_type:
+            raise WorkerContractViolation(
+                "task_output_type_mismatch", "$.output_type",
+                f"task_type={task_type},expected={contract.output_type},actual={result.output_type}",
+            )
+        validate_schema(
+            result.safe_for_coordinator(),
+            contract.output_schema if contract is not None else card.output_schema,
+        )
+
+    def resolve_task_inputs(
+        self, task: GraphAgentTask, dependency_results: dict[str, dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Bind declared semantic inputs to exact typed WorkerResult payloads."""
+
+        card = self.get(task.worker_id or task.assigned_agent)
+        contract = card.task_contract(task.task_type)
+        bindings = dict(contract.upstream_input_bindings or {})
+        resolved: dict[str, Any] = {}
+        for role, refs in task.inputs.items():
+            binding = dict(bindings.get(role) or {})
+            items: list[dict[str, Any]] = []
+            for ref in refs:
+                source_id = str(ref.get("from_task_id") or "")
+                expected = str(ref.get("expected_output_type") or "")
+                source = dependency_results.get(source_id)
+                if not isinstance(source, dict):
+                    raise WorkerContractViolation(
+                        "upstream_result_unavailable", f"$.inputs.{role}", source_id
+                    )
+                actual = str(source.get("output_type") or "")
+                if actual != expected:
+                    raise WorkerContractViolation(
+                        "upstream_result_output_type_mismatch", f"$.inputs.{role}",
+                        f"task={source_id},expected={expected},actual={actual}",
+                    )
+                accepted = [str(v) for v in binding.get("accepted_output_types") or []]
+                if accepted and "*" not in accepted and actual not in accepted:
+                    raise WorkerContractViolation(
+                        "upstream_result_not_accepted", f"$.inputs.{role}", actual
+                    )
+                payload = source.get("payload")
+                if payload is None:
+                    payload = source.get("data")
+                items.append({
+                    "from_task_id": source_id,
+                    "output_type": actual,
+                    "payload_schema": str(source.get("payload_schema") or f"{actual}.v1"),
+                    "payload_version": str(source.get("payload_version") or "v1"),
+                    "payload": dict(payload or {}) if isinstance(payload, dict) else payload,
+                    "summary": str(source.get("summary") or ""),
+                    "status": str(source.get("status") or ""),
+                    "evidence_refs": list(source.get("evidence_refs") or []),
+                    "artifact_refs": list(source.get("artifact_refs") or []),
+                })
+            maximum = int(binding.get("max_items") or 8)
+            resolved[role] = items[0] if maximum == 1 and len(items) == 1 else items
+        return resolved
 
     def validate_task_contract(self, task: GraphAgentTask) -> None:
         card = self.get(task.worker_id or task.assigned_agent)
@@ -691,10 +920,11 @@ class AgentDirectory:
                 "$.task_type",
                 f"{card.worker_id}:{task.task_type}",
             )
-        self.validate_task_args(card.worker_id, task.args)
+        self.validate_task_args(card.worker_id, task.args, task_type=task.task_type)
         derived_dependencies = self.validate_task_inputs(
             card.worker_id,
             task.inputs,
+            task_type=task.task_type,
             task_id=task.task_id,
         )
         if derived_dependencies != list(task.dependency_task_ids):
@@ -702,6 +932,13 @@ class AgentDirectory:
                 "derived_dependency_mismatch",
                 "$.dependency_task_ids",
                 f"derived={derived_dependencies},actual={task.dependency_task_ids}",
+            )
+        contract = card.task_contract(task.task_type)
+        if contract.output_type and task.expected_output_type != contract.output_type:
+            raise WorkerContractViolation(
+                "task_contract_output_type_mismatch",
+                "$.expected_output_type",
+                f"expected={contract.output_type},actual={task.expected_output_type}",
             )
         if task.expected_output_type not in card.output_types:
             raise WorkerContractViolation(

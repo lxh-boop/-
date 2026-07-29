@@ -97,6 +97,14 @@ def worker_result_schema(
                 ]
             ),
             "output_type": {"type": "string", "enum": [str(output_type)]},
+            "payload_schema": string_schema(min_length=1),
+            "payload_version": string_schema(min_length=1),
+            "payload": {
+                "anyOf": [
+                    {"type": "null"},
+                    dict(data_schema or object_schema({}, additional_properties=True)),
+                ]
+            },
             "summary": {"type": "string"},
             "data": {
                 "anyOf": [
@@ -121,6 +129,9 @@ def worker_result_schema(
             "agent_id",
             "status",
             "output_type",
+            "payload_schema",
+            "payload_version",
+            "payload",
             "summary",
             "data",
             "evidence_refs",
