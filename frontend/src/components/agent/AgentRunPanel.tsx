@@ -1,9 +1,22 @@
-import { Collapse, Descriptions, Empty, List, Space, Spin, Table, Tag, Typography } from 'antd'
+import { Collapse, Descriptions, Empty, List, Space, Spin, Table, Tag } from 'antd'
 import { useQuery } from '@tanstack/react-query'
 import { agentApi } from '../../api/agentApi'
+import type { AgentRuntimeCall } from '../../types/agent'
 
 function JsonBlock({ value }: { value: unknown }) {
   return <pre className="agent-json-block">{JSON.stringify(value ?? {}, null, 2)}</pre>
+}
+
+function statusColor(status: string) {
+  if (['success', 'succeeded', 'completed'].includes(status)) return 'success'
+  if (['failed', 'error'].includes(status)) return 'error'
+  if (['running', 'pending', 'ready'].includes(status)) return 'processing'
+  return 'default'
+}
+
+function durationText(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return '-'
+  return value < 1 ? `${Math.round(value * 1000)} ms` : `${value.toFixed(2)} s`
 }
 
 export function AgentRunPanel({ userId, runId }: { userId: string; runId: string }) {
@@ -53,17 +66,17 @@ export function AgentRunPanel({ userId, runId }: { userId: string; runId: string
       <Descriptions.Item label="状态"><Tag>{String(runInfo.status ?? '-')}</Tag></Descriptions.Item>
       <Descriptions.Item label="目标" span={2}>{String(runInfo.goal ?? '-')}</Descriptions.Item>
       <Descriptions.Item label="步骤">{data?.counts.steps ?? steps.length}</Descriptions.Item>
-      <Descriptions.Item label="工具调用">{data?.counts.tool_calls ?? tools.length}</Descriptions.Item>
+      <Descriptions.Item label="工具 / Worker 调用">{data?.counts.tool_calls ?? tools.length}</Descriptions.Item>
     </Descriptions>
     <Collapse
-      defaultActiveKey={['steps']}
+      defaultActiveKey={['steps', 'tools']}
       items={[
         {
           key: 'steps',
           label: `计划与步骤（${steps.length}）`,
           children: <Table
             size="small"
-            rowKey={(row) => String(row.step_id ?? Math.random())}
+            rowKey={(row) => String(row.step_id ?? `${row.intent ?? 'step'}-${row.status ?? 'unknown'}`)}
             dataSource={steps}
             pagination={false}
             columns={[
@@ -76,17 +89,55 @@ export function AgentRunPanel({ userId, runId }: { userId: string; runId: string
         },
         {
           key: 'tools',
-          label: `工具调用（${tools.length}）`,
-          children: <Table
+          label: `工具 / Worker 调用（${tools.length}）`,
+          children: <Table<AgentRuntimeCall>
             size="small"
-            rowKey={(row) => String(row.tool_call_id ?? Math.random())}
+            rowKey={(row) => row.tool_call_id}
             dataSource={tools}
             pagination={false}
+            locale={{ emptyText: '本次运行没有可展示的工具或 Worker 调用' }}
+            expandable={{
+              expandedRowRender: (row) => <Descriptions bordered size="small" column={1}>
+                <Descriptions.Item label="输入摘要"><JsonBlock value={row.input_summary} /></Descriptions.Item>
+                <Descriptions.Item label="输出摘要"><JsonBlock value={row.output_summary} /></Descriptions.Item>
+                {row.error_message
+                  ? <Descriptions.Item label="错误信息">{row.error_message}</Descriptions.Item>
+                  : null}
+              </Descriptions>,
+              rowExpandable: (row) => Boolean(
+                row.input_summary || row.output_summary || row.error_message
+              ),
+            }}
             columns={[
+              {
+                title: '类型',
+                dataIndex: 'call_kind',
+                width: 90,
+                render: (value) => value === 'worker'
+                  ? <Tag color="purple">Worker</Tag>
+                  : <Tag color="blue">Tool</Tag>,
+              },
               { title: '工具', dataIndex: 'tool_name' },
               { title: '步骤', dataIndex: 'step_id' },
-              { title: '状态', dataIndex: 'status' },
-              { title: '错误', dataIndex: 'error_type' },
+              {
+                title: '状态',
+                dataIndex: 'status',
+                width: 110,
+                render: (value) => <Tag color={statusColor(String(value ?? ''))}>
+                  {String(value ?? '-')}
+                </Tag>,
+              },
+              {
+                title: '耗时',
+                dataIndex: 'duration_seconds',
+                width: 100,
+                render: (value) => durationText(Number(value)),
+              },
+              {
+                title: '错误',
+                dataIndex: 'error_type',
+                render: (value) => String(value || '-'),
+              },
             ]}
           />,
         },

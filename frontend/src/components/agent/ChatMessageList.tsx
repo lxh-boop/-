@@ -1,5 +1,6 @@
 import { Button, Empty, Space, Tag, Typography } from 'antd'
 import type { AgentMessage } from '../../types/agent'
+import { MarkdownContent } from '../common/MarkdownContent'
 
 export function ChatMessageList({
   messages,
@@ -35,9 +36,11 @@ export function ChatMessageList({
                 onClick={() => onSelectRun(item.run_id)}
               >运行详情</Button> : null}
             </Space>
-            <Typography.Paragraph className="agent-message-content">
-              {item.content}
-            </Typography.Paragraph>
+            {assistant
+              ? <MarkdownContent content={item.content} />
+              : <Typography.Paragraph className="agent-message-content">
+                {item.content}
+              </Typography.Paragraph>}
           </Space>
         </div>
       </div>

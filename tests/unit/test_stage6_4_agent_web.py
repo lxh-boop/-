@@ -130,6 +130,92 @@ def test_agent_frontend_uses_task_api_sse_and_server_finalize() -> None:
     assert "confirmation_token" not in pending
 
 
+def test_agent_frontend_renders_safe_markdown_and_expands_runtime_calls() -> None:
+    root = Path(__file__).resolve().parents[2]
+    messages = (root / "frontend/src/components/agent/ChatMessageList.tsx").read_text(encoding="utf-8")
+    markdown = (root / "frontend/src/components/common/MarkdownContent.tsx").read_text(encoding="utf-8")
+    run_panel = (root / "frontend/src/components/agent/AgentRunPanel.tsx").read_text(encoding="utf-8")
+
+    assert "MarkdownContent" in messages
+    assert "ReactMarkdown" in markdown
+    assert "remarkGfm" in markdown
+    assert "rehypeRaw" not in markdown
+    assert "dangerouslySetInnerHTML" not in markdown
+    assert "defaultActiveKey={['steps', 'tools']}" in run_panel
+    assert "expandedRowRender" in run_panel
+    assert "Math.random()" not in run_panel
+
+
+def test_agent_run_detail_combines_tool_execution_and_worker_fallback(tmp_path: Path) -> None:
+    service = WebAgentApplicationService(
+        output_dir=tmp_path / "outputs",
+        db_path=tmp_path / "agent.sqlite3",
+    )
+    repository = service.agent._repository
+    run_id = "agent_run_runtime_calls"
+    repository.upsert_agent_run(
+        {
+            "run_id": run_id,
+            "user_id": "u1",
+            "goal": "inspect runtime calls",
+            "status": "completed",
+            "created_at": "2026-07-30T00:00:00+00:00",
+            "metadata": {},
+        }
+    )
+    repository.upsert_agent_step(
+        {
+            "run_id": run_id,
+            "step_id": "step_tool",
+            "intent": "query_account_state",
+            "status": "succeeded",
+            "depends_on": [],
+            "tool_args_summary": {"user_id": "u1"},
+            "observation_summary": "account loaded",
+            "duration_seconds": 0.12,
+            "metadata": {
+                "runtime_layer": "worker_dag",
+                "task_type": "query_account_state",
+                "tool_execution": {
+                    "tool_call_id": "call_worker_tool",
+                    "canonical_tool_name": "internal.account.get_state",
+                    "status": "succeeded",
+                    "success": True,
+                    "duration_ms": 80,
+                    "retry_count": 0,
+                },
+            },
+        }
+    )
+    repository.upsert_agent_step(
+        {
+            "run_id": run_id,
+            "step_id": "step_writer",
+            "intent": "write_report",
+            "status": "succeeded",
+            "depends_on": ["step_tool"],
+            "observation_summary": "report written",
+            "duration_seconds": 0.03,
+            "metadata": {
+                "runtime_layer": "worker_dag",
+                "task_type": "write_report",
+                "worker_result_status": "completed",
+            },
+        }
+    )
+
+    detail = service.run_detail("u1", run_id)
+    calls = detail["tool_calls"]
+    assert detail["counts"]["tool_calls"] == 2
+    assert detail["counts"]["persisted_tool_calls"] == 0
+    assert detail["counts"]["worker_calls"] == 1
+    assert calls[0]["call_kind"] == "tool"
+    assert calls[0]["tool_name"] == "internal.account.get_state"
+    assert calls[0]["duration_seconds"] == 0.08
+    assert calls[1]["call_kind"] == "worker"
+    assert calls[1]["tool_name"] == "write_report"
+
+
 def test_agent_task_api_injects_server_defaults_and_redacts_request(monkeypatch) -> None:
     from server.api import tasks as task_api
     from server.api.serialization import decode_transport

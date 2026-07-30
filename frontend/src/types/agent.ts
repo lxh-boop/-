@@ -37,15 +37,34 @@ export interface AgentMessagePage {
   limit: number
 }
 
+export interface AgentRuntimeCall {
+  tool_call_id: string
+  step_id: string
+  tool_name: string
+  status: string
+  call_kind: 'tool' | 'worker' | string
+  record_source: string
+  error_type: string
+  error_message: string
+  started_at: string
+  finished_at: string
+  duration_seconds: number
+  retry_count: number
+  input_summary: unknown
+  output_summary: unknown
+}
+
 export interface AgentRunDetail {
   run: Record<string, unknown>
   steps: Array<Record<string, unknown>>
-  tool_calls: Array<Record<string, unknown>>
+  tool_calls: AgentRuntimeCall[]
   sources: Array<Record<string, unknown>>
   proposals: Array<Record<string, unknown>>
   counts: {
     steps: number
     tool_calls: number
+    persisted_tool_calls: number
+    worker_calls: number
     sources: number
     proposals: number
   }

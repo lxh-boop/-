@@ -98,6 +98,163 @@ def _safe_value(value: Any, *, max_chars: int = 800, depth: int = 0) -> Any:
     return str(value)
 
 
+def _float_value(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _runtime_call_records(
+    run_id: str,
+    steps: list[dict[str, Any]],
+    persisted_tool_calls: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build one safe diagnostic stream for legacy Tool calls and Worker DAG runs."""
+
+    records: list[dict[str, Any]] = []
+    seen_call_ids: set[str] = set()
+    steps_with_persisted_calls: set[str] = set()
+
+    for index, row in enumerate(persisted_tool_calls):
+        if not isinstance(row, dict):
+            continue
+        step_id = str(row.get("step_id") or "")
+        call_id = str(row.get("tool_call_id") or f"{run_id}:persisted:{index}")
+        if call_id in seen_call_ids:
+            continue
+        seen_call_ids.add(call_id)
+        if step_id:
+            steps_with_persisted_calls.add(step_id)
+        records.append(
+            {
+                "tool_call_id": call_id,
+                "step_id": step_id,
+                "tool_name": str(row.get("tool_name") or "unknown_tool"),
+                "status": str(row.get("status") or "unknown"),
+                "call_kind": "tool",
+                "record_source": "agent_tool_calls",
+                "error_type": str(row.get("error_type") or ""),
+                "error_message": str(row.get("error_message") or ""),
+                "started_at": str(row.get("started_at") or ""),
+                "finished_at": str(row.get("finished_at") or ""),
+                "duration_seconds": _float_value(row.get("duration_seconds")),
+                "retry_count": int(_float_value(row.get("retry_count"))),
+                "input_summary": row.get("input_summary_json") or {},
+                "output_summary": row.get("output_summary_json") or {},
+            }
+        )
+
+    for step_index, row in enumerate(steps):
+        if not isinstance(row, dict):
+            continue
+        step_id = str(row.get("step_id") or f"step_{step_index}")
+        metadata = _metadata(row.get("metadata_json") or row.get("metadata"))
+        raw_executions = metadata.get("tool_executions")
+        if not isinstance(raw_executions, list):
+            single_execution = metadata.get("tool_execution")
+            raw_executions = [single_execution] if isinstance(single_execution, dict) else []
+
+        added_execution = False
+        for execution_index, execution in enumerate(raw_executions):
+            if not isinstance(execution, dict):
+                continue
+            call_id = str(
+                execution.get("tool_call_id")
+                or f"{run_id}:{step_id}:tool:{execution_index}"
+            )
+            if call_id in seen_call_ids:
+                added_execution = True
+                continue
+            seen_call_ids.add(call_id)
+            added_execution = True
+            duration_ms = _float_value(execution.get("duration_ms"), -1.0)
+            duration_seconds = (
+                duration_ms / 1000.0
+                if duration_ms >= 0.0
+                else _float_value(row.get("duration_seconds"))
+            )
+            records.append(
+                {
+                    "tool_call_id": call_id,
+                    "step_id": step_id,
+                    "tool_name": str(
+                        execution.get("canonical_tool_name")
+                        or execution.get("tool_name")
+                        or row.get("intent")
+                        or "unknown_tool"
+                    ),
+                    "status": str(execution.get("status") or row.get("status") or "unknown"),
+                    "call_kind": "tool",
+                    "record_source": "worker_result_metadata",
+                    "error_type": str(execution.get("error_type") or ""),
+                    "error_message": str(execution.get("error_message") or ""),
+                    "started_at": str(execution.get("started_at") or row.get("started_at") or ""),
+                    "finished_at": str(execution.get("finished_at") or row.get("finished_at") or ""),
+                    "duration_seconds": duration_seconds,
+                    "retry_count": int(_float_value(execution.get("retry_count"))),
+                    "input_summary": {
+                        "argument_keys": list(
+                            (row.get("tool_args_summary_json") or {}).keys()
+                        )
+                        if isinstance(row.get("tool_args_summary_json"), dict)
+                        else [],
+                    },
+                    "output_summary": {
+                        "success": execution.get("success"),
+                        "warning_count": execution.get("warning_count"),
+                        "error_count": execution.get("error_count"),
+                        "artifact_id": execution.get("artifact_id"),
+                        "circuit_state": execution.get("circuit_state"),
+                        "failure_kind": execution.get("failure_kind"),
+                        "retryable": execution.get("retryable"),
+                    },
+                }
+            )
+
+        if (
+            not added_execution
+            and step_id not in steps_with_persisted_calls
+            and str(metadata.get("runtime_layer") or "") == "worker_dag"
+        ):
+            records.append(
+                {
+                    "tool_call_id": f"{run_id}:{step_id}:worker",
+                    "step_id": step_id,
+                    "tool_name": str(
+                        metadata.get("task_type")
+                        or row.get("intent")
+                        or "worker_task"
+                    ),
+                    "status": str(row.get("status") or "unknown"),
+                    "call_kind": "worker",
+                    "record_source": "agent_steps",
+                    "error_type": str(row.get("error_type") or ""),
+                    "error_message": "",
+                    "started_at": str(row.get("started_at") or ""),
+                    "finished_at": str(row.get("finished_at") or ""),
+                    "duration_seconds": _float_value(row.get("duration_seconds")),
+                    "retry_count": max(
+                        0,
+                        int(_float_value(metadata.get("attempt"), 1.0)) - 1,
+                    ),
+                    "input_summary": {
+                        "depends_on": row.get("depends_on_json") or [],
+                        "required_outputs": metadata.get("required_outputs") or [],
+                    },
+                    "output_summary": {
+                        "summary": str(row.get("observation_summary") or ""),
+                        "worker_result_status": metadata.get("worker_result_status"),
+                        "confidence": metadata.get("confidence"),
+                        "artifact_refs": metadata.get("artifact_refs") or [],
+                        "evidence_ref_count": len(metadata.get("evidence_refs") or []),
+                    },
+                }
+            )
+
+    return records
+
+
 def _result_run_id(result: dict[str, Any] | None) -> str:
     data = result if isinstance(result, dict) else {}
     runtime = data.get("runtime") if isinstance(data.get("runtime"), dict) else {}
@@ -399,7 +556,8 @@ class WebAgentApplicationService:
         run = self._require_run(user_id, run_id)
         snapshot = load_run_snapshot(self.db_path, run_id)
         steps = snapshot.get("steps") if isinstance(snapshot.get("steps"), list) else []
-        tool_calls = snapshot.get("tool_calls") if isinstance(snapshot.get("tool_calls"), list) else []
+        persisted_tool_calls = snapshot.get("tool_calls") if isinstance(snapshot.get("tool_calls"), list) else []
+        tool_calls = _runtime_call_records(run_id, steps, persisted_tool_calls)
         sources = snapshot.get("sources") if isinstance(snapshot.get("sources"), list) else []
         proposals = snapshot.get("proposals") if isinstance(snapshot.get("proposals"), list) else []
         return {
@@ -433,20 +591,7 @@ class WebAgentApplicationService:
                 if isinstance(row, dict)
             ],
             "tool_calls": [
-                _safe_value(
-                    {
-                        "tool_call_id": row.get("tool_call_id"),
-                        "step_id": row.get("step_id"),
-                        "tool_name": row.get("tool_name"),
-                        "status": row.get("status"),
-                        "error_type": row.get("error_type"),
-                        "started_at": row.get("started_at"),
-                        "finished_at": row.get("finished_at"),
-                        "input_summary": row.get("input_summary_json") or {},
-                        "output_summary": row.get("output_summary_json") or {},
-                    },
-                    max_chars=400,
-                )
+                _safe_value(row, max_chars=400)
                 for row in tool_calls
                 if isinstance(row, dict)
             ],
@@ -468,6 +613,10 @@ class WebAgentApplicationService:
             "counts": {
                 "steps": len(steps),
                 "tool_calls": len(tool_calls),
+                "persisted_tool_calls": len(persisted_tool_calls),
+                "worker_calls": sum(
+                    1 for row in tool_calls if row.get("call_kind") == "worker"
+                ),
                 "sources": len(sources),
                 "proposals": len(proposals),
             },

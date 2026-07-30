@@ -204,6 +204,11 @@ class CollaborationRuntimeServices:
                         "runtime_layer": "worker_dag",
                         "worker_result_status": result.status.value,
                         "worker_contract_version": result.contract_version,
+                        "tool_execution": (
+                            dict(result.metadata.get("tool_execution") or {})
+                            if isinstance(result.metadata.get("tool_execution"), dict)
+                            else {}
+                        ),
                         "confidence": result.confidence,
                         "missing_context_keys": [item.key for item in result.missing_items],
                         "artifact_refs": list(result.artifact_refs[:20]),
