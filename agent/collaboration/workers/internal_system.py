@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any
 
 from agent.graph.contracts import GraphRef, refs_from
@@ -86,11 +87,83 @@ def _tool_execution_summary(tool_result: Any) -> dict[str, Any]:
     }
 
 
+def _position_code(row: dict[str, Any]) -> str:
+    for key in ("stock_code", "security_code", "code", "symbol", "ts_code"):
+        match = re.search(r"(?<!\d)(\d{6})(?!\d)", str(row.get(key) or ""))
+        if match:
+            return match.group(1)
+    match = re.search(r"(?:^|_)(\d{6})$", str(row.get("position_id") or ""))
+    return match.group(1) if match else ""
+
+
+def _entity_catalog(provider: Any, holding_refs: list[GraphRef]) -> list[dict[str, Any]]:
+    catalog: list[dict[str, Any]] = []
+    resolver = getattr(provider, "public_entity_descriptor", None)
+    for ref in holding_refs:
+        descriptor: dict[str, Any] = {}
+        if callable(resolver):
+            try:
+                descriptor = dict(resolver(ref) or {})
+            except Exception:
+                descriptor = {}
+        if not descriptor:
+            node_id = str(ref.node_id or "")
+            match = re.search(r"(?:^|:)(\d{6})$", node_id)
+            descriptor = {
+                "entity_ref": ref.to_dict(),
+                "public_code": match.group(1) if match else "",
+                "display_label": "",
+                "exchange": node_id.split(":")[-2].upper() if ":" in node_id else "",
+                "identity_source": str(ref.source or "graph_ref"),
+                "identity_locked": bool(ref.locked),
+            }
+        catalog.append(descriptor)
+    return catalog
+
+
+def _report_positions(
+    portfolio: dict[str, Any], entity_catalog: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    data = portfolio.get("data") if isinstance(portfolio.get("data"), dict) else portfolio
+    rows = data.get("active_positions") or data.get("positions") or data.get("holdings") or []
+    by_code = {
+        str(item.get("public_code") or ""): item
+        for item in entity_catalog
+        if str(item.get("public_code") or "")
+    }
+    result: list[dict[str, Any]] = []
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        code = _position_code(raw)
+        entity = dict(by_code.get(code) or {})
+        result.append(
+            {
+                "entity_ref": entity.get("entity_ref") or {},
+                "public_code": code or str(entity.get("public_code") or ""),
+                "display_label": str(entity.get("display_label") or ""),
+                "exchange": str(entity.get("exchange") or ""),
+                "identity_source": str(entity.get("identity_source") or ""),
+                "identity_locked": bool(entity.get("identity_locked", False)),
+                "quantity": raw.get("quantity"),
+                "cost_price": raw.get("cost_price"),
+                "current_price": raw.get("current_price"),
+                "market_value": raw.get("market_value"),
+                "position_ratio": raw.get("position_ratio") or raw.get("weight"),
+                "unrealized_pnl": raw.get("unrealized_pnl"),
+                "updated_at": raw.get("updated_at"),
+            }
+        )
+    return result
+
+
 def _run_portfolio_query(
     tool_executor: ToolExecutor,
     task: GraphAgentTask,
     output_dir: str | Path,
     db_path: str | Path | None,
+    *,
+    provider: Any = None,
 ) -> GraphWorkerResult:
     tool_result = tool_executor.execute(
         INTERNAL_PORTFOLIO_GET_STATE,
@@ -123,10 +196,14 @@ def _run_portfolio_query(
     portfolio_ref = GraphRef.from_dict(dict(raw["portfolio_ref"]))
     holding_refs = refs_from(raw.get("holding_refs") or [])
     produced = [portfolio_ref, *holding_refs]
+    portfolio = dict(raw.get("portfolio") or {})
+    entity_catalog = _entity_catalog(provider, holding_refs)
     payload = {
         "portfolio_ref": portfolio_ref.to_dict(),
         "holding_refs": [ref.to_dict() for ref in holding_refs],
-        "portfolio_summary": safe_public_value(raw.get("portfolio") or {}),
+        "entity_catalog": entity_catalog,
+        "display_positions": _report_positions(portfolio, entity_catalog),
+        "portfolio_summary": safe_public_value(portfolio),
         "unresolved_positions": safe_public_value(raw.get("unresolved_positions") or []),
     }
     return GraphWorkerResult(
@@ -172,11 +249,19 @@ def run_internal_system(
     output_dir: str | Path,
     db_path: str | Path | None,
     default_top_k: int,
+    *,
+    provider: Any = None,
 ) -> GraphWorkerResult:
     """Run exactly the private read capability declared by W02 task_type."""
 
     if task.task_type in _PORTFOLIO_TASKS:
-        return _run_portfolio_query(tool_executor, task, output_dir, db_path)
+        return _run_portfolio_query(
+            tool_executor,
+            task,
+            output_dir,
+            db_path,
+            provider=provider,
+        )
     mapping = _TASK_TO_TOOL_OUTPUT.get(task.task_type)
     if mapping is None:
         raise ValueError(f"unsupported_internal_system_task:{task.task_type}")

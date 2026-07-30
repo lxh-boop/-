@@ -274,7 +274,12 @@ class SpecialistRuntime:
         default_top_k: int,
     ) -> GraphWorkerResult:
         return run_internal_system(
-            self.worker_tool_executor, task, output_dir, db_path, default_top_k
+            self.worker_tool_executor,
+            task,
+            output_dir,
+            db_path,
+            default_top_k,
+            provider=self.provider,
         )
 
     def _run_graph_impact(

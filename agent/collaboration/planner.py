@@ -10,6 +10,7 @@ from agent.console_trace import flow_event
 
 from .agent_directory import AgentDirectory
 from .models import GraphAgentTask, TaskStatus
+from .report_validation import is_view_only_request, view_scope_expansion_text
 from .worker_contracts import (
     WorkerContractViolation,
     array_schema,
@@ -402,6 +403,7 @@ class CoordinatorPlanner:
                     authoritative_ref_ids=authoritative_ref_ids,
                     authoritative_user_id=str(user_id or "default"),
                     reply_language=reply_language,
+                    user_request=query,
                 )
             except (WorkerContractViolation, KeyError) as exc:
                 raise CoordinatorPlanningError(str(exc)) from exc
@@ -412,6 +414,10 @@ class CoordinatorPlanner:
             "每个节点必须由一个 Worker 完整承担一个业务子目标；不要规划 Worker 内部的 Tool 调用。"
             "只选择完成用户明确目标所必要的最少 Worker；某个 Worker 可用不代表本次任务需要它；"
             "不得为了更全面、可能有帮助或顺便给建议而扩大用户目标。"
+            "当用户只要求查看、查询或列出当前账户与持仓状态时，只选择必要的 W02 状态查询任务和 W06；"
+            "不得选择 W04 风险 Worker，也不得要求 W06 输出风险、行业评价或操作建议。"
+            "只有用户明确要求组合风险、集中度、适配性、权限风险或回撤评价时才选择 W04，"
+            "并让 W06 仅汇总 W04 已形成的 PortfolioRiskResult；W06 不得替代风险 Worker。"
             "当用户要求对一个已解析证券进行普通综合分析，且没有明确提出组合、持仓、适配性、集中度、权限风险或策略目标时，"
             "至少选择 W01 的外部实体研究任务、W02 的 query_stock_prediction 内部模型预测任务和最终报告 Worker；"
             "不得额外选择组合、影响或组合风险任务。若用户只问模型预测，可只选择 W02 query_stock_prediction 和报告 Worker。"
@@ -621,6 +627,7 @@ class CoordinatorPlanner:
         authoritative_ref_ids: set[str] | None = None,
         authoritative_user_id: str = "",
         reply_language: str = "zh",
+        user_request: str = "",
     ) -> None:
         self._validate_planner_field_placement(payload)
         validate_schema(payload, PLAN_SCHEMA)
@@ -717,6 +724,39 @@ class CoordinatorPlanner:
                     )
             if "FinalReport" in card.output_types:
                 report_task_ids.append(task_id)
+
+        # Prompt constraints are necessary but not sufficient. Reject a plan
+        # deterministically when a pure state-view request is expanded into a
+        # risk Worker or when W06 is instructed to add risk/advice content. The
+        # existing planner repair loop can then regenerate only the DAG; no
+        # successful business Worker result exists at this stage.
+        if is_view_only_request(user_request):
+            for index, row in enumerate(rows):
+                worker_id = str(row.get("worker_id") or "").upper()
+                output_type = str(row.get("expected_output_type") or "")
+                if worker_id == "W04" or output_type == "PortfolioRiskResult":
+                    raise WorkerContractViolation(
+                        "risk_worker_not_allowed_for_view_only_request",
+                        f"$.tasks[{index}].worker_id",
+                        "remove W04 and keep only required state-query Worker tasks plus W06",
+                    )
+                if "FinalReport" not in self.directory.get(worker_id).output_types:
+                    continue
+                args = dict(row.get("args") or {})
+                expanded = view_scope_expansion_text(
+                    " ".join(
+                        [
+                            str(row.get("objective") or ""),
+                            str(args.get("report_goal") or ""),
+                        ]
+                    )
+                )
+                if expanded:
+                    raise WorkerContractViolation(
+                        "report_scope_expansion_not_allowed_for_view_only_request",
+                        f"$.tasks[{index}]",
+                        expanded,
+                    )
 
         if not report_task_ids:
             raise WorkerContractViolation(

@@ -48,6 +48,41 @@ class GraphProviderAdapter:
     def provider_symbol(self, ref: GraphRef) -> str:
         return self._identity_resolver.provider_symbol(ref)
 
+    def public_entity_descriptor(self, ref: GraphRef) -> dict[str, Any]:
+        """Return a user-facing identity descriptor resolved by graph rules.
+
+        The descriptor is safe for a report Worker: it contains only the public
+        code, display label, exchange, GraphRef, and provenance. Provider-private
+        identifiers remain behind the graph boundary. Missing labels stay empty
+        and must never be guessed by an LLM.
+        """
+
+        # Canonical graph object IDs already encode the public exchange and code
+        # (for example ``cn:security:sse:601899``). Parse those deterministic
+        # fields first and query Neo4j only for the human-readable label. This
+        # avoids repeated identity reads while keeping the graph identity table
+        # authoritative for names and aliases.
+        node_parts = str(ref.node_id or "").split(":")
+        candidate = node_parts[-1] if node_parts else ""
+        public_code = candidate if candidate.isdigit() and len(candidate) == 6 else ""
+        exchange = node_parts[-2].upper() if len(node_parts) >= 2 else ""
+        display_label = self.identity.get_identity_value(
+            ref, namespaces=["display_name"]
+        )
+        if not public_code:
+            public_code = self.identity.get_identity_value(
+                ref, namespaces=["symbol", "exchange_symbol"]
+            )
+            public_code = str(public_code or "").split(".", 1)[0]
+        return {
+            "entity_ref": ref.to_dict(),
+            "public_code": str(public_code or ""),
+            "display_label": str(display_label or ""),
+            "exchange": exchange,
+            "identity_source": "graph_identity",
+            "identity_locked": bool(ref.locked),
+        }
+
     def analyze_entities(
         self,
         refs: list[GraphRef],

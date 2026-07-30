@@ -274,10 +274,18 @@ class AgentDirectory:
                                     {
                                         "portfolio_ref": _free_object(),
                                         "holding_refs": array_schema(_free_object()),
+                                        "entity_catalog": array_schema(_free_object()),
+                                        "display_positions": array_schema(_free_object()),
                                         "portfolio_summary": _free_object(),
                                         "unresolved_positions": array_schema(_free_object()),
                                     },
-                                    required=["portfolio_ref", "holding_refs", "portfolio_summary"],
+                                    required=[
+                                        "portfolio_ref",
+                                        "holding_refs",
+                                        "entity_catalog",
+                                        "display_positions",
+                                        "portfolio_summary",
+                                    ],
                                     additional_properties=True,
                                 ),
                             ),
@@ -586,6 +594,8 @@ class AgentDirectory:
                 },
                 selection_requirements=[
                     "作为最终报告 Worker，只汇总用户目标所需的上游结果。",
+                    "用户仅要求查看状态时，只汇总状态事实；风险结论必须来自 PortfolioRiskResult。",
+                    "操作建议必须同时满足用户明确要求且上游存在 ReviewedProposal。",
                 ],
                 output_schema=worker_result_schema(
                     "FinalReport",
@@ -614,6 +624,9 @@ class AgentDirectory:
                 non_responsibilities=[
                     "重新查询业务数据",
                     "解析新的金融实体",
+                    "根据代码、position_id、记忆或常识补充证券名称",
+                    "在缺少 PortfolioRiskResult 时生成风险、集中度或适配性结论",
+                    "在缺少 ReviewedProposal 或用户未明确要求时生成操作建议",
                     "修改上游业务结论",
                     "执行状态变更",
                 ],
@@ -621,7 +634,11 @@ class AgentDirectory:
                 supports_parallel=False,
                 private_worker_prompt=(
                     "你只依据上游 WorkerResult 生成最终报告。不得调用业务数据源、"
-                    "补造事实或改变上游结论。最终必须返回 FinalReport WorkerResult。"
+                    "补造事实或改变上游结论。实体名称只能使用上游权威实体目录，"
+                    "不得根据代码或 position_id 猜测。用户仅要求查看时，不得输出风险评价、"
+                    "行业判断或操作建议；风险结论必须来自 PortfolioRiskResult，操作建议必须来自"
+                    "ReviewedProposal 且符合用户明确目标。最终必须返回 FinalReport WorkerResult，"
+                    "并接受生成后的事实与职责边界校验。"
                 ),
             ),
             AgentCapabilityCard(
