@@ -37,12 +37,29 @@ class PortfolioGraphProvider:
             output_dir=output_dir,
             db_path=db_path,
         )
-        if not raw.get("success"):
+        if raw.get("success") is False:
+            message = str(raw.get("message") or "Portfolio state unavailable.")
             return {
                 "success": False,
-                "message": str(raw.get("message") or "Portfolio state unavailable."),
+                "message": message,
+                "error_type": str(raw.get("error_type") or "portfolio_snapshot_inconsistent"),
+                "error_message": str(raw.get("error_message") or message),
+                "failure_kind": str(raw.get("failure_kind") or "business_logic_error"),
+                "retryable": bool(raw.get("retryable", False)),
                 "warnings": list(raw.get("warnings") or []),
                 "errors": list(raw.get("errors") or []),
+            }
+        if raw.get("found") is False or not raw.get("account"):
+            message = str(raw.get("message") or "Portfolio account is not initialized.")
+            return {
+                "success": False,
+                "message": message,
+                "error_type": "portfolio_account_not_initialized",
+                "error_message": message,
+                "failure_kind": "business_result_empty",
+                "retryable": False,
+                "warnings": list(raw.get("warnings") or []),
+                "errors": list(raw.get("errors") or ["missing_account"]),
             }
         ref, graph_result = self.portfolio_graph.upsert_snapshot(
             user_id=user_id,

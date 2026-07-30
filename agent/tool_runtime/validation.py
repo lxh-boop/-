@@ -72,6 +72,10 @@ def normalise_raw_result(
                 "tool_name",
                 "permission",
                 "disclaimer",
+                "error_type",
+                "error_message",
+                "failure_kind",
+                "retryable",
             }
         }
     warnings = payload.get("warnings") or []
@@ -92,6 +96,10 @@ def normalise_raw_result(
         "data": data,
         "warnings": [str(item) for item in warnings if str(item).strip()],
         "errors": [str(item) for item in errors if str(item).strip()],
+        "error_type": str(payload.get("error_type") or ""),
+        "error_message": str(payload.get("error_message") or ""),
+        "failure_kind": str(payload.get("failure_kind") or ""),
+        "retryable": bool(payload.get("retryable", False)),
         "tool_name": requested_name,
         "canonical_tool_name": canonical_name,
     }

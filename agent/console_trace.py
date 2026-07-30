@@ -20,6 +20,7 @@ _LOCK = threading.RLock()
 _RUN_FILES: dict[str, Path] = {}
 _RUN_SEQUENCE: dict[str, int] = {}
 _RUN_FINALIZED: set[str] = set()
+_RUN_TOOL_EXECUTIONS: dict[str, list[dict[str, Any]]] = {}
 
 _SECRET_KEY_PATTERN = re.compile(
     r"(?:api[_-]?key|token|secret|password|passwd|credential|"
@@ -86,6 +87,10 @@ _STAGE_LABELS = {
     "WORKER_DAG_REGISTERED": "Worker DAG 已登记",
     "WORKER_EXECUTION_STARTED": "Worker DAG 执行开始",
     "WORKER_EXECUTION_COMPLETED": "Worker DAG 执行完成",
+    "TOOL_EXECUTION_STARTED": "工具执行开始",
+    "TOOL_EXECUTION_SUCCEEDED": "工具执行成功",
+    "TOOL_EXECUTION_FAILED": "工具执行失败",
+    "TOOL_EXECUTION_BLOCKED": "工具执行被阻止",
     "RUN_FAILED": "Agent Run 失败",
 }
 
@@ -559,6 +564,71 @@ def flow_event(
         return ""
 
 
+def record_tool_execution(
+    *,
+    run_id: str,
+    task_id: str,
+    tool_call_id: str,
+    tool_name: str,
+    canonical_tool_name: str = "",
+    status: str,
+    success: bool,
+    started_at: str = "",
+    finished_at: str = "",
+    duration_ms: float = 0.0,
+    argument_keys: list[str] | None = None,
+    error_type: str = "",
+    error_message: str = "",
+    failure_kind: str = "",
+    retryable: bool = False,
+    warning_count: int = 0,
+    error_count: int = 0,
+    artifact_id: str = "",
+    retry_count: int = 0,
+    circuit_state: str = "",
+) -> str:
+    """Persist one terminal tool-call status without raw arguments or responses."""
+    canonical_run_id = str(run_id or "").strip()
+    if not canonical_run_id:
+        return ""
+    normalized_status = str(status or ("succeeded" if success else "failed")).lower()
+    record = {
+        "tool_call_id": str(tool_call_id or ""),
+        "task_id": str(task_id or ""),
+        "tool_name": str(tool_name or ""),
+        "canonical_tool_name": str(canonical_tool_name or tool_name or ""),
+        "status": normalized_status,
+        "success": bool(success),
+        "started_at": str(started_at or ""),
+        "finished_at": str(finished_at or ""),
+        "duration_ms": float(duration_ms or 0.0),
+        "argument_keys": list(argument_keys or []),
+        "error_type": str(error_type or ""),
+        "error_message": str(error_message or ""),
+        "failure_kind": str(failure_kind or ""),
+        "retryable": bool(retryable),
+        "warning_count": int(warning_count or 0),
+        "error_count": int(error_count or 0),
+        "artifact_id": str(artifact_id or ""),
+        "retry_count": int(retry_count or 0),
+        "circuit_state": str(circuit_state or ""),
+    }
+    with _LOCK:
+        _RUN_TOOL_EXECUTIONS.setdefault(canonical_run_id, []).append(record)
+    stage = {
+        "succeeded": "TOOL_EXECUTION_SUCCEEDED",
+        "completed": "TOOL_EXECUTION_SUCCEEDED",
+        "blocked": "TOOL_EXECUTION_BLOCKED",
+    }.get(normalized_status, "TOOL_EXECUTION_FAILED")
+    return flow_event(
+        stage,
+        record,
+        run_id=canonical_run_id,
+        task_id=str(task_id or ""),
+        level="INFO" if success else "ERROR",
+    )
+
+
 def trace_event(
     stage: str,
     payload: Any = None,
@@ -749,6 +819,13 @@ def finalize_flow_markdown(
             missing_context = _as_rows(payload.get("missing_context"))
             failure = _as_mapping(payload.get("failure"))
             execution_status = str(payload.get("execution_status") or runtime_status or "unknown")
+            tool_executions = _as_rows(payload.get("tool_executions"))
+            if not tool_executions:
+                tool_executions = [
+                    dict(item)
+                    for item in _RUN_TOOL_EXECUTIONS.get(canonical_run_id, [])
+                    if isinstance(item, dict)
+                ]
 
             lines: list[str] = [
                 marker,
@@ -771,6 +848,7 @@ def finalize_flow_markdown(
                 f"| 失败数 | `{graph_results.get('failed_count', 0)}` |",
                 f"| 等待上下文数 | `{graph_results.get('waiting_context_count', 0)}` |",
                 f"| 内部运行计数 | `{payload.get('internal_tool_call_count', 0)}` |",
+                f"| 已记录 Tool 调用数 | `{len(tool_executions)}` |",
                 f"| 完成时间 | `{datetime.now().isoformat(timespec='milliseconds')}` |",
                 "",
             ]
@@ -863,6 +941,29 @@ def finalize_flow_markdown(
                 lines.append("")
             else:
                 lines.extend(["没有可用的执行批次记录。", ""])
+
+            lines.extend(["## 工具执行状态", ""])
+            if tool_executions:
+                lines.extend([
+                    "| Tool Call ID | Task ID | Tool | 状态 | 成功 | 耗时(ms) | 重试 | 错误类型 |",
+                    "|---|---|---|---|---|---:|---:|---|",
+                ])
+                for item in tool_executions:
+                    lines.append(
+                        "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |".format(
+                            _markdown_inline(item.get("tool_call_id")),
+                            _markdown_inline(item.get("task_id")),
+                            _markdown_inline(item.get("tool_name")),
+                            _markdown_inline(item.get("status")),
+                            _markdown_inline(item.get("success")),
+                            _markdown_inline(item.get("duration_ms")),
+                            _markdown_inline(item.get("retry_count")),
+                            _markdown_inline(item.get("error_type")),
+                        )
+                    )
+                lines.extend(["", "### Tool 执行详情（已脱敏）", "", *_markdown_json(tool_executions), ""])
+            else:
+                lines.extend(["本次运行没有记录到 Tool 调用，或调用发生在未携带 run_id 的独立工具上下文中。", ""])
 
             lines.extend(["## Worker 执行结果", ""])
             if result_items:
@@ -958,7 +1059,7 @@ def finalize_flow_markdown(
                 "",
                 "- 本文档保存的是 MainAgent 可见的 Worker DAG、公开 WorkerResult 和安全化运行信息。",
                 "- Worker 私有 Tool 的原始参数、原始响应、密钥、数据库路径和内部推理不会写入本文档。",
-                "- `工具调用`的完整逐次持久化将在 Tool Runtime 接线阶段补充；当前仅保存 WorkerResult 中公开的 Tool 摘要。",
+                "- Tool 的逐次执行状态、耗时、错误分类、重试次数和产物引用会保存；原始参数值、原始响应、密钥、数据库路径和内部 traceback 不会写入本文档。",
                 "",
                 "---",
                 "",
@@ -968,6 +1069,7 @@ def finalize_flow_markdown(
                 handle.write("\n".join(lines))
 
             _RUN_FINALIZED.add(canonical_run_id)
+            _RUN_TOOL_EXECUTIONS.pop(canonical_run_id, None)
             return str(path)
     except Exception:
         return ""

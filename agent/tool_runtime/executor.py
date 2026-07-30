@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import time
+import uuid
 from typing import Any
 
 from agent.artifacts import save_tool_result_artifact
@@ -15,7 +16,12 @@ from agent.communication.integration import (
     result_summary_payload,
 )
 from agent.communication.message_types import MessageType
-from agent.console_trace import trace_event, trace_exception
+from agent.console_trace import (
+    flow_event,
+    record_tool_execution,
+    trace_event,
+    trace_exception,
+)
 from agent.context.context_builder import ContextManager
 from agent.context.context_sanitizer import ContextSanitizer
 from agent.react.integration import record_tool_observation
@@ -80,11 +86,30 @@ class ToolExecutor:
     ) -> UnifiedToolResult:
         requested_name = str(tool_name or "")
         arguments = dict(arguments or {})
+        context = dict(context or {})
+        tool_call_id = f"tool_call_{uuid.uuid4().hex[:12]}"
+        argument_keys = safe_argument_keys(arguments)
+        run_id = str(context.get("run_id") or "")
+        task_id = str(context.get("task_id") or "")
+        if run_id:
+            flow_event(
+                "TOOL_EXECUTION_STARTED",
+                {
+                    "tool_call_id": tool_call_id,
+                    "tool_name": requested_name,
+                    "argument_keys": argument_keys,
+                    "agent_type": agent_type,
+                    "approval_granted": bool(approval_granted),
+                    "status": "running",
+                },
+                run_id=run_id,
+                task_id=task_id,
+            )
         trace_event(
             "tool.execute.start",
             {
                 "tool_name": requested_name,
-                "argument_keys": safe_argument_keys(arguments),
+                "argument_keys": argument_keys,
                 "agent_type": agent_type,
                 "approval_granted": approval_granted,
             },
@@ -101,6 +126,9 @@ class ToolExecutor:
                 "Tool is not registered.",
                 started_at,
                 started,
+                context=context,
+                tool_call_id=tool_call_id,
+                argument_keys=argument_keys,
             )
         canonical_name = self.registry.canonical_name(requested_name)
         context = self._prepare_context(
@@ -165,6 +193,9 @@ class ToolExecutor:
                 started_at,
                 started,
                 canonical_name=canonical_name,
+                context=context,
+                tool_call_id=tool_call_id,
+                argument_keys=argument_keys,
             )
         if agent_type not in set(definition.allowed_agent_types):
             publish_tool_event(
@@ -185,6 +216,9 @@ class ToolExecutor:
                 started_at,
                 started,
                 canonical_name=canonical_name,
+                context=context,
+                tool_call_id=tool_call_id,
+                argument_keys=argument_keys,
             )
         if agent_type == AGENT_READ and definition.operation_type != OP_READ:
             publish_tool_event(
@@ -205,6 +239,9 @@ class ToolExecutor:
                 started_at,
                 started,
                 canonical_name=canonical_name,
+                context=context,
+                tool_call_id=tool_call_id,
+                argument_keys=argument_keys,
             )
         if definition.operation_type == OP_WRITE and not approval_granted:
             publish_tool_event(
@@ -225,6 +262,9 @@ class ToolExecutor:
                 started_at,
                 started,
                 canonical_name=canonical_name,
+                context=context,
+                tool_call_id=tool_call_id,
+                argument_keys=argument_keys,
             )
         input_errors = validate_input(definition, arguments)
         if input_errors:
@@ -247,6 +287,9 @@ class ToolExecutor:
                 started_at,
                 started,
                 canonical_name=canonical_name,
+                context=context,
+                tool_call_id=tool_call_id,
+                argument_keys=argument_keys,
             )
 
         publish_tool_event(
@@ -309,16 +352,29 @@ class ToolExecutor:
                 "canonical_tool_name": canonical_name,
                 "runtime_reliability": runtime_metadata.to_dict(),
                 "artifact_ref": artifact_ref,
+                "tool_call_id": tool_call_id,
+                "argument_keys": argument_keys,
+                "failure_kind": str(result.get("failure_kind") or ""),
+                "retryable": bool(result.get("retryable", False)),
             }
+            reported_success = bool(result.get("success"))
+            reported_error_type = str(result.get("error_type") or "")
+            if not reported_success and not reported_error_type:
+                reported_error_type = "tool_reported_failure"
+            reported_error_message = str(
+                result.get("error_message")
+                or (result.get("message") if not reported_success else "")
+                or ""
+            )
             unified = UnifiedToolResult(
-                success=bool(result.get("success")),
+                success=reported_success,
                 tool_name=requested_name,
                 message=str(result.get("message") or ""),
                 data=dict(result.get("data") or {}),
                 warnings=list(result.get("warnings") or []),
                 errors=list(result.get("errors") or []),
-                error_type="output_validation" if output_errors else "",
-                error_message=";".join(output_errors),
+                error_type="output_validation" if output_errors else reported_error_type,
+                error_message=";".join(output_errors) if output_errors else reported_error_message,
                 metadata=metadata,
                 artifact_id=artifact_id,
                 started_at=started_at,
@@ -399,6 +455,28 @@ class ToolExecutor:
                 run_id=str(context.get("run_id") or ""),
                 task_id=str(context.get("task_id") or ""),
             )
+            record_tool_execution(
+                run_id=str(context.get("run_id") or ""),
+                task_id=str(context.get("task_id") or ""),
+                tool_call_id=tool_call_id,
+                tool_name=requested_name,
+                canonical_tool_name=canonical_name,
+                status="succeeded" if unified.success else "failed",
+                success=unified.success,
+                started_at=unified.started_at,
+                finished_at=unified.finished_at,
+                duration_ms=unified.duration_ms,
+                argument_keys=argument_keys,
+                error_type=unified.error_type,
+                error_message=unified.error_message,
+                failure_kind=str(unified.metadata.get("failure_kind") or ""),
+                retryable=bool(unified.metadata.get("retryable", False)),
+                warning_count=len(unified.warnings),
+                error_count=len(unified.errors),
+                artifact_id=unified.artifact_id,
+                retry_count=unified.retry_count,
+                circuit_state=unified.circuit_state,
+            )
             return unified
         except Exception as exc:
             trace_exception(
@@ -427,6 +505,9 @@ class ToolExecutor:
                 started,
                 canonical_name=canonical_name,
                 runtime_metadata=runtime_metadata,
+                context=context,
+                tool_call_id=tool_call_id,
+                argument_keys=argument_keys,
             )
             try:
                 record_tool_observation(
@@ -504,6 +585,9 @@ class ToolExecutor:
         *,
         canonical_name: str = "",
         runtime_metadata: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
+        tool_call_id: str = "",
+        argument_keys: list[str] | None = None,
     ) -> UnifiedToolResult:
         finished_at = datetime.now().isoformat(timespec="seconds")
         trace_event(
@@ -516,7 +600,7 @@ class ToolExecutor:
             },
             level="ERROR",
         )
-        return UnifiedToolResult(
+        failure = UnifiedToolResult(
             success=False,
             tool_name=tool_name,
             message=message,
@@ -526,6 +610,8 @@ class ToolExecutor:
             metadata={
                 "canonical_tool_name": canonical_name or tool_name,
                 "runtime_reliability": dict(runtime_metadata or {}),
+                "tool_call_id": str(tool_call_id or ""),
+                "argument_keys": list(argument_keys or []),
             },
             started_at=started_at,
             finished_at=finished_at,
@@ -537,3 +623,31 @@ class ToolExecutor:
                 (runtime_metadata or {}).get("circuit_state") or ""
             ),
         )
+        blocked_types = {
+            "unregistered_tool",
+            "disabled_tool",
+            "unauthorized_tool",
+            "unauthorized_operation_type",
+            "approval_required",
+            "input_validation",
+        }
+        record_tool_execution(
+            run_id=str((context or {}).get("run_id") or ""),
+            task_id=str((context or {}).get("task_id") or ""),
+            tool_call_id=str(tool_call_id or ""),
+            tool_name=tool_name,
+            canonical_tool_name=canonical_name or tool_name,
+            status="blocked" if error_type in blocked_types else "failed",
+            success=False,
+            started_at=failure.started_at,
+            finished_at=failure.finished_at,
+            duration_ms=failure.duration_ms,
+            argument_keys=list(argument_keys or []),
+            error_type=error_type,
+            error_message=message,
+            retryable=error_type not in blocked_types,
+            error_count=len(failure.errors),
+            retry_count=failure.retry_count,
+            circuit_state=failure.circuit_state,
+        )
+        return failure

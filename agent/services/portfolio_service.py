@@ -377,7 +377,36 @@ class PortfolioService:
             "position_market_value": account_summary["position_market_value"],
             "cash_ratio": account_summary["cash_ratio"],
         }
+        consistency_status = str(snapshot.get("consistency_status") or "")
+        snapshot_status = str(snapshot.get("status") or "success")
+        found = bool(account_dict)
+        safe_to_answer = bool(
+            snapshot.get(
+                "safe_to_answer",
+                consistency_status not in {"rejected"} and snapshot_status != "logic_error",
+            )
+        )
+        success = bool(safe_to_answer and snapshot_status != "logic_error")
+        error_type = ""
+        failure_kind = ""
+        message = "Portfolio state queried."
+        if not success:
+            error_type = str(snapshot.get("error_code") or "portfolio_snapshot_inconsistent")
+            failure_kind = "business_logic_error"
+            message = "Portfolio snapshot is inconsistent and cannot be used safely."
+        elif not found:
+            message = "Portfolio account is not initialized."
+
         return {
+            "success": success,
+            "found": found,
+            "message": message,
+            "error_type": error_type,
+            "error_message": message if not success else "",
+            "failure_kind": failure_kind,
+            "retryable": False,
+            "warnings": list(snapshot.get("warnings") or []),
+            "errors": list(snapshot.get("errors") or []),
             "user_id": user,
             "account": account_dict,
             "account_summary": account_summary,

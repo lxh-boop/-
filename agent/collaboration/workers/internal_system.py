@@ -63,6 +63,29 @@ def _artifact_refs(tool_result: Any) -> list[dict[str, Any]]:
     return [{"artifact_id": artifact_id}] if artifact_id else []
 
 
+def _tool_execution_summary(tool_result: Any) -> dict[str, Any]:
+    metadata = dict(getattr(tool_result, "metadata", {}) or {})
+    return {
+        "tool_call_id": str(metadata.get("tool_call_id") or ""),
+        "tool_name": str(getattr(tool_result, "tool_name", "") or ""),
+        "canonical_tool_name": str(metadata.get("canonical_tool_name") or ""),
+        "status": "succeeded" if bool(getattr(tool_result, "success", False)) else "failed",
+        "success": bool(getattr(tool_result, "success", False)),
+        "started_at": str(getattr(tool_result, "started_at", "") or ""),
+        "finished_at": str(getattr(tool_result, "finished_at", "") or ""),
+        "duration_ms": float(getattr(tool_result, "duration_ms", 0.0) or 0.0),
+        "retry_count": int(getattr(tool_result, "retry_count", 0) or 0),
+        "circuit_state": str(getattr(tool_result, "circuit_state", "") or ""),
+        "error_type": str(getattr(tool_result, "error_type", "") or ""),
+        "error_message": str(getattr(tool_result, "error_message", "") or ""),
+        "failure_kind": str(metadata.get("failure_kind") or ""),
+        "retryable": bool(metadata.get("retryable", False)),
+        "warning_count": len(getattr(tool_result, "warnings", []) or []),
+        "error_count": len(getattr(tool_result, "errors", []) or []),
+        "artifact_id": str(getattr(tool_result, "artifact_id", "") or ""),
+    }
+
+
 def _run_portfolio_query(
     tool_executor: ToolExecutor,
     task: GraphAgentTask,
@@ -95,6 +118,7 @@ def _run_portfolio_query(
             summary=str(raw.get("message") or tool_result.message or "无法读取当前组合。"),
             warnings=[*tool_result.warnings, *[str(item) for item in raw.get("warnings") or []]],
             artifact_refs=_artifact_refs(tool_result),
+            metadata={"tool_execution": _tool_execution_summary(tool_result)},
         )
     portfolio_ref = GraphRef.from_dict(dict(raw["portfolio_ref"]))
     holding_refs = refs_from(raw.get("holding_refs") or [])
@@ -137,7 +161,7 @@ def _run_portfolio_query(
         )],
         metadata={
             "produced_refs": [ref.to_dict() for ref in produced],
-            "tool_execution": {"tool_name": tool_result.tool_name, "artifact_id": tool_result.artifact_id},
+            "tool_execution": _tool_execution_summary(tool_result),
         },
     )
 

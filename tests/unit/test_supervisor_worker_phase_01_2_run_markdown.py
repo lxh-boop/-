@@ -10,6 +10,7 @@ def _reset_trace_state() -> None:
     console_trace._RUN_FILES.clear()
     console_trace._RUN_SEQUENCE.clear()
     console_trace._RUN_FINALIZED.clear()
+    console_trace._RUN_TOOL_EXECUTIONS.clear()
     console_trace.reset_flow_context()
 
 
@@ -75,6 +76,21 @@ def test_complete_run_markdown_contains_worker_dag_results_and_final_answer(
             "api_key": "secret-value",
         },
         run_id=run_id,
+    )
+
+    console_trace.record_tool_execution(
+        run_id=run_id,
+        task_id="W01_001",
+        tool_call_id="tool_call_test",
+        tool_name="graph.evidence.analyze_entities",
+        canonical_tool_name="graph.evidence.analyze_entities",
+        status="succeeded",
+        success=True,
+        started_at="2026-07-29T19:00:00",
+        finished_at="2026-07-29T19:00:01",
+        duration_ms=123.4,
+        argument_keys=["object_refs", "user_id"],
+        artifact_id="artifact_1",
     )
 
     execution = {
@@ -216,6 +232,9 @@ def test_complete_run_markdown_contains_worker_dag_results_and_final_answer(
     assert "W01_001" in content
     assert "W06_001" in content
     assert "## 执行批次" in content
+    assert "## 工具执行状态" in content
+    assert "tool_call_test" in content
+    assert "succeeded" in content
     assert "## Worker 执行结果" in content
     assert "私有 Tool 执行摘要" in content
     assert "graph.evidence.analyze_entities" in content
