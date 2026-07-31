@@ -159,7 +159,7 @@ class WebPaperTradingApplicationService:
             + "-"
             + digits.str.slice(6, 8)
         )
-        parsed = pd.to_datetime(text, errors="coerce").dt.strftime("%Y-%m-%d")
+        parsed = pd.to_datetime(text, errors="coerce", format="mixed").dt.strftime("%Y-%m-%d")
         return compact.where(digits.str.len() == 8, parsed)
 
     def _attach_daily_ohlc(self, orders: Any, trade_date: str) -> Any:
@@ -198,14 +198,17 @@ class WebPaperTradingApplicationService:
         data["ohlc_available"] = data[["open", "high", "low", "close"]].notna().all(axis=1)
         return data.drop(columns=["_history_code"])
 
-    def _historical_buy_lots(
+    def _historical_sell_lot_matches(
         self,
         user_id: str,
         selected_date: str,
         order_dates: set[str],
-    ) -> list[dict[str, Any]]:
-        """Return prior buy batches keyed by trade date and stock code."""
+        position_dates: set[str],
+        sell_operations: Any,
+    ) -> dict[str, dict[str, Any]]:
+        """Match sells from the authoritative pre-sell position and recent buys."""
 
+        import math
         import pandas as pd
 
         frames: list[Any] = []
@@ -224,26 +227,25 @@ class WebPaperTradingApplicationService:
             except Exception:
                 pass
 
-        if not frames:
-            from portfolio.paper_account import load_daily_order_snapshot
+        from portfolio.paper_account import load_daily_order_snapshot
 
-            for historical_date in sorted(
-                item for item in order_dates if item <= selected_date
-            ):
-                snapshot = load_daily_order_snapshot(
-                    user_id,
-                    historical_date,
-                    output_dir=self.output_dir,
-                )
-                if not snapshot.empty:
-                    frames.append(snapshot)
+        for historical_date in sorted(
+            item for item in order_dates if item <= selected_date
+        ):
+            snapshot = load_daily_order_snapshot(
+                user_id,
+                historical_date,
+                output_dir=self.output_dir,
+            )
+            if not snapshot.empty:
+                frames.append(snapshot)
 
         if not frames:
-            return []
+            return {}
 
         orders = pd.concat(frames, ignore_index=True, sort=False)
         if orders.empty or "stock_code" not in orders.columns:
-            return []
+            return {}
 
         order_dates_series = self._normalized_date_series(
             orders.get("trade_date", pd.Series("", index=orders.index))
@@ -251,40 +253,202 @@ class WebPaperTradingApplicationService:
         stock_codes = self._normalized_code_series(orders["stock_code"])
         action = orders.get("action", pd.Series("", index=orders.index)).astype(str).str.lower()
         paper_action = orders.get("paper_action", pd.Series("", index=orders.index)).astype(str).str.lower()
+        inferred_action = paper_action.map(
+            {
+                "paper_buy": "buy",
+                "paper_sell": "sell",
+                "paper_reduce": "sell",
+            }
+        )
+        action = action.where(action.isin(["buy", "sell"]), inferred_action).fillna("")
         quantity = pd.to_numeric(orders.get("quantity", 0), errors="coerce").fillna(0)
 
         buys = orders[
-            (action.eq("buy") | paper_action.eq("paper_buy"))
+            action.eq("buy")
             & (quantity > 0)
             & order_dates_series.notna()
             & (order_dates_series <= selected_date)
         ].copy()
-        if buys.empty:
-            return []
+        if buys.empty or sell_operations is None or sell_operations.empty:
+            return {}
 
+        buys["_buy_quantity"] = quantity.loc[buys.index]
         buys["trade_date"] = order_dates_series.loc[buys.index]
         buys["stock_code"] = stock_codes.loc[buys.index]
-        buys["lot_id"] = buys["trade_date"] + "_" + buys["stock_code"]
-        sort_columns = ["trade_date"]
-        if "created_at" in buys.columns:
-            sort_columns.append("created_at")
-        buys = buys.sort_values(sort_columns, kind="stable")
-        buys = buys.drop_duplicates(["lot_id"], keep="last")
+        event_time = buys.get("decision_time", pd.Series("", index=buys.index)).fillna("").astype(str)
+        created_at = buys.get("created_at", pd.Series("", index=buys.index)).fillna("").astype(str)
+        buys["_event_time"] = event_time.where(event_time.str.strip().ne(""), created_at)
+        fallback_id = (
+            buys["trade_date"]
+            + "_"
+            + buys["stock_code"]
+            + "_buy"
+        )
+        order_id = buys.get("order_id", pd.Series("", index=buys.index)).fillna("").astype(str)
+        buys["_event_id"] = order_id.where(order_id.str.strip().ne(""), fallback_id)
+        buys = buys.drop_duplicates(["_event_id"], keep="first")
+        buys = buys.sort_values(
+            ["trade_date", "_event_time", "_event_id"],
+            kind="stable",
+        )
 
-        lot_columns = [
-            "lot_id",
-            "trade_date",
-            "stock_code",
-            "stock_name",
-            "executed_price",
-            "quantity",
-            "gross_amount",
-            "total_fee",
-        ]
-        for column in lot_columns:
-            if column not in buys.columns:
-                buys[column] = None
-        return buys.loc[:, lot_columns].to_dict(orient="records")
+        def number(value: Any) -> float:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return 0.0
+            return parsed if math.isfinite(parsed) else 0.0
+
+        from portfolio.paper_account import load_daily_position_snapshot
+
+        sell_codes = {
+            str(code or "")
+            for code in sell_operations.get(
+                "stock_code",
+                pd.Series("", index=sell_operations.index),
+            )
+            if str(code or "")
+        }
+        prior_dates = sorted(
+            (item for item in position_dates if item < selected_date),
+            reverse=True,
+        )
+        position_snapshot_dates_by_stock = {
+            code: (prior_dates[0] if prior_dates else "")
+            for code in sell_codes
+        }
+        position_quantities_before = {code: 0.0 for code in sell_codes}
+        cycle_start_dates = {code: "" for code in sell_codes}
+        pending_cycle_codes = set(sell_codes)
+        for snapshot_index, snapshot_date in enumerate(prior_dates):
+            snapshot = load_daily_position_snapshot(
+                user_id,
+                snapshot_date,
+                output_dir=self.output_dir,
+                fallback=False,
+            )
+            quantities = {code: 0.0 for code in sell_codes}
+            if not snapshot.empty and "stock_code" in snapshot.columns:
+                snapshot_codes = self._normalized_code_series(snapshot["stock_code"])
+                snapshot_quantities = pd.to_numeric(
+                    snapshot.get("quantity", 0),
+                    errors="coerce",
+                ).fillna(0)
+                for code in sell_codes:
+                    quantities[code] = float(
+                        snapshot_quantities[snapshot_codes.eq(code)].sum()
+                    )
+            if snapshot_index == 0:
+                position_quantities_before.update(quantities)
+                for code in list(pending_cycle_codes):
+                    if number(quantities.get(code)) <= 1e-9:
+                        cycle_start_dates[code] = snapshot_date
+                        pending_cycle_codes.remove(code)
+            else:
+                for code in list(pending_cycle_codes):
+                    if number(quantities.get(code)) <= 1e-9:
+                        cycle_start_dates[code] = snapshot_date
+                        pending_cycle_codes.remove(code)
+            if not pending_cycle_codes:
+                break
+
+        matches: dict[str, dict[str, Any]] = {}
+        for sell in sell_operations.to_dict(orient="records"):
+            stock_code = str(sell.get("stock_code") or "")
+            sell_id = str(sell.get("trade_record_id") or f"{selected_date}_{stock_code}")
+            sell_quantity = number(sell.get("quantity"))
+            if not stock_code or sell_quantity <= 0:
+                continue
+
+            position_snapshot_date = position_snapshot_dates_by_stock.get(stock_code, "")
+            position_quantity_before = number(
+                position_quantities_before.get(stock_code)
+            )
+            cycle_start_date = cycle_start_dates.get(stock_code, "")
+
+            target_position_quantity = (
+                position_quantity_before
+                if position_quantity_before > 0
+                else sell_quantity
+            )
+            candidate_buys = buys[
+                buys["stock_code"].eq(stock_code)
+                & buys["trade_date"].le(selected_date)
+            ]
+            if cycle_start_date:
+                candidate_buys = candidate_buys[
+                    candidate_buys["trade_date"].gt(cycle_start_date)
+                ]
+
+            active_lots_descending: list[dict[str, Any]] = []
+            remaining_position_quantity = target_position_quantity
+            for buy in reversed(candidate_buys.to_dict(orient="records")):
+                if remaining_position_quantity <= 1e-9:
+                    break
+                original_quantity = number(buy.get("_buy_quantity"))
+                if original_quantity <= 0:
+                    continue
+                active_quantity = min(original_quantity, remaining_position_quantity)
+                active_lots_descending.append(
+                    {
+                        "lot_id": f"{buy.get('trade_date')}_{stock_code}",
+                        "trade_date": buy.get("trade_date"),
+                        "stock_code": stock_code,
+                        "stock_name": buy.get("stock_name"),
+                        "executed_price": number(buy.get("executed_price")),
+                        "original_quantity": original_quantity,
+                        "available_quantity": active_quantity,
+                        "original_gross_amount": number(buy.get("gross_amount")),
+                        "original_total_fee": number(buy.get("total_fee")),
+                    }
+                )
+                remaining_position_quantity -= active_quantity
+
+            active_lots = list(reversed(active_lots_descending))
+            remaining_sell_quantity = sell_quantity
+            matched_lots: list[dict[str, Any]] = []
+            for lot in active_lots:
+                if remaining_sell_quantity <= 1e-9:
+                    break
+                available_before = number(lot.get("available_quantity"))
+                matched_quantity = min(remaining_sell_quantity, available_before)
+                remaining_after = available_before - matched_quantity
+                original_quantity = number(lot.get("original_quantity"))
+                original_fee = number(lot.get("original_total_fee"))
+                buy_price = number(lot.get("executed_price"))
+                matched_lots.append(
+                    {
+                        "lot_id": lot.get("lot_id"),
+                        "trade_date": lot.get("trade_date"),
+                        "stock_code": lot.get("stock_code"),
+                        "stock_name": lot.get("stock_name"),
+                        "executed_price": buy_price,
+                        "original_quantity": original_quantity,
+                        "quantity": matched_quantity,
+                        "remaining_quantity_before": available_before,
+                        "remaining_quantity_after": remaining_after,
+                        "gross_amount": buy_price * matched_quantity,
+                        "total_fee": (
+                            original_fee * matched_quantity / original_quantity
+                            if original_quantity > 0
+                            else 0.0
+                        ),
+                    }
+                )
+                remaining_sell_quantity -= matched_quantity
+
+            matches[sell_id] = {
+                "purchase_lots": matched_lots,
+                "purchase_lot_count": len(matched_lots),
+                "matched_quantity": sell_quantity - remaining_sell_quantity,
+                "unmatched_quantity": max(0.0, remaining_sell_quantity),
+                "matching_method": "position_snapshot_recent_lots",
+                "position_snapshot_date": position_snapshot_date,
+                "position_quantity_before": position_quantity_before,
+                "cycle_start_date": cycle_start_date,
+            }
+
+        return matches
 
     def daily_history(self, user_id: str, trade_date: str) -> dict[str, Any]:
         import pandas as pd
@@ -377,24 +541,46 @@ class WebPaperTradingApplicationService:
             operations["stock_code"] = operation_codes
             operations["trade_record_id"] = selected_date + "_" + operation_codes
 
-        historical_buy_lots = self._historical_buy_lots(
-            user_id,
-            selected_date,
-            order_dates,
-        )
-        lots_by_stock: dict[str, list[dict[str, Any]]] = {}
-        for lot in historical_buy_lots:
-            lots_by_stock.setdefault(str(lot.get("stock_code") or ""), []).append(lot)
-
         buy_operations = operations[actions == "buy"].copy()
         sell_operations = operations[actions == "sell"].copy()
         if not sell_operations.empty:
-            sell_lots = [
-                list(lots_by_stock.get(str(stock_code or ""), []))
-                for stock_code in sell_operations["stock_code"]
+            sell_lot_matches = self._historical_sell_lot_matches(
+                user_id,
+                selected_date,
+                order_dates,
+                position_dates,
+                sell_operations,
+            )
+            match_records = [
+                sell_lot_matches.get(
+                    str(trade_record_id or ""),
+                    {
+                        "purchase_lots": [],
+                        "purchase_lot_count": 0,
+                        "matched_quantity": 0.0,
+                        "unmatched_quantity": float(quantity or 0.0),
+                        "matching_method": "position_snapshot_recent_lots",
+                        "position_snapshot_date": "",
+                        "position_quantity_before": 0.0,
+                        "cycle_start_date": "",
+                    },
+                )
+                for trade_record_id, quantity in zip(
+                    sell_operations["trade_record_id"],
+                    sell_operations["quantity"],
+                )
             ]
-            sell_operations["purchase_lots"] = sell_lots
-            sell_operations["purchase_lot_count"] = [len(items) for items in sell_lots]
+            for field in (
+                "purchase_lots",
+                "purchase_lot_count",
+                "matched_quantity",
+                "unmatched_quantity",
+                "matching_method",
+                "position_snapshot_date",
+                "position_quantity_before",
+                "cycle_start_date",
+            ):
+                sell_operations[field] = [record[field] for record in match_records]
 
         ohlc_available = (
             operations.get("ohlc_available", pd.Series(False, index=operations.index))

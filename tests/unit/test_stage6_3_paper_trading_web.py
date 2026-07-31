@@ -259,6 +259,16 @@ def test_sell_history_traces_each_prior_buy_lot_by_date_and_stock(
         ),
         create_paper_order(
             user_id="u1",
+            trade_date="2026-07-26",
+            stock_code="000001",
+            action="sell",
+            target_weight=0.0,
+            executed_price=10.4,
+            quantity=100,
+            reason="prior exit consumes first lot",
+        ),
+        create_paper_order(
+            user_id="u1",
             trade_date="2026-07-28",
             stock_code="000001",
             action="buy",
@@ -269,18 +279,50 @@ def test_sell_history_traces_each_prior_buy_lot_by_date_and_stock(
         ),
         create_paper_order(
             user_id="u1",
+            trade_date="2026-07-29",
+            stock_code="000001",
+            action="buy",
+            target_weight=0.01,
+            executed_price=11.0,
+            quantity=100,
+            reason="third lot",
+        ),
+        create_paper_order(
+            user_id="u1",
             trade_date="2026-07-30",
             stock_code="000001",
             action="sell",
             target_weight=0.0,
             executed_price=11.5,
-            quantity=300,
+            quantity=250,
             reason="exit",
         ),
     ]
+    position_quantities = {
+        "2026-07-25": 100,
+        "2026-07-26": 0,
+        "2026-07-28": 200,
+        "2026-07-29": 300,
+        "2026-07-30": 50,
+    }
     for order in orders:
+        position_quantity = position_quantities[order.trade_date]
         storage.write_daily_snapshot(
             orders=[order],
+            positions=(
+                [
+                    create_position(
+                        "u1",
+                        "000001",
+                        quantity=position_quantity,
+                        cost_price=order.executed_price,
+                        current_price=order.executed_price,
+                        total_assets=100000,
+                    )
+                ]
+                if position_quantity > 0
+                else []
+            ),
             trade_date=order.trade_date,
         )
 
@@ -307,10 +349,18 @@ def test_sell_history_traces_each_prior_buy_lot_by_date_and_stock(
     assert sell["trade_record_id"] == "2026-07-30_000001"
     assert sell["purchase_lot_count"] == 2
     assert [lot["lot_id"] for lot in sell["purchase_lots"]] == [
-        "2026-07-25_000001",
         "2026-07-28_000001",
+        "2026-07-29_000001",
     ]
-    assert [lot["executed_price"] for lot in sell["purchase_lots"]] == [10.2, 10.8]
+    assert [lot["executed_price"] for lot in sell["purchase_lots"]] == [10.8, 11.0]
+    assert [lot["quantity"] for lot in sell["purchase_lots"]] == [200.0, 50.0]
+    assert [lot["original_quantity"] for lot in sell["purchase_lots"]] == [200.0, 100.0]
+    assert sell["matched_quantity"] == 250.0
+    assert sell["unmatched_quantity"] == 0.0
+    assert sell["matching_method"] == "position_snapshot_recent_lots"
+    assert sell["position_snapshot_date"] == "2026-07-29"
+    assert sell["position_quantity_before"] == 300.0
+    assert sell["cycle_start_date"] == "2026-07-26"
     assert all(float(lot["total_fee"]) > 0 for lot in sell["purchase_lots"])
 
 
@@ -326,6 +376,8 @@ def test_daily_history_frontend_uses_one_date_and_shows_ohlc() -> None:
     assert "买入费用" in component
     assert "purchase_lots" in component
     assert "trade_record_id" in component
+    assert "以卖出前持仓快照为准" in component
+    assert "本次匹配数量" in component
     for label in ("开盘", "最高", "最低", "收盘"):
         assert label in component
     assert "paperTradingApi.history" in component

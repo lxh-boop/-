@@ -91,8 +91,8 @@ const sellColumns: ColumnsType<GenericRecord> = [
     dataIndex: 'purchase_lot_count',
     width: 135,
     render: (value) => Number(value) > 0
-      ? <Tag color="blue">已关联 {Number(value)} 次买入</Tag>
-      : <Tag color="warning">暂无买入批次</Tag>,
+      ? <Tag color="blue">匹配 {Number(value)} 个持仓批次</Tag>
+      : <Tag color="warning">没有可匹配批次</Tag>,
   },
   ...marketColumns,
   { title: '操作原因', dataIndex: 'reason', width: 320, ellipsis: true, render: formatValue },
@@ -103,9 +103,10 @@ const purchaseLotColumns: ColumnsType<GenericRecord> = [
   { title: '买入日期', dataIndex: 'trade_date', width: 115, render: formatValue },
   { title: '股票代码', dataIndex: 'stock_code', width: 105, render: formatValue },
   { title: '买入价格', dataIndex: 'executed_price', width: 100, align: 'right', render: moneyValue },
-  { title: '买入数量', dataIndex: 'quantity', width: 100, align: 'right', render: formatValue },
-  { title: '买入金额', dataIndex: 'gross_amount', width: 120, align: 'right', render: moneyValue },
-  { title: '买入费用', dataIndex: 'total_fee', width: 105, align: 'right', render: moneyValue },
+  { title: '原买入数量', dataIndex: 'original_quantity', width: 110, align: 'right', render: formatValue },
+  { title: '本次匹配数量', dataIndex: 'quantity', width: 120, align: 'right', render: formatValue },
+  { title: '匹配买入金额', dataIndex: 'gross_amount', width: 120, align: 'right', render: moneyValue },
+  { title: '分摊买入费用', dataIndex: 'total_fee', width: 120, align: 'right', render: moneyValue },
 ]
 
 function positionRowKey(record: GenericRecord, index?: number): string {
@@ -227,7 +228,7 @@ export function DailyHistoryPanel({ userId, availableDates }: { userId: string; 
                     return (
                       <Space direction="vertical" size="small" style={{ width: '100%' }}>
                         <Typography.Text strong>
-                          历史买入批次：共 {lots.length} 次，按买入日期排列
+                          本次卖出匹配买入批次：共 {lots.length} 次（以卖出前持仓快照为准，已不在持仓中的旧买入不会显示）
                         </Typography.Text>
                         <Table<GenericRecord>
                           size="small"
