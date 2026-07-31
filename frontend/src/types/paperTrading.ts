@@ -40,6 +40,8 @@ export interface PaperTradingDayHistory {
   has_position_snapshot: boolean
   positions: TablePayload<GenericRecord>
   operations: TablePayload<GenericRecord>
+  buy_operations: TablePayload<GenericRecord>
+  sell_operations: TablePayload<GenericRecord>
   summary: PaperTradingHistorySummary
 }
 

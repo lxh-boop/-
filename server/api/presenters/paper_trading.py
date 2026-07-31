@@ -39,6 +39,8 @@ def present_daily_history(value: dict[str, Any]) -> dict[str, Any]:
         "has_position_snapshot": bool(data.get("has_position_snapshot")),
         "positions": table_payload(data.get("positions")),
         "operations": table_payload(data.get("operations")),
+        "buy_operations": table_payload(data.get("buy_operations")),
+        "sell_operations": table_payload(data.get("sell_operations")),
         "summary": to_browser_value(data.get("summary") or {}),
     }
 

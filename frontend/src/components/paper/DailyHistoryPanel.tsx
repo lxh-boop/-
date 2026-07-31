@@ -55,22 +55,7 @@ const positionColumns: ColumnsType<GenericRecord> = [
   { title: '浮动盈亏', key: 'profit', width: 120, align: 'right', render: (_, record) => moneyValue(numberValue(record, 'unrealized_profit', 'unrealized_pnl')) },
 ]
 
-const operationColumns: ColumnsType<GenericRecord> = [
-  {
-    title: '操作',
-    dataIndex: 'action',
-    fixed: 'left',
-    width: 80,
-    render: (value) => {
-      const action = String(value ?? '').toLowerCase()
-      return <Tag color={action === 'buy' ? 'red' : 'green'}>{action === 'buy' ? '买入' : '卖出'}</Tag>
-    },
-  },
-  { title: '股票', key: 'stock', fixed: 'left', width: 140, render: (_, record) => stockCell(record) },
-  { title: '成交价', dataIndex: 'executed_price', width: 95, align: 'right', render: moneyValue },
-  { title: '数量', dataIndex: 'quantity', width: 95, align: 'right', render: formatValue },
-  { title: '成交金额', dataIndex: 'gross_amount', width: 120, align: 'right', render: moneyValue },
-  { title: '费用', dataIndex: 'total_fee', width: 95, align: 'right', render: moneyValue },
+const marketColumns: ColumnsType<GenericRecord> = [
   { title: '开盘', dataIndex: 'open', width: 90, align: 'right', render: moneyValue },
   { title: '最高', dataIndex: 'high', width: 90, align: 'right', render: moneyValue },
   { title: '最低', dataIndex: 'low', width: 90, align: 'right', render: moneyValue },
@@ -81,11 +66,63 @@ const operationColumns: ColumnsType<GenericRecord> = [
     width: 100,
     render: (value) => <Tag color={value ? 'success' : 'warning'}>{value ? '完整' : '缺失'}</Tag>,
   },
+]
+
+const buyColumns: ColumnsType<GenericRecord> = [
+  { title: '批次 ID', dataIndex: 'trade_record_id', fixed: 'left', width: 175, render: formatValue },
+  { title: '股票', key: 'stock', fixed: 'left', width: 140, render: (_, record) => stockCell(record) },
+  { title: '成交价', dataIndex: 'executed_price', width: 95, align: 'right', render: moneyValue },
+  { title: '数量', dataIndex: 'quantity', width: 95, align: 'right', render: formatValue },
+  { title: '成交金额', dataIndex: 'gross_amount', width: 120, align: 'right', render: moneyValue },
+  { title: '买入费用', dataIndex: 'total_fee', width: 105, align: 'right', render: moneyValue },
+  ...marketColumns,
   { title: '操作原因', dataIndex: 'reason', width: 320, ellipsis: true, render: formatValue },
 ]
 
-function rowKey(record: GenericRecord, index?: number): string {
+const sellColumns: ColumnsType<GenericRecord> = [
+  { title: '卖出 ID', dataIndex: 'trade_record_id', fixed: 'left', width: 175, render: formatValue },
+  { title: '股票', key: 'stock', fixed: 'left', width: 140, render: (_, record) => stockCell(record) },
+  { title: '卖出价', dataIndex: 'executed_price', width: 95, align: 'right', render: moneyValue },
+  { title: '数量', dataIndex: 'quantity', width: 95, align: 'right', render: formatValue },
+  { title: '成交金额', dataIndex: 'gross_amount', width: 120, align: 'right', render: moneyValue },
+  { title: '卖出费用', dataIndex: 'total_fee', width: 105, align: 'right', render: moneyValue },
+  {
+    title: '买入批次追溯',
+    dataIndex: 'purchase_lot_count',
+    width: 135,
+    render: (value) => Number(value) > 0
+      ? <Tag color="blue">已关联 {Number(value)} 次买入</Tag>
+      : <Tag color="warning">暂无买入批次</Tag>,
+  },
+  ...marketColumns,
+  { title: '操作原因', dataIndex: 'reason', width: 320, ellipsis: true, render: formatValue },
+]
+
+const purchaseLotColumns: ColumnsType<GenericRecord> = [
+  { title: '批次 ID', dataIndex: 'lot_id', width: 175, render: formatValue },
+  { title: '买入日期', dataIndex: 'trade_date', width: 115, render: formatValue },
+  { title: '股票代码', dataIndex: 'stock_code', width: 105, render: formatValue },
+  { title: '买入价格', dataIndex: 'executed_price', width: 100, align: 'right', render: moneyValue },
+  { title: '买入数量', dataIndex: 'quantity', width: 100, align: 'right', render: formatValue },
+  { title: '买入金额', dataIndex: 'gross_amount', width: 120, align: 'right', render: moneyValue },
+  { title: '买入费用', dataIndex: 'total_fee', width: 105, align: 'right', render: moneyValue },
+]
+
+function positionRowKey(record: GenericRecord, index?: number): string {
   return String(record.order_id ?? record.position_id ?? `${record.stock_code ?? 'row'}-${index ?? 0}`)
+}
+
+function tradeRowKey(record: GenericRecord, index?: number): string {
+  return String(
+    record.trade_record_id
+    ?? `${record.trade_date ?? 'date'}_${record.stock_code ?? `row-${index ?? 0}`}`,
+  )
+}
+
+function purchaseLots(record: GenericRecord): GenericRecord[] {
+  return Array.isArray(record.purchase_lots)
+    ? record.purchase_lots.filter((item): item is GenericRecord => Boolean(item && typeof item === 'object'))
+    : []
 }
 
 export function DailyHistoryPanel({ userId, availableDates }: { userId: string; availableDates: string[] }) {
@@ -160,15 +197,50 @@ export function DailyHistoryPanel({ userId, availableDates }: { userId: string; 
             </Row>
 
             <div>
-              <Typography.Title level={5}>当日买入卖出操作</Typography.Title>
+              <Typography.Title level={5}>当日买入操作</Typography.Title>
               <Table<GenericRecord>
                 size="small"
                 scroll={{ x: 1500 }}
-                pagination={data.operations.total > 20 ? { pageSize: 20, showSizeChanger: true } : false}
-                dataSource={data.operations.records}
-                columns={operationColumns}
-                rowKey={rowKey}
-                locale={{ emptyText: '当日没有实际买入或卖出操作' }}
+                pagination={data.buy_operations.total > 20 ? { pageSize: 20, showSizeChanger: true } : false}
+                dataSource={data.buy_operations.records}
+                columns={buyColumns}
+                rowKey={tradeRowKey}
+                locale={{ emptyText: '当日没有实际买入操作' }}
+              />
+            </div>
+
+            <div>
+              <Typography.Title level={5}>当日卖出操作</Typography.Title>
+              <Table<GenericRecord>
+                size="small"
+                scroll={{ x: 1660 }}
+                pagination={data.sell_operations.total > 20 ? { pageSize: 20, showSizeChanger: true } : false}
+                dataSource={data.sell_operations.records}
+                columns={sellColumns}
+                rowKey={tradeRowKey}
+                locale={{ emptyText: '当日没有实际卖出操作' }}
+                expandable={{
+                  defaultExpandAllRows: true,
+                  rowExpandable: (record) => purchaseLots(record).length > 0,
+                  expandedRowRender: (record) => {
+                    const lots = purchaseLots(record)
+                    return (
+                      <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                        <Typography.Text strong>
+                          历史买入批次：共 {lots.length} 次，按买入日期排列
+                        </Typography.Text>
+                        <Table<GenericRecord>
+                          size="small"
+                          pagination={false}
+                          dataSource={lots}
+                          columns={purchaseLotColumns}
+                          rowKey={(lot) => String(lot.lot_id)}
+                          scroll={{ x: 820 }}
+                        />
+                      </Space>
+                    )
+                  },
+                }}
               />
             </div>
 
@@ -180,7 +252,7 @@ export function DailyHistoryPanel({ userId, availableDates }: { userId: string; 
                 pagination={data.positions.total > 20 ? { pageSize: 20, showSizeChanger: true } : false}
                 dataSource={data.positions.records}
                 columns={positionColumns}
-                rowKey={rowKey}
+                rowKey={positionRowKey}
                 locale={{ emptyText: '当日收盘后为空仓，或没有可用持仓快照' }}
               />
             </div>

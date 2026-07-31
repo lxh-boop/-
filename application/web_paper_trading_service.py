@@ -198,6 +198,94 @@ class WebPaperTradingApplicationService:
         data["ohlc_available"] = data[["open", "high", "low", "close"]].notna().all(axis=1)
         return data.drop(columns=["_history_code"])
 
+    def _historical_buy_lots(
+        self,
+        user_id: str,
+        selected_date: str,
+        order_dates: set[str],
+    ) -> list[dict[str, Any]]:
+        """Return prior buy batches keyed by trade date and stock code."""
+
+        import pandas as pd
+
+        frames: list[Any] = []
+        if self.db_path:
+            try:
+                from portfolio.storage import PortfolioStorage
+
+                storage = PortfolioStorage(
+                    db_path=self.db_path,
+                    output_dir=self.output_dir / "portfolio" / user_id,
+                    use_database=True,
+                )
+                database_orders = storage.repo.list_paper_orders(user_id=user_id)
+                if database_orders:
+                    frames.append(pd.DataFrame(database_orders))
+            except Exception:
+                pass
+
+        if not frames:
+            from portfolio.paper_account import load_daily_order_snapshot
+
+            for historical_date in sorted(
+                item for item in order_dates if item <= selected_date
+            ):
+                snapshot = load_daily_order_snapshot(
+                    user_id,
+                    historical_date,
+                    output_dir=self.output_dir,
+                )
+                if not snapshot.empty:
+                    frames.append(snapshot)
+
+        if not frames:
+            return []
+
+        orders = pd.concat(frames, ignore_index=True, sort=False)
+        if orders.empty or "stock_code" not in orders.columns:
+            return []
+
+        order_dates_series = self._normalized_date_series(
+            orders.get("trade_date", pd.Series("", index=orders.index))
+        )
+        stock_codes = self._normalized_code_series(orders["stock_code"])
+        action = orders.get("action", pd.Series("", index=orders.index)).astype(str).str.lower()
+        paper_action = orders.get("paper_action", pd.Series("", index=orders.index)).astype(str).str.lower()
+        quantity = pd.to_numeric(orders.get("quantity", 0), errors="coerce").fillna(0)
+
+        buys = orders[
+            (action.eq("buy") | paper_action.eq("paper_buy"))
+            & (quantity > 0)
+            & order_dates_series.notna()
+            & (order_dates_series <= selected_date)
+        ].copy()
+        if buys.empty:
+            return []
+
+        buys["trade_date"] = order_dates_series.loc[buys.index]
+        buys["stock_code"] = stock_codes.loc[buys.index]
+        buys["lot_id"] = buys["trade_date"] + "_" + buys["stock_code"]
+        sort_columns = ["trade_date"]
+        if "created_at" in buys.columns:
+            sort_columns.append("created_at")
+        buys = buys.sort_values(sort_columns, kind="stable")
+        buys = buys.drop_duplicates(["lot_id"], keep="last")
+
+        lot_columns = [
+            "lot_id",
+            "trade_date",
+            "stock_code",
+            "stock_name",
+            "executed_price",
+            "quantity",
+            "gross_amount",
+            "total_fee",
+        ]
+        for column in lot_columns:
+            if column not in buys.columns:
+                buys[column] = None
+        return buys.loc[:, lot_columns].to_dict(orient="records")
+
     def daily_history(self, user_id: str, trade_date: str) -> dict[str, Any]:
         import pandas as pd
 
@@ -267,11 +355,47 @@ class WebPaperTradingApplicationService:
         if not operations.empty:
             operations = operations.sort_values(["action", "stock_code"], kind="stable")
 
-        actions = (
-            operations.get("action", pd.Series("", index=operations.index))
-            .astype(str)
-            .str.lower()
+        actions = operations.get(
+            "action",
+            pd.Series("", index=operations.index),
+        ).astype(str).str.lower()
+        paper_actions = operations.get(
+            "paper_action",
+            pd.Series("", index=operations.index),
+        ).astype(str).str.lower()
+        inferred_actions = paper_actions.map(
+            {
+                "paper_buy": "buy",
+                "paper_sell": "sell",
+                "paper_reduce": "sell",
+            }
         )
+        actions = actions.where(actions.isin(["buy", "sell"]), inferred_actions).fillna("")
+        if not operations.empty:
+            operations["action"] = actions
+            operation_codes = self._normalized_code_series(operations["stock_code"])
+            operations["stock_code"] = operation_codes
+            operations["trade_record_id"] = selected_date + "_" + operation_codes
+
+        historical_buy_lots = self._historical_buy_lots(
+            user_id,
+            selected_date,
+            order_dates,
+        )
+        lots_by_stock: dict[str, list[dict[str, Any]]] = {}
+        for lot in historical_buy_lots:
+            lots_by_stock.setdefault(str(lot.get("stock_code") or ""), []).append(lot)
+
+        buy_operations = operations[actions == "buy"].copy()
+        sell_operations = operations[actions == "sell"].copy()
+        if not sell_operations.empty:
+            sell_lots = [
+                list(lots_by_stock.get(str(stock_code or ""), []))
+                for stock_code in sell_operations["stock_code"]
+            ]
+            sell_operations["purchase_lots"] = sell_lots
+            sell_operations["purchase_lot_count"] = [len(items) for items in sell_lots]
+
         ohlc_available = (
             operations.get("ohlc_available", pd.Series(False, index=operations.index))
             .fillna(False)
@@ -284,6 +408,8 @@ class WebPaperTradingApplicationService:
             "has_position_snapshot": selected_date in position_dates,
             "positions": positions,
             "operations": operations,
+            "buy_operations": buy_operations,
+            "sell_operations": sell_operations,
             "summary": {
                 "position_count": int(len(positions)),
                 "operation_count": int(len(operations)),

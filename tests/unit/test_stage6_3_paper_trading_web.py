@@ -211,6 +211,8 @@ def test_daily_history_returns_exact_positions_trades_and_same_day_ohlc(
     assert payload["has_position_snapshot"] is True
     assert payload["positions"]["total"] == 1
     assert payload["operations"]["total"] == 1
+    assert payload["buy_operations"]["total"] == 1
+    assert payload["sell_operations"]["total"] == 0
     assert payload["summary"] == {
         "position_count": 1,
         "operation_count": 1,
@@ -222,6 +224,7 @@ def test_daily_history_returns_exact_positions_trades_and_same_day_ohlc(
     operation = payload["operations"]["records"][0]
     assert operation["stock_code"] == "000001"
     assert operation["action"] == "buy"
+    assert operation["trade_record_id"] == "2026-07-28_000001"
     assert [operation[key] for key in ("open", "high", "low", "close")] == [10.5, 11.2, 10.3, 11.0]
     assert operation["ohlc_available"] is True
 
@@ -229,6 +232,86 @@ def test_daily_history_returns_exact_positions_trades_and_same_day_ohlc(
     assert missing_day["has_position_snapshot"] is False
     assert missing_day["positions"]["total"] == 0
     assert missing_day["operations"]["total"] == 0
+    assert missing_day["buy_operations"]["total"] == 0
+    assert missing_day["sell_operations"]["total"] == 0
+
+
+def test_sell_history_traces_each_prior_buy_lot_by_date_and_stock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_dir = tmp_path / "outputs"
+    storage = PortfolioStorage(
+        tmp_path / "agent.db",
+        output_dir=output_dir / "portfolio" / "u1",
+        use_database=False,
+    )
+    orders = [
+        create_paper_order(
+            user_id="u1",
+            trade_date="2026-07-25",
+            stock_code="000001",
+            action="buy",
+            target_weight=0.01,
+            executed_price=10.2,
+            quantity=100,
+            reason="first lot",
+        ),
+        create_paper_order(
+            user_id="u1",
+            trade_date="2026-07-28",
+            stock_code="000001",
+            action="buy",
+            target_weight=0.02,
+            executed_price=10.8,
+            quantity=200,
+            reason="second lot",
+        ),
+        create_paper_order(
+            user_id="u1",
+            trade_date="2026-07-30",
+            stock_code="000001",
+            action="sell",
+            target_weight=0.0,
+            executed_price=11.5,
+            quantity=300,
+            reason="exit",
+        ),
+    ]
+    for order in orders:
+        storage.write_daily_snapshot(
+            orders=[order],
+            trade_date=order.trade_date,
+        )
+
+    monkeypatch.setattr(
+        web_read_service,
+        "load_signal_ohlc_data",
+        lambda: pd.DataFrame(
+            [{
+                "date": "2026-07-30",
+                "code": "000001",
+                "open": 11.2,
+                "high": 11.8,
+                "low": 11.0,
+                "close": 11.5,
+            }]
+        ),
+    )
+    service = WebPaperTradingApplicationService(output_dir=output_dir, db_path=None)
+    payload = present_daily_history(service.daily_history("u1", "2026-07-30"))
+
+    assert payload["buy_operations"]["total"] == 0
+    assert payload["sell_operations"]["total"] == 1
+    sell = payload["sell_operations"]["records"][0]
+    assert sell["trade_record_id"] == "2026-07-30_000001"
+    assert sell["purchase_lot_count"] == 2
+    assert [lot["lot_id"] for lot in sell["purchase_lots"]] == [
+        "2026-07-25_000001",
+        "2026-07-28_000001",
+    ]
+    assert [lot["executed_price"] for lot in sell["purchase_lots"]] == [10.2, 10.8]
+    assert all(float(lot["total_fee"]) > 0 for lot in sell["purchase_lots"])
 
 
 def test_daily_history_frontend_uses_one_date_and_shows_ohlc() -> None:
@@ -237,8 +320,12 @@ def test_daily_history_frontend_uses_one_date_and_shows_ohlc() -> None:
     page = (ROOT / "frontend/src/pages/paper/PaperTradingPage.tsx").read_text(encoding="utf-8")
 
     assert 'type="date"' in component
-    assert "当日买入卖出操作" in component
+    assert "当日买入操作" in component
+    assert "当日卖出操作" in component
     assert "当日收盘后历史持仓" in component
+    assert "买入费用" in component
+    assert "purchase_lots" in component
+    assert "trade_record_id" in component
     for label in ("开盘", "最高", "最低", "收盘"):
         assert label in component
     assert "paperTradingApi.history" in component
