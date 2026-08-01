@@ -149,7 +149,13 @@ class WebReadApplicationService:
     def ranking_page(self, *, offset: int = 0, limit: int = 100) -> dict[str, Any]:
         frame = self.ranking()
         if frame is None or getattr(frame, "empty", True):
-            return {"records": [], "total": 0, "offset": int(offset), "limit": int(limit)}
+            return {
+                "records": [],
+                "total": 0,
+                "offset": int(offset),
+                "limit": int(limit),
+                "top15_statistics": None,
+            }
         data = self._attach_signal_date_ohlc(frame)
         if "pred_score" not in data.columns:
             data["pred_score"] = None
@@ -163,6 +169,38 @@ class WebReadApplicationService:
             data = data.sort_values("rank", ascending=True)
         elif "score" in data.columns:
             data = data.sort_values("score", ascending=False)
+        top15_statistics = None
+        if "top15_daily_average_up_rate" in data.columns:
+            available = data[data["top15_daily_average_up_rate"].notna()]
+            if not available.empty:
+                summary = available.iloc[0]
+                top15_statistics = {
+                    "top5_daily_average_up_rate": self._safe_number(
+                        summary.get("top5_daily_average_up_rate")
+                    ),
+                    "top10_daily_average_up_rate": self._safe_number(
+                        summary.get("top10_daily_average_up_rate")
+                    ),
+                    "daily_average_up_rate": self._safe_number(
+                        summary.get("top15_daily_average_up_rate")
+                    ),
+                    "observation_days": self._safe_number(
+                        summary.get("top15_observation_days")
+                    ),
+                    "complete_days": self._safe_number(
+                        summary.get("top15_complete_days")
+                    ),
+                    "observation_count": self._safe_number(
+                        summary.get("top15_observation_count")
+                    ),
+                    "rise_count": self._safe_number(
+                        summary.get("top15_rise_count")
+                    ),
+                    "top_k": self._safe_number(summary.get("calibration_top_k")),
+                    "start_date": self._text(summary.get("top15_start_date")),
+                    "end_date": self._text(summary.get("top15_end_date")),
+                    "target": self._text(summary.get("calibration_target")),
+                }
         start = max(int(offset), 0)
         size = min(max(int(limit), 1), 500)
         return {
@@ -170,6 +208,7 @@ class WebReadApplicationService:
             "total": int(len(data)),
             "offset": start,
             "limit": size,
+            "top15_statistics": top15_statistics,
         }
 
     def data_freshness(self) -> list[dict[str, Any]]:

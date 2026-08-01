@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from alpha158 import add_alpha158_features
+from confidence_scoring import add_confidence_scores
 from config import (
     ENABLE_NEWS_FEATURES,
     AGENT_QUANT_DB_PATH,
@@ -34,6 +35,7 @@ from news_features import add_news_event_features
 from news_db_sync import sync_event_cache_to_agent_db
 from pipelines.daily_update_pipeline import run_daily_update_pipeline
 from pipelines.schemas import PipelineContext
+from ranking_probability_calibration import calibrate_ranking_probabilities
 from universe import get_stock_pool
 
 # ============================================================
@@ -365,7 +367,9 @@ def model_zoo_daily_update(
         raw_data=raw_data,
         feature_data=feature_data,
         device="cpu",
+        calibration_history_dir=OUTPUT_DIR,
     )
+    calibration_report = ranking.attrs.get("probability_calibration", {})
     ranking.to_csv(RANKING_LATEST_PATH, index=False, encoding="utf-8-sig")
 
     date_text = datetime.today().strftime("%Y%m%d")
@@ -392,6 +396,7 @@ def model_zoo_daily_update(
         "prediction_signal_date": str(pd.to_datetime(ranking["date"].iloc[0]).date()) if not ranking.empty and "date" in ranking.columns else "",
         "prediction_horizon": "next_trading_day_T_plus_1",
         "ranking_rows": int(len(ranking)),
+        "probability_calibration": calibration_report,
         "disclaimer": "本项目仅用于机器学习、金融数据分析和项目展示，不构成投资建议，不用于实盘交易。",
     }
     metrics_path = os.path.join(OUTPUT_DIR, "model_zoo_latest_metrics.json")
@@ -466,6 +471,16 @@ def dft_unet_external_daily_update(
         print(f"[FineTune] skipped: {fine_tune_report['reason']}")
 
     ranking = adapter.predict(raw_data=raw_data, feature_data=feature_data)
+    ranking, calibration_report = calibrate_ranking_probabilities(
+        ranking,
+        feature_data=feature_data,
+        history_dir=OUTPUT_DIR,
+        model_name=str(ranking["model_name"].iloc[0]),
+    )
+    ranking = add_confidence_scores(
+        ranking,
+        calibration_report=calibration_report,
+    )
     if "date" in ranking.columns and not ranking.empty:
         latest_date = pd.to_datetime(ranking["date"].iloc[0])
         ranking["prediction_date"] = (latest_date + pd.offsets.BDay(1)).strftime("%Y-%m-%d")
@@ -497,6 +512,7 @@ def dft_unet_external_daily_update(
         "prediction_date": str(ranking["prediction_date"].iloc[0]) if not ranking.empty and "prediction_date" in ranking.columns else "",
         "prediction_horizon": "next_trading_day_T_plus_1",
         "ranking_rows": int(len(ranking)),
+        "probability_calibration": calibration_report,
         "checkpoint_path": str(adapter.checkpoint_path),
         "market_context": market_context_report,
         "fine_tune_report": fine_tune_report,

@@ -9,6 +9,7 @@ import pandas as pd
 from confidence_scoring import add_confidence_scores
 from model_zoo.metadata import get_model_metadata
 from model_zoo.registry import get_model_entry, list_model_entries
+from ranking_probability_calibration import calibrate_ranking_probabilities
 from ranking_schema import normalize_ranking_columns, validate_ranking_schema
 from risk_scoring import add_risk_scores
 
@@ -316,6 +317,7 @@ def make_zoo_latest_ranking(
     device: str = "cpu",
     context_length: int = 64,
     batch_size: int = 64,
+    calibration_history_dir: str | Path | None = None,
 ) -> pd.DataFrame:
     latest_date = pd.to_datetime(raw_data["date"].max())
     pred = predict_zoo_scores_for_dates(
@@ -333,15 +335,18 @@ def make_zoo_latest_ranking(
 
     if "raw_score" not in out.columns:
         out["raw_score"] = out["pred_5d_ret"]
-    out["up_prob_calibrated"] = out["up_prob"].clip(0.01, 0.99)
-    out["calibrated"] = False
-    out["calibration_method"] = "cross_sectional_rank_fallback"
     out["score"] = out["raw_score"].rank(pct=True)
     out["model_name"] = get_model_entry(model_name).name
     out["prediction_date"] = (latest_date + pd.offsets.BDay(1)).strftime("%Y-%m-%d")
 
     out = add_risk_scores(out)
-    out = add_confidence_scores(out, calibration_report={"calibrated": False, "method": "none"})
+    out, calibration_report = calibrate_ranking_probabilities(
+        out,
+        feature_data=feature_data,
+        history_dir=calibration_history_dir or PROJECT_ROOT / "outputs",
+        model_name=get_model_entry(model_name).name,
+    )
+    out = add_confidence_scores(out, calibration_report=calibration_report)
     out = out.sort_values("score", ascending=False).reset_index(drop=True)
     out.insert(0, "rank", np.arange(1, len(out) + 1))
     out = normalize_ranking_columns(out)
@@ -359,6 +364,25 @@ def make_zoo_latest_ranking(
         "up_prob_calibrated",
         "calibrated",
         "calibration_method",
+        "calibration_sample_count",
+        "calibration_positive_count",
+        "calibration_positive_rate",
+        "calibration_start_date",
+        "calibration_end_date",
+        "calibration_target",
+        "calibration_horizon_days",
+        "calibration_top_k",
+        "calibration_brier_score",
+        "calibration_log_loss",
+        "top5_daily_average_up_rate",
+        "top10_daily_average_up_rate",
+        "top15_daily_average_up_rate",
+        "top15_observation_days",
+        "top15_complete_days",
+        "top15_observation_count",
+        "top15_rise_count",
+        "top15_start_date",
+        "top15_end_date",
         "score",
         "confidence_score",
         "confidence",
@@ -374,6 +398,7 @@ def make_zoo_latest_ranking(
         "prediction_date",
     ]
     out = out[[col for col in output_cols if col in out.columns]].copy()
+    out.attrs["probability_calibration"] = calibration_report
     validate_ranking_schema(out)
     return out
 

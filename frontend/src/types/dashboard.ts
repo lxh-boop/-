@@ -17,6 +17,19 @@ export interface RankingRecord {
   raw_score?: number
   pred_5d_ret?: number
   up_prob?: number
+  up_prob_calibrated?: number
+  calibrated?: boolean
+  calibration_method?: string
+  calibration_sample_count?: number
+  calibration_positive_count?: number
+  calibration_positive_rate?: number
+  calibration_start_date?: string
+  calibration_end_date?: string
+  calibration_target?: string
+  calibration_horizon_days?: number
+  calibration_top_k?: number
+  calibration_brier_score?: number
+  calibration_log_loss?: number
   open?: number
   high?: number
   low?: number
@@ -27,7 +40,23 @@ export interface RankingRecord {
   [key: string]: unknown
 }
 
-export type RankingPageData = TablePayload<RankingRecord>
+export interface Top15Statistics {
+  top5_daily_average_up_rate?: number
+  top10_daily_average_up_rate?: number
+  daily_average_up_rate?: number
+  observation_days?: number
+  complete_days?: number
+  observation_count?: number
+  rise_count?: number
+  top_k?: number
+  start_date?: string
+  end_date?: string
+  target?: string
+}
+
+export interface RankingPageData extends TablePayload<RankingRecord> {
+  top15_statistics?: Top15Statistics | null
+}
 
 export interface FreshnessItem {
   key: string

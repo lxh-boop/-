@@ -5,6 +5,7 @@ import pandas as pd
 from application.web_read_service import WebReadApplicationService
 from server.api.main import create_app
 from server.api.presenters.common import table_payload, to_browser_value
+from server.api.presenters.dashboard import present_ranking_page
 
 
 EXPECTED_READ_ONLY_PATHS = {
@@ -95,6 +96,44 @@ def test_ranking_page_exposes_model_score_alias_without_recalculation() -> None:
     # The browser alias is copied from the model output; the combined score remains unchanged.
     assert records[0]["score"] == 0.9
     assert records[1]["pred_score"] == 0.0567
+
+
+def test_ranking_page_exposes_separate_top15_daily_statistics() -> None:
+    service = WebReadApplicationService()
+    service.ranking = lambda: pd.DataFrame([
+        {
+            "rank": 1,
+            "code": "000001",
+            "top5_daily_average_up_rate": 0.7,
+            "top10_daily_average_up_rate": 0.65,
+            "top15_daily_average_up_rate": 0.6,
+            "top15_observation_days": 10,
+            "top15_complete_days": 10,
+            "top15_observation_count": 150,
+            "top15_rise_count": 90,
+            "top15_start_date": "2026-01-01",
+            "top15_end_date": "2026-01-15",
+            "calibration_top_k": 15,
+            "calibration_target": "future_1d_ret_gt_0",
+        }
+    ])
+
+    payload = service.ranking_page(offset=0, limit=10)
+    statistics = payload["top15_statistics"]
+    assert statistics == {
+        "top5_daily_average_up_rate": 0.7,
+        "top10_daily_average_up_rate": 0.65,
+        "daily_average_up_rate": 0.6,
+        "observation_days": 10,
+        "complete_days": 10,
+        "observation_count": 150,
+        "rise_count": 90,
+        "top_k": 15,
+        "start_date": "2026-01-01",
+        "end_date": "2026-01-15",
+        "target": "future_1d_ret_gt_0",
+    }
+    assert present_ranking_page(payload)["top15_statistics"] == statistics
 
 
 def test_ranking_page_joins_signal_date_ohlc() -> None:
