@@ -103,8 +103,9 @@ def _system_prompt(language: str, policy: ReportPolicy) -> str:
             "that the name was not provided. A view-only request may only display verified "
             "account/position facts, data time, and limitations. It must not add risk "
             "assessment, industry judgment, causal analysis, or action advice. Risk "
-            "conclusions require an upstream PortfolioRiskResult. Advice requires both an "
-            "explicit user request and an upstream ReviewedProposal. Keep the report concise."
+            "conclusions require an upstream PortfolioRiskResult. Portfolio adjustment content "
+            "requires an upstream ReviewedProposal. Clearly state that the proposal is pending "
+            "approval and has not been executed. Keep the report concise."
         )
         return base + strict
 
@@ -120,8 +121,10 @@ def _system_prompt(language: str, policy: ReportPolicy) -> str:
         "禁止根据证券代码、position_id、上下文记忆或常识自行补充证券名称。权威名称缺失时，只展示代码并注明"
         "“名称未提供”。禁止自行补充行业、新闻影响、风险结论或建议。若 report_policy.view_only=true，"
         "只展示用户要求的账户和持仓事实、数据时间及明确限制；除非用户目标明确要求，否则不要展开订单、"
-        "风险、行业、策略或建议。风险结论必须来自上游 PortfolioRiskResult；操作建议必须同时满足用户明确要求"
-        "且上游存在 ReviewedProposal。缺失字段写“数据未提供”，不得推测。报告应简洁，避免重复。"
+        "风险、行业、策略或建议。风险结论必须来自上游 PortfolioRiskResult；持仓调整方案必须同时满足用户明确要求"
+        "且上游存在 ReviewedProposal，并明确说明该预案待审批且尚未执行。"
+        "当用户明确询问持仓如何调整时，必须忠实呈现上游 ReviewedProposal，不能把目标弱化为仅展示持仓，"
+        "也不能声称用户未请求建议。缺失字段写“数据未提供”，不得推测。报告应简洁，避免重复。"
     )
     return base + strict
 
@@ -227,6 +230,13 @@ def run_report_writer(
         operation="write_graph_grounded_report",
     )
     validation = validate_report_output(str(answer or ""), policy)
+    recovery = (
+        "none"
+        if validation.valid
+        else "targeted_w06_repair"
+        if validation.repairable
+        else "required_upstream_recovery"
+    )
     flow_event(
         "REPORT_OUTPUT_VALIDATION_COMPLETED",
         {
@@ -235,7 +245,7 @@ def run_report_writer(
             "valid": validation.valid,
             "issue_count": len(validation.issues),
             "issues": [item.to_dict() for item in validation.issues],
-            "recovery": "none" if validation.valid else "targeted_w06_repair",
+            "recovery": recovery,
             "upstream_tasks_reused": requested_task_ids
             or list(selected_dependency_results.keys()),
         },
@@ -299,14 +309,32 @@ def run_report_writer(
     upstream_partial = bool(statuses & {"partial", "need_context", "failed"})
     validation_failed = not validation.valid
     if validation_failed:
+        missing_required_upstream = any(
+            item.code in {
+                "missing_required_risk_worker_output",
+                "missing_required_strategy_worker_output",
+            }
+            for item in validation.issues
+        )
         answer = (
-            "本次自然语言报告未通过事实与职责边界校验。上游查询结果已保留，"
-            "系统未返回未经验证的实体名称、风险结论或操作建议。"
+            (
+                "当前持仓调整链路缺少必要的风险或策略 Worker 结果。已保留成功的上游查询，"
+                "但不会由 W06 自行补写调整建议；需要先恢复失败或缺失的上游专业任务。"
+            )
+            if language != "en" and missing_required_upstream
+            else (
+                "本次自然语言报告未通过事实与职责边界校验，或未满足用户目标。上游结果已保留，"
+                "系统未返回未经验证的实体、结论或建议。"
+            )
             if language != "en"
             else (
-                "The generated report did not pass grounding and scope validation. "
-                "Upstream query results were preserved, and unsupported entity names, "
-                "risk conclusions, or advice were not returned."
+                "The adjustment chain is missing a required risk or strategy Worker result. "
+                "Successful upstream results were preserved, and W06 did not invent advice."
+            )
+            if missing_required_upstream
+            else (
+                "The generated report did not pass grounding, scope, or goal-completion validation. "
+                "Upstream results were preserved and unsupported content was not returned."
             )
         )
 
@@ -342,10 +370,21 @@ def run_report_writer(
         },
         error=(
             {
-                "code": "report_output_validation_failed",
-                "message": "W06 output failed grounding or scope validation.",
+                "code": (
+                    "report_required_upstream_missing"
+                    if any(
+                        item.code in {
+                            "missing_required_risk_worker_output",
+                            "missing_required_strategy_worker_output",
+                        }
+                        for item in validation.issues
+                    )
+                    else "report_output_validation_failed"
+                ),
+                "message": "W06 output failed grounding, scope, or goal-completion validation.",
                 "component": "REPORT_WRITER",
-                "retryable": True,
+                "retryable": validation.repairable,
+                "repairable": validation.repairable,
             }
             if validation_failed
             else None
@@ -383,6 +422,13 @@ def run_report_writer(
             "targeted_repair_used": repair_attempted,
             "targeted_repair_succeeded": repair_succeeded,
             "full_dag_replan_used": False,
+            "upstream_recovery_required": bool(
+                validation_failed and not validation.repairable
+            ),
+            # Kept for older trace readers. Planning-time contract repair now
+            # prevents an incomplete adjustment DAG from being accepted; a
+            # runtime provider failure is not blindly sent back to the planner.
+            "partial_dag_replan_required": False,
             "upstream_results_reused": True,
         },
     )

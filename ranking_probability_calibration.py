@@ -161,18 +161,20 @@ def _load_archived_predictions(
         ["_source_priority", "_source_file", "date", "code"],
         kind="stable",
     ).drop_duplicates(["date", "code"], keep="last")
-    history["_selection_score"] = history["score"]
-    history["_selection_score"] = history["_selection_score"].where(
-        history["_selection_score"].notna(),
-        -history["rank"],
+    has_explicit_rank = history.groupby("date", sort=False)["rank"].transform(
+        lambda values: values.notna().any()
     )
-    history["_selection_score"] = history["_selection_score"].where(
-        history["_selection_score"].notna(),
+    history["_rank_sort"] = history["rank"].where(
+        has_explicit_rank,
+        np.inf,
+    )
+    history["_fallback_score"] = history["score"].where(
+        history["score"].notna(),
         history["up_prob"],
     )
     history = history.sort_values(
-        ["date", "_selection_score", "up_prob", "code"],
-        ascending=[True, False, False, True],
+        ["date", "_rank_sort", "_fallback_score", "up_prob", "code"],
+        ascending=[True, True, False, False, True],
         kind="stable",
     )
     history = history.groupby("date", sort=True, group_keys=False).head(

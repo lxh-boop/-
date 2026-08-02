@@ -1,5 +1,20 @@
 from __future__ import annotations
 
+import sys
+import types
+
+# 隔离交付测试环境可能缺少当前项目中的 token_budget 辅助模块。
+# 仅在模块确实不存在时注入最小桩，不覆盖真实项目实现。
+try:
+    import agent.context.token_budget  # noqa: F401
+except ModuleNotFoundError:
+    _token_budget_stub = types.ModuleType("agent.context.token_budget")
+    _token_budget_stub.estimate_tokens = lambda value: max(1, len(str(value)) // 4)
+    _token_budget_stub.truncate_text_to_tokens = (
+        lambda value, max_tokens: str(value)[: max(1, int(max_tokens)) * 4]
+    )
+    sys.modules["agent.context.token_budget"] = _token_budget_stub
+
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -19,6 +34,8 @@ from agent.collaboration.specialist_runtime import SpecialistRuntime
 from agent.collaboration.worker_contracts import WorkerContractViolation
 from agent.collaboration.workers.report_writer import run_report_writer
 from agent.graph.contracts import GraphNodeKind, GraphRef
+
+from tests.unit._forward_plan_helpers import decorate_forward_plan
 
 
 def _security_ref(code: str = "600519") -> GraphRef:
@@ -226,7 +243,24 @@ def test_report_writer_receives_resolved_typed_payload_not_ambiguous_findings() 
 def test_planner_compiles_comprehensive_stock_analysis_w01_w02_w06_without_new_edges() -> None:
     directory = AgentDirectory()
     planner = CoordinatorPlanner(directory, llm_service=SimpleNamespace())
-    payload = {
+    raw_payload = {
+        "goal_contract": {
+            "goal_summary": "完成证券综合分析并生成最终报告",
+            "desired_output_types": [
+                "EntityResearchResult",
+                "ModelPredictionResult",
+                "FinalReport",
+            ],
+            "completion_criteria": [
+                "返回外部证据、内部模型预测和最终报告"
+            ],
+            "constraints": [],
+            "side_effect_policy": {
+                "allow_derived_writes": True,
+                "allow_proposal": False,
+                "allow_commit": False,
+            },
+        },
         "tasks": [
             {
                 "task_id": "W01_001",
@@ -268,6 +302,23 @@ def test_planner_compiles_comprehensive_stock_analysis_w01_w02_w06_without_new_e
             },
         ]
     }
+    payload = decorate_forward_plan(
+        raw_payload,
+        initial_slots=[
+            "user_request",
+            "user_identity",
+            "reply_language",
+            "authoritative_graph_refs",
+            "authoritative_financial_entities",
+            "authoritative_security_entities",
+            "analysis_permission",
+        ],
+        goal_slots=[
+            "entity_external_evidence",
+            "entity_model_signals",
+            "user_facing_report",
+        ],
+    )
     prepared, audit = planner._prepare_payload(
         payload,
         runtime_values={

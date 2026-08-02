@@ -96,6 +96,174 @@ def _position_code(row: dict[str, Any]) -> str:
     return match.group(1) if match else ""
 
 
+def _normalize_ranking_payload(value: Any) -> Any:
+    """Preserve public entity identity in ranking results before sanitization.
+
+    The generic public sanitizer intentionally removes provider-style fields
+    such as ``stock_code`` and ``stock_name``. Ranking results still need a
+    public code/label contract so downstream strategy Workers can compare the
+    current portfolio with model signals without guessing identities.
+    """
+
+    if isinstance(value, dict):
+        normalized = {
+            str(key): _normalize_ranking_payload(item)
+            for key, item in value.items()
+        }
+        code = ""
+        for key in ("public_code", "stock_code", "security_code", "code", "symbol", "ts_code"):
+            match = re.search(r"(?<!\d)(\d{6})(?!\d)", str(value.get(key) or ""))
+            if match:
+                code = match.group(1)
+                break
+        if code:
+            normalized["public_code"] = code
+            label = str(
+                value.get("display_label")
+                or value.get("stock_name")
+                or value.get("security_name")
+                or value.get("display_name")
+                or ""
+            ).strip()
+            if label:
+                normalized["display_label"] = label[:80]
+        return normalized
+    if isinstance(value, (list, tuple)):
+        return [_normalize_ranking_payload(item) for item in value]
+    return value
+
+
+def _enrich_ranking_entities(value: Any, provider: Any) -> Any:
+    """Attach canonical Graph identity descriptors to ranking records.
+
+    Ranking tools commonly return provider-oriented ``stock_code`` and
+    ``stock_name`` fields. ``_normalize_ranking_payload`` first converts those
+    fields into a public code/label shape. This function then resolves every
+    public code through the existing graph identity service. Exact graph
+    identity wins over a tool-provided label; unresolved codes remain usable as
+    codes and are explicitly marked as unlocked rather than guessed by an LLM.
+    """
+
+    if provider is None:
+        return value
+    identity = getattr(provider, "identity", None)
+    resolver = getattr(identity, "resolve_identity", None)
+    descriptor = getattr(provider, "public_entity_descriptor", None)
+    if not callable(resolver) or not callable(descriptor):
+        return value
+
+    codes: list[str] = []
+
+    def collect(item: Any) -> None:
+        if isinstance(item, dict):
+            match = re.search(
+                r"(?<!\d)(\d{6})(?!\d)",
+                str(item.get("public_code") or ""),
+            )
+            if match and match.group(1) not in codes:
+                codes.append(match.group(1))
+            for child in item.values():
+                collect(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                collect(child)
+
+    collect(value)
+    descriptors: dict[str, dict[str, Any]] = {}
+    for code in codes[:100]:
+        try:
+            candidates = list(
+                resolver(
+                    code,
+                    role="ranking_candidate",
+                    locked=True,
+                    as_of_time="",
+                )
+                or []
+            )
+            unique = {
+                item.graph_ref.node_id: item.graph_ref
+                for item in candidates
+                if getattr(item, "graph_ref", None) is not None
+                and getattr(item.graph_ref, "node_id", "")
+            }
+            if len(unique) == 1:
+                ref = next(iter(unique.values()))
+                public = dict(descriptor(ref) or {})
+                public["identity_locked"] = True
+                descriptors[code] = public
+        except Exception:
+            # Identity enrichment is best-effort. The ranking fact remains
+            # available by public code, but no name is fabricated.
+            continue
+
+    def attach(item: Any) -> Any:
+        if isinstance(item, dict):
+            enriched = {str(key): attach(child) for key, child in item.items()}
+            match = re.search(
+                r"(?<!\d)(\d{6})(?!\d)",
+                str(item.get("public_code") or ""),
+            )
+            if not match:
+                return enriched
+            code = match.group(1)
+            public = dict(descriptors.get(code) or {})
+            if public:
+                enriched["public_code"] = code
+                if str(public.get("display_label") or "").strip():
+                    enriched["display_label"] = str(public["display_label"])[:80]
+                enriched["entity_ref"] = safe_public_value(
+                    public.get("entity_ref") or {}
+                )
+                enriched["exchange"] = str(public.get("exchange") or "")
+                enriched["identity_source"] = str(
+                    public.get("identity_source") or "graph_identity"
+                )
+                enriched["identity_locked"] = True
+            else:
+                enriched.setdefault("identity_source", "internal_ranking")
+                enriched.setdefault("identity_locked", False)
+            return enriched
+        if isinstance(item, (list, tuple)):
+            return [attach(child) for child in item]
+        return item
+
+    return attach(value)
+
+
+def _prediction_parameter_failure(
+    task: GraphAgentTask,
+    *,
+    code: str,
+    message: str,
+) -> GraphWorkerResult:
+    return GraphWorkerResult(
+        task_id=task.task_id,
+        agent_id=task.assigned_agent,
+        status=ResultStatus.FAILED,
+        output_type="ModelPredictionResult",
+        payload_schema="ModelPredictionResult.v1",
+        payload=None,
+        data=None,
+        error={
+            "code": code,
+            "message": message,
+            "component": INTERNAL_PREDICTION_GET_STOCK,
+            "retryable": False,
+            "repairable": True,
+            "failure_kind": "parameter_contract_violation",
+        },
+        focus_refs=task.focus_refs,
+        summary=message,
+        warnings=[code],
+        metadata={
+            "failure_kind": "parameter_contract_violation",
+            "retryable": False,
+            "repairable": True,
+        },
+    )
+
+
 def _entity_catalog(provider: Any, holding_refs: list[GraphRef]) -> list[dict[str, Any]]:
     catalog: list[dict[str, Any]] = []
     resolver = getattr(provider, "public_entity_descriptor", None)
@@ -267,14 +435,32 @@ def run_internal_system(
         raise ValueError(f"unsupported_internal_system_task:{task.task_type}")
     tool_name, output_type = mapping
     arguments = dict(task.args or {})
+    selected = None
     if task.task_type == "query_stock_prediction":
         selected_ids = {str(item) for item in task.args.get("focus_ref_ids") or []}
-        selected = next(
-            (ref for ref in [*task.focus_refs, *task.context_refs] if not selected_ids or ref.node_id in selected_ids),
-            None,
-        )
-        if selected is None:
-            raise ValueError("authoritative_security_graph_ref_required")
+        security_refs = [
+            ref
+            for ref in [*task.focus_refs, *task.context_refs]
+            if str(ref.node_id or "").startswith("cn:security:")
+            and (not selected_ids or ref.node_id in selected_ids)
+        ]
+        unique_refs = {ref.node_id: ref for ref in security_refs}
+        if not unique_refs:
+            return _prediction_parameter_failure(
+                task,
+                code="authoritative_security_graph_ref_required",
+                message="单证券预测需要一个权威 security GraphRef。",
+            )
+        if len(unique_refs) > 1:
+            return _prediction_parameter_failure(
+                task,
+                code="single_security_graph_ref_required",
+                message=(
+                    "query_stock_prediction 只支持一个证券实体；组合级调整应改用 "
+                    "query_latest_ranking，而不是把多个持仓 GraphRef 绑定到单证券工具。"
+                ),
+            )
+        selected = next(iter(unique_refs.values()))
         arguments = {
             "security_node_id": selected.node_id,
             "top_k": int(task.args.get("top_k") or default_top_k or 10),
@@ -289,9 +475,12 @@ def run_internal_system(
         context=_tool_context(task, output_dir, db_path),
         agent_type=task.assigned_agent,
     )
-    payload = safe_public_value(tool_result.data or {})
+    raw_payload = tool_result.data or {}
+    if task.task_type == "query_latest_ranking":
+        raw_payload = _normalize_ranking_payload(raw_payload)
+        raw_payload = _enrich_ranking_entities(raw_payload, provider)
+    payload = safe_public_value(raw_payload)
     if task.task_type == "query_stock_prediction":
-        selected = next(iter(task.focus_refs), None)
         payload = dict(payload or {})
         payload["security_ref"] = selected.to_dict() if selected else {}
     success = bool(tool_result.success)

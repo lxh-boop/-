@@ -25,16 +25,16 @@ export function RankingPage() {
     <ReadOnlyNotice />
     {summary.data && <ModelStatusCards summary={summary.data}/>}
     <Card title={`最新预测排名 · ${rankings.data?.total ?? 0} 条`}><RankingTable records={records} onSelect={(code)=>navigate(`/stocks/${code}`)}/></Card>
-    <Card title="历史每日前5 / 前10 / 前15名次日上涨统计">
+    <Card title="历史每日排名前5名 / 前10名 / 前15名上涨统计">
       {typeof top15?.daily_average_up_rate === 'number' ? <>
         <Row gutter={[16, 16]}>
-          <Col xs={12} lg={6}><Statistic title="前5日均上涨率" value={Number(top15.top5_daily_average_up_rate ?? 0) * 100} precision={2} suffix="%" /></Col>
-          <Col xs={12} lg={6}><Statistic title="前10日均上涨率" value={Number(top15.top10_daily_average_up_rate ?? 0) * 100} precision={2} suffix="%" /></Col>
-          <Col xs={12} lg={6}><Statistic title="前15日均上涨率" value={top15.daily_average_up_rate * 100} precision={2} suffix="%" /></Col>
+          <Col xs={12} lg={6}><Statistic title="排名前5名平均上涨率" value={Number(top15.top5_daily_average_up_rate ?? 0) * 100} precision={2} suffix="%" /></Col>
+          <Col xs={12} lg={6}><Statistic title="排名前10名平均上涨率" value={Number(top15.top10_daily_average_up_rate ?? 0) * 100} precision={2} suffix="%" /></Col>
+          <Col xs={12} lg={6}><Statistic title="排名前15名平均上涨率" value={top15.daily_average_up_rate * 100} precision={2} suffix="%" /></Col>
           <Col xs={12} lg={6}><Statistic title="完整交易日" value={top15.complete_days ?? top15.observation_days ?? 0} /></Col>
         </Row>
         <Typography.Text type="secondary">
-          统计区间 {top15.start_date || '—'} 至 {top15.end_date || '—'}，前15共有 {Number(top15.observation_count ?? 0).toLocaleString()} 个有效样本、{Number(top15.rise_count ?? 0).toLocaleString()} 次实际上涨。每天分别计算前5、前10、前15名在下一交易日的实际上涨比例，再对各完整交易日取平均。
+          统计区间 {top15.start_date || '—'} 至 {top15.end_date || '—'}，前15名共有 {Number(top15.observation_count ?? 0).toLocaleString()} 个有效样本、{Number(top15.rise_count ?? 0).toLocaleString()} 次实际上涨。每天分别截取当日模型排名第1–5名、第1–10名和第1–15名，计算各组股票下一交易日的实际上涨比例，再对所有完整交易日取平均。
         </Typography.Text>
       </> : <Typography.Text type="secondary">完整历史样本不足，暂不发布每日前5 / 前10 / 前15名统计。</Typography.Text>}
     </Card>

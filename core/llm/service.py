@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -122,6 +123,53 @@ class LLMService:
         except Exception:
             return
 
+    @staticmethod
+    def _validation_error_context(error: Exception) -> dict[str, Any]:
+        """Extract a machine-readable contract error from an exception chain."""
+
+        chain: list[Exception] = []
+        current: BaseException | None = error
+        seen: set[int] = set()
+        while isinstance(current, Exception) and id(current) not in seen:
+            seen.add(id(current))
+            chain.append(current)
+            current = current.__cause__ or current.__context__
+
+        contract_error = next(
+            (
+                item
+                for item in chain
+                if str(getattr(item, "code", "") or "").strip()
+            ),
+            None,
+        )
+        selected = contract_error or error
+        return {
+            "error_type": type(error).__name__,
+            "message": str(error)[:4000],
+            "contract_code": str(getattr(selected, "code", "") or ""),
+            "path": str(getattr(selected, "path", "") or ""),
+            "detail": str(getattr(selected, "detail", "") or "")[:4000],
+            "exception_chain": [
+                {
+                    "type": type(item).__name__,
+                    "message": str(item)[:2000],
+                }
+                for item in chain[:6]
+            ],
+        }
+
+    @staticmethod
+    def _repair_candidate_payload(
+        candidate: dict[str, Any] | None,
+        raw_output: str,
+    ) -> dict[str, Any] | str:
+        """Keep the complete parsed candidate when possible for targeted repair."""
+
+        if isinstance(candidate, dict):
+            return candidate
+        return str(raw_output or "")[:24000]
+
     def generate_text(
         self,
         *,
@@ -180,18 +228,22 @@ class LLMService:
         operation: str = "",
         event_callback: Callable[[str, dict[str, Any]], None] | None = None,
         repair_guidance: str = "",
+        repair_mode: str = "regenerate",
     ) -> dict[str, Any]:
         """Generate JSON and perform exactly one full-plan repair request.
 
         ``event_callback`` exposes only bounded lifecycle diagnostics.
         ``repair_guidance`` adds caller-owned contract guidance to the single
         existing repair attempt; it does not alter timeout, retry count, model
-        binding, or validation policy. The first invalid plan is discarded; a
-        successful repair must still return a complete independently valid JSON
-        object.
+        binding, or validation policy. ``repair_mode="targeted"`` preserves the
+        parsed candidate and asks the model to repair only the contract fields
+        identified by the validator while still returning a complete JSON object.
         """
 
         effective_operation = operation or "primary"
+        normalized_repair_mode = str(repair_mode or "regenerate").strip().lower()
+        if normalized_repair_mode not in {"regenerate", "targeted"}:
+            raise ValueError(f"unsupported_repair_mode:{normalized_repair_mode}")
         diagnostics: dict[str, Any] = {
             "stage": stage,
             "operation": effective_operation,
@@ -257,8 +309,10 @@ class LLMService:
             return first_candidate
         except Exception as first_exc:
             self._record_schema(first_event_id, False)
+            error_context = self._validation_error_context(first_exc)
             diagnostics["primary"]["error_type"] = type(first_exc).__name__
             diagnostics["primary"]["error_message"] = str(first_exc)[:2000]
+            diagnostics["primary"]["error_context"] = error_context
             self._emit_generation_event(
                 event_callback,
                 "validation_failed",
@@ -267,21 +321,42 @@ class LLMService:
                     "attempt": "primary",
                     "error_type": type(first_exc).__name__,
                     "error_message": str(first_exc)[:2000],
+                    "error_context": error_context,
                     "candidate": first_candidate,
                 },
             )
 
+            targeted = normalized_repair_mode == "targeted"
+            repair_instruction = (
+                "保留原用户目标、仍然合法的任务和合法依赖，只修改校验错误指出的字段及其必然受影响字段。"
+                if targeted
+                else "丢弃不合法结构并重新生成满足相同用户目标的完整结果。"
+            )
+            repair_request = {
+                "repair_mode": (
+                    "targeted_complete_json" if targeted else "regenerate_complete_json"
+                ),
+                "instruction": repair_instruction,
+                "validation_error": error_context,
+                "invalid_candidate": self._repair_candidate_payload(
+                    first_candidate, output
+                ),
+                "caller_repair_guidance": str(repair_guidance or "")[:6000],
+                "output_requirements": [
+                    "Return one complete independently valid JSON object.",
+                    "Preserve the original user goal and side-effect boundary.",
+                    "Do not output Markdown or explanatory prose.",
+                    "Do not invent missing facts, entities, constraints, or dependencies.",
+                ],
+            }
             repair_messages = [
                 *[dict(item) for item in messages],
-                {"role": "assistant", "content": str(output or "")[:6000]},
                 {
                     "role": "user",
-                    "content": (
-                        "上一个完整计划未通过 JSON 或合同校验，必须丢弃原计划并重新生成完整结果。"
-                        f"校验错误：{type(first_exc).__name__}: {str(first_exc)[:1200]}。"
-                        "请保持原用户目标不变，严格按照系统给出的 schema 和能力合同重新输出一个 JSON 对象。"
-                        + (f"本次精确修复要求：{str(repair_guidance)[:2400]}。" if str(repair_guidance or "").strip() else "")
-                        + "不要只修补单个字段，不要 Markdown，不要解释，不要猜测缺失信息。"
+                    "content": json.dumps(
+                        repair_request,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
                     ),
                 },
             ]
@@ -292,8 +367,10 @@ class LLMService:
                     "stage": stage,
                     "operation": "schema_repair",
                     "attempt": "repair",
+                    "repair_mode": normalized_repair_mode,
                     "previous_error_type": type(first_exc).__name__,
                     "previous_error_message": str(first_exc)[:2000],
+                    "error_context": error_context,
                 },
             )
             repaired = self.generate_text(

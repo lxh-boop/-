@@ -417,11 +417,159 @@ class AgentCollaborationCoordinator:
             execution_context=context,
         )
         flow_event(
+            "WORKER_INITIAL_EXECUTION_COMPLETED",
+            {
+                "result_count": len(results),
+                "execution_batches": batches,
+                "timeline": timeline,
+            },
+            run_id=run_id,
+        )
+
+        # Execution-time forward replanning. Successful non-report WorkerResults
+        # are frozen and reused. Only partial/failed/insufficient tasks are
+        # superseded, and every patch remains inside the original GoalContract
+        # and side-effect boundary.
+        active_tasks = list(tasks)
+        replan_audit: list[dict[str, Any]] = []
+        invalid_replan_block_count = 0
+        max_replan_rounds = 2
+        for replan_round in range(1, max_replan_rounds + 1):
+            observations = self._build_task_observations(active_tasks, results)
+            flow_event(
+                "WORKER_RESULT_OBSERVATION_COMPLETED",
+                {
+                    "replan_round": replan_round - 1,
+                    "observations": observations,
+                },
+                run_id=run_id,
+                level=(
+                    "WARNING"
+                    if any(not item.get("semantic_satisfied") for item in observations)
+                    else "INFO"
+                ),
+            )
+            blocking_context = any(
+                item.get("failure_kind") == "context_missing"
+                for item in observations
+            )
+            replan_candidates = [
+                item for item in observations if item.get("replan_recommended")
+            ]
+            if blocking_context or not replan_candidates:
+                break
+            before_unsatisfied = sum(
+                1 for item in observations if not item.get("semantic_satisfied")
+            )
+            try:
+                full_tasks, new_tasks, replan_meta = self.planner.replan_forward(
+                    query=query,
+                    request_mode=decision.mode.value,
+                    session_id=session_id,
+                    run_id=run_id,
+                    user_id=user_id,
+                    focus_refs=focus_refs,
+                    context_refs=context_refs,
+                    memory_summary=memory_summary,
+                    language=language,
+                    as_of_time=explicit_as_of,
+                    current_tasks=active_tasks,
+                    current_results=results,
+                    observations=observations,
+                    replan_round=replan_round,
+                )
+            except Exception as exc:
+                invalid_replan_block_count += 1
+                audit = {
+                    "round": replan_round,
+                    "status": "blocked",
+                    "reason": str(exc),
+                    "exception_type": type(exc).__name__,
+                    "observations": replan_candidates,
+                }
+                replan_audit.append(audit)
+                flow_event(
+                    "WORKER_FORWARD_REPLAN_BLOCKED",
+                    audit,
+                    run_id=run_id,
+                    level="ERROR",
+                )
+                break
+            if not new_tasks:
+                replan_audit.append(
+                    {
+                        "round": replan_round,
+                        "status": "no_patch",
+                        "reason": "forward_replan_returned_no_new_tasks",
+                        "meta": replan_meta,
+                    }
+                )
+                break
+            if self.runtime_services is not None:
+                self.runtime_services.register_tasks(new_tasks)
+            combined_results, new_batches, new_timeline = self._run_dag(
+                new_tasks,
+                query=query,
+                output_dir=self.output_dir,
+                db_path=self.db_path,
+                default_top_k=default_top_k,
+                language=language,
+                execution_context=context,
+                existing_results=results,
+            )
+            batch_offset = len(batches)
+            for batch in new_batches:
+                batch["batch_index"] = int(batch.get("batch_index") or 0) + batch_offset
+                batch["replan_round"] = replan_round
+            for row in new_timeline:
+                row["replan_round"] = replan_round
+            active_ids = {task.task_id for task in full_tasks}
+            superseded_ids = sorted(set(results) - active_ids)
+            results = {
+                task_id: result
+                for task_id, result in combined_results.items()
+                if task_id in active_ids
+            }
+            active_tasks = list(full_tasks)
+            batches.extend(new_batches)
+            timeline.extend(new_timeline)
+            after_observations = self._build_task_observations(active_tasks, results)
+            after_unsatisfied = sum(
+                1 for item in after_observations if not item.get("semantic_satisfied")
+            )
+            progress = after_unsatisfied < before_unsatisfied
+            audit = {
+                "round": replan_round,
+                "status": "executed",
+                "reused_task_ids": replan_meta.get("reused_task_ids") or [],
+                "new_task_ids": replan_meta.get("new_task_ids") or [],
+                "superseded_task_ids": superseded_ids,
+                "before_unsatisfied": before_unsatisfied,
+                "after_unsatisfied": after_unsatisfied,
+                "progress": progress,
+                "meta": replan_meta,
+            }
+            replan_audit.append(audit)
+            flow_event(
+                "WORKER_FORWARD_REPLAN_EXECUTED",
+                audit,
+                run_id=run_id,
+                level="INFO" if progress else "WARNING",
+            )
+            if not progress:
+                break
+
+        tasks = active_tasks
+        final_observations = self._build_task_observations(tasks, results)
+        flow_event(
             "WORKER_EXECUTION_COMPLETED",
             {
                 "result_count": len(results),
                 "execution_batches": batches,
                 "timeline": timeline,
+                "task_observations": final_observations,
+                "replan_count": len([item for item in replan_audit if item.get("status") == "executed"]),
+                "replan_audit": replan_audit,
             },
             run_id=run_id,
         )
@@ -440,11 +588,25 @@ class AgentCollaborationCoordinator:
                 )
 
         public_results = {task_id: result.safe_for_coordinator() for task_id, result in results.items()}
-        report = next((result for result in results.values() if result.agent_id == REPORT_WRITER), None)
+        report = next(
+            (
+                results.get(task.task_id)
+                for task in reversed(tasks)
+                if task.assigned_agent == REPORT_WRITER and task.task_id in results
+            ),
+            None,
+        )
         answer = report.summary if report and report.summary else self._fallback_answer(results, language)
         statuses = [result.status for result in results.values()]
         need_context = [item for result in results.values() for item in result.missing_items if item.blocking]
-        failed = sum(status in {ResultStatus.FAILED, ResultStatus.BLOCKED, ResultStatus.NOT_EXECUTED} for status in statuses)
+        status_failed = sum(status in {ResultStatus.FAILED, ResultStatus.BLOCKED, ResultStatus.NOT_EXECUTED} for status in statuses)
+        semantic_failed = sum(
+            1
+            for item in final_observations
+            if not item.get("semantic_satisfied")
+            and item.get("failure_kind") != "context_missing"
+        )
+        failed = max(status_failed, semantic_failed)
         completed = sum(status in {ResultStatus.COMPLETED, ResultStatus.PARTIAL, ResultStatus.PROPOSAL_READY} for status in statuses)
         execution_status = (
             "waiting_context" if need_context else
@@ -477,11 +639,11 @@ class AgentCollaborationCoordinator:
             "need_clarification": bool(need_context),
             "clarification_question": question,
             "missing_context": [item.to_dict() for item in need_context],
-            "observations": timeline,
-            "replan_audit": [],
-            "replan_count": 0,
-            "invalid_replan_block_count": 0,
-            "replan_limits": {"max_rounds": 2, "delegation_preserved": True},
+            "observations": final_observations,
+            "replan_audit": replan_audit,
+            "replan_count": len([item for item in replan_audit if item.get("status") == "executed"]),
+            "invalid_replan_block_count": invalid_replan_block_count,
+            "replan_limits": {"max_rounds": max_replan_rounds, "delegation_preserved": True},
             "agent_outputs": public_results,
             "agent_timeline": timeline,
             "handoff": {
@@ -515,6 +677,133 @@ class AgentCollaborationCoordinator:
             },
         }
 
+    @staticmethod
+    def _task_observation(
+        task: GraphAgentTask,
+        result: GraphWorkerResult | None,
+    ) -> dict[str, Any]:
+        expected_slots = {
+            str(item)
+            for item in dict(task.expected_output or {}).get(
+                "information_slots", []
+            )
+            if str(item or "").strip()
+        }
+        if result is None:
+            return {
+                "task_id": task.task_id,
+                "worker_id": task.worker_id,
+                "task_type": task.task_type,
+                "expected_output_type": task.expected_output_type,
+                "actual_output_type": "",
+                "contract_valid": False,
+                "semantic_satisfied": False,
+                "produced_information_slots": [],
+                "missing_information_slots": sorted(expected_slots),
+                "failure_kind": "not_executed",
+                "retryable": False,
+                "repairable": True,
+                "replan_recommended": True,
+            }
+
+        contract_valid = result.output_type == task.expected_output_type
+        status = result.status
+        metadata = dict(result.metadata or {})
+        declared_actual = metadata.get("produced_information_slots")
+        actual_slots = {
+            str(item)
+            for item in (declared_actual if isinstance(declared_actual, list) else [])
+            if str(item or "").strip()
+        }
+        completed_status = status in {
+            ResultStatus.COMPLETED,
+            ResultStatus.PROPOSAL_READY,
+        }
+        payload_present = result.data is not None or bool(result.summary)
+        if completed_status and contract_valid and payload_present and not actual_slots:
+            # Existing Workers do not yet emit slot-level metadata. A completed,
+            # correctly typed result is provisionally credited with its planned
+            # slots; Workers may override this by setting coverage_satisfied=False
+            # or explicit produced_information_slots in result.metadata.
+            actual_slots = set(expected_slots)
+        coverage_satisfied = bool(metadata.get("coverage_satisfied", True))
+        missing_slots = expected_slots - actual_slots
+
+        error = dict(result.error or {})
+        error_code = str(error.get("code") or "").lower()
+        retryable = bool(error.get("retryable"))
+        if status == ResultStatus.NEED_CONTEXT:
+            failure_kind = "context_missing"
+        elif status in {ResultStatus.FAILED, ResultStatus.BLOCKED, ResultStatus.NOT_EXECUTED}:
+            if any(token in error_code for token in ("validation", "argument", "parameter")):
+                failure_kind = "parameter_contract_failure"
+            else:
+                failure_kind = "tool_execution_failure"
+        elif completed_status and not payload_present:
+            failure_kind = "business_result_empty"
+        elif status == ResultStatus.PARTIAL or not coverage_satisfied or missing_slots:
+            failure_kind = "business_result_insufficient"
+        else:
+            failure_kind = "none"
+
+        semantic_satisfied = (
+            contract_valid
+            and completed_status
+            and coverage_satisfied
+            and not missing_slots
+        )
+        if failure_kind == "business_result_empty" and contract_valid and completed_status:
+            # A successful authoritative query with no rows is a valid business
+            # result. It must be reported as empty, not treated as tool failure.
+            semantic_satisfied = True
+            actual_slots = set(expected_slots)
+            missing_slots = set()
+
+        repairable = failure_kind in {
+            "parameter_contract_failure",
+            "tool_execution_failure",
+            "business_result_insufficient",
+            "not_executed",
+        }
+        return {
+            "task_id": task.task_id,
+            "worker_id": task.worker_id,
+            "task_type": task.task_type,
+            "expected_output_type": task.expected_output_type,
+            "actual_output_type": result.output_type,
+            "status": status.value,
+            "contract_valid": contract_valid,
+            "semantic_satisfied": semantic_satisfied,
+            "produced_information_slots": sorted(actual_slots),
+            "missing_information_slots": sorted(missing_slots),
+            "coverage_requirement": dict(task.expected_output or {}).get(
+                "coverage_requirement", ""
+            ),
+            "freshness_requirement": dict(task.expected_output or {}).get(
+                "freshness_requirement", ""
+            ),
+            "authority_requirement": dict(task.expected_output or {}).get(
+                "authority_requirement", ""
+            ),
+            "failure_kind": failure_kind,
+            "retryable": retryable,
+            "repairable": repairable,
+            "replan_recommended": bool(not semantic_satisfied and repairable),
+            "error": error or None,
+            "replan_triggers": list(task.replan_triggers),
+        }
+
+    @classmethod
+    def _build_task_observations(
+        cls,
+        tasks: list[GraphAgentTask],
+        results: dict[str, GraphWorkerResult],
+    ) -> list[dict[str, Any]]:
+        return [
+            cls._task_observation(task, results.get(task.task_id))
+            for task in tasks
+        ]
+
     def _run_dag(
         self,
         tasks: list[GraphAgentTask],
@@ -525,8 +814,9 @@ class AgentCollaborationCoordinator:
         default_top_k: int,
         language: str,
         execution_context: dict[str, Any],
+        existing_results: dict[str, GraphWorkerResult] | None = None,
     ) -> tuple[dict[str, GraphWorkerResult], list[dict[str, Any]], list[dict[str, Any]]]:
-        results: dict[str, GraphWorkerResult] = {}
+        results: dict[str, GraphWorkerResult] = dict(existing_results or {})
         pending = {task.task_id: task for task in tasks}
         batches: list[dict[str, Any]] = []
         timeline: list[dict[str, Any]] = []

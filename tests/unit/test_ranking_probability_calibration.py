@@ -199,3 +199,58 @@ def test_daily_archives_are_included_incrementally_after_realization(
     assert second_report["samples"] == 30
     assert second_report["unique_dates"] == 2
     assert second_report["end_date"] == "2026-06-02"
+
+
+def test_explicit_rank_defines_top15_even_when_score_order_differs(
+    tmp_path: Path,
+) -> None:
+    prediction_rows = []
+    price_rows = []
+    for rank in range(1, 21):
+        code = f"{rank:06d}"
+        prediction_rows.append(
+            {
+                "date": "2026-06-01",
+                "code": code,
+                "rank": rank,
+                "score": float(rank),
+                "up_prob": float(rank / 20),
+                "model_name": "chronos_bolt_small",
+            }
+        )
+        price_rows.extend(
+            [
+                {"date": "2026-06-01", "code": code, "close": 100.0},
+                {
+                    "date": "2026-06-02",
+                    "code": code,
+                    "close": 101.0 if rank <= 10 else 99.0,
+                },
+            ]
+        )
+    pd.DataFrame(prediction_rows).to_csv(
+        tmp_path / "ranking_20260601_chronos_bolt_small.csv",
+        index=False,
+    )
+    current = pd.DataFrame(
+        {
+            "date": ["2026-06-02", "2026-06-02"],
+            "code": ["000001", "000020"],
+            "up_prob": [0.9, 0.8],
+        }
+    )
+
+    calibrated, report = calibrate_ranking_probabilities(
+        current,
+        feature_data=pd.DataFrame(price_rows),
+        history_dir=tmp_path,
+        model_name="chronos_bolt_small",
+        min_samples=1,
+        min_positive=1,
+        min_negative=1,
+        min_unique_dates=1,
+    )
+
+    assert report["samples"] == 15
+    assert calibrated["calibrated"].tolist() == [True, False]
+    assert calibrated["calibration_sample_count"].tolist() == [1, 0]

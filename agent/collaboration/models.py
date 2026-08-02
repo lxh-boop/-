@@ -264,6 +264,23 @@ class WorkerTaskContract:
     upstream_input_bindings: dict[str, dict[str, Any]] = field(default_factory=dict)
     authoritative_arg_bindings: dict[str, str] = field(default_factory=dict, repr=False)
     selection_requirements: list[str] = field(default_factory=list)
+    user_goal_examples: list[str] = field(default_factory=list)
+    negative_goal_examples: list[str] = field(default_factory=list)
+    completion_criteria: list[str] = field(default_factory=list)
+    planning_notes: list[str] = field(default_factory=list)
+    # Forward-planning semantics exposed to MainAgent.  These fields describe
+    # what information a task can consume and produce independently of Worker
+    # names, so planning can expand from the currently available state without
+    # hard-coded business chains.
+    consumes_information_slots: list[str] = field(default_factory=list)
+    produces_information_slots: list[str] = field(default_factory=list)
+    required_context_slots: list[str] = field(default_factory=list)
+    coverage_semantics: dict[str, Any] = field(default_factory=dict)
+    freshness_semantics: dict[str, Any] = field(default_factory=dict)
+    authority_level: str = ""
+    allowed_request_modes: list[str] = field(default_factory=list)
+    side_effect_policy: dict[str, Any] = field(default_factory=dict)
+    required_upstream_output_groups: list[list[str]] = field(default_factory=list)
     private_tool_ids: list[str] = field(default_factory=list, repr=False)
 
     @property
@@ -297,6 +314,21 @@ class WorkerTaskContract:
             "upstream_input_bindings": _plain(self.upstream_input_bindings),
             "runtime_bound_args": sorted(runtime_bound),
             "selection_requirements": list(self.selection_requirements),
+            "user_goal_examples": list(self.user_goal_examples),
+            "negative_goal_examples": list(self.negative_goal_examples),
+            "completion_criteria": list(self.completion_criteria),
+            "planning_notes": list(self.planning_notes),
+            "consumes_information_slots": list(self.consumes_information_slots),
+            "produces_information_slots": list(self.produces_information_slots),
+            "required_context_slots": list(self.required_context_slots),
+            "coverage_semantics": _plain(self.coverage_semantics),
+            "freshness_semantics": _plain(self.freshness_semantics),
+            "authority_level": str(self.authority_level or ""),
+            "allowed_request_modes": list(self.allowed_request_modes),
+            "side_effect_policy": _plain(self.side_effect_policy),
+            "required_upstream_output_groups": _plain(
+                self.required_upstream_output_groups
+            ),
         }
 
 
@@ -349,6 +381,7 @@ class AgentCapabilityCard:
             upstream_input_bindings=self.upstream_input_bindings,
             authoritative_arg_bindings=self.authoritative_arg_bindings,
             selection_requirements=self.selection_requirements,
+            required_upstream_output_groups=self.required_upstream_output_groups,
             private_tool_ids=self.private_tool_ids,
         )
 
@@ -489,6 +522,17 @@ class GraphAgentTask:
     args: dict[str, Any] = field(default_factory=dict)
     inputs: dict[str, list[dict[str, str]]] = field(default_factory=dict)
     expected_output_type: str = ""
+    # MainAgent-generated per-run expectation.  Capability cards describe what
+    # a task can generally do; these fields describe what this particular task
+    # must accomplish for the current GoalContract.
+    purpose: str = ""
+    why_selected: str = ""
+    input_contract: dict[str, Any] = field(default_factory=dict)
+    expected_output: dict[str, Any] = field(default_factory=dict)
+    expected_effect: dict[str, Any] = field(default_factory=dict)
+    completion_criteria: list[str] = field(default_factory=list)
+    failure_policy: dict[str, Any] = field(default_factory=dict)
+    replan_triggers: list[str] = field(default_factory=list)
     focus_refs: list[GraphRef] = field(default_factory=list)
     context_refs: list[GraphRef] = field(default_factory=list)
     dependency_task_ids: list[str] = field(default_factory=list)
@@ -513,6 +557,14 @@ class GraphAgentTask:
         self.args = dict(self.args or {})
         self.inputs = _task_inputs(self.inputs)
         self.expected_output_type = str(self.expected_output_type or "").strip()
+        self.purpose = str(self.purpose or self.objective or "").strip()
+        self.why_selected = str(self.why_selected or "").strip()
+        self.input_contract = dict(self.input_contract or {})
+        self.expected_output = dict(self.expected_output or {})
+        self.expected_effect = dict(self.expected_effect or {})
+        self.completion_criteria = _str_list(self.completion_criteria, limit=30)
+        self.failure_policy = dict(self.failure_policy or {})
+        self.replan_triggers = _str_list(self.replan_triggers, limit=30)
         self.focus_refs = refs_from(self.focus_refs)
         self.context_refs = refs_from(self.context_refs)
         self.dependency_task_ids = _str_list(self.dependency_task_ids, limit=50)
@@ -563,6 +615,14 @@ class GraphAgentTask:
             "args": _compact(self.args, max_depth=4),
             "inputs": _compact(self.inputs, max_depth=4),
             "expected_output_type": self.expected_output_type,
+            "purpose": self.purpose,
+            "why_selected": self.why_selected,
+            "input_contract": _compact(self.input_contract, max_depth=5),
+            "expected_output": _compact(self.expected_output, max_depth=5),
+            "expected_effect": _compact(self.expected_effect, max_depth=5),
+            "completion_criteria": list(self.completion_criteria),
+            "failure_policy": _compact(self.failure_policy, max_depth=4),
+            "replan_triggers": list(self.replan_triggers),
             "user_id": self.user_id,
             "focus_refs": [ref.to_dict() for ref in self.focus_refs],
             "context_refs": [ref.to_dict() for ref in self.context_refs],

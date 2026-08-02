@@ -55,7 +55,20 @@ _ADVICE_REQUEST_MARKERS = (
 )
 _ANALYSIS_REQUEST_MARKERS = ("分析", "评价", "诊断", "影响", "原因", "解释")
 _VIEW_REQUEST_MARKERS = ("查看", "查询", "显示", "列出", "当前", "状态", "持仓", "账户")
-
+_PORTFOLIO_SCOPE_MARKERS = ("持仓", "组合", "仓位", "模拟盘")
+_ADJUSTMENT_REQUEST_MARKERS = (
+    "怎么调整",
+    "如何调整",
+    "应该怎么调整",
+    "持仓调整",
+    "调整持仓",
+    "调仓",
+    "优化持仓",
+    "优化组合",
+    "仓位建议",
+    "持仓建议",
+    "增减仓",
+)
 _VIEW_SCOPE_PATTERNS: tuple[tuple[str, str], ...] = (
     (
         r"(?:^|\n)\s*(?:#{1,6}\s*)?(?:关键观察|风险提示|风险分析|投资建议|操作建议)",
@@ -128,6 +141,7 @@ class ReportPolicy:
     view_only: bool
     risk_requested: bool
     advice_requested: bool
+    adjustment_requested: bool
     risk_available: bool
     strategy_available: bool
     impact_available: bool
@@ -152,6 +166,7 @@ class ReportPolicy:
             "view_only": self.view_only,
             "risk_requested": self.risk_requested,
             "advice_requested": self.advice_requested,
+            "adjustment_requested": self.adjustment_requested,
             "risk_worker_result_available": self.risk_available,
             "strategy_worker_result_available": self.strategy_available,
             "impact_worker_result_available": self.impact_available,
@@ -255,6 +270,7 @@ def _entity_from_mapping(mapping: dict[str, Any]) -> tuple[str, str, str, str, b
 
 def _collect_entities(safe_results: list[dict[str, Any]]) -> tuple[AuthoritativeEntity, ...]:
     labels_by_code: dict[str, set[str]] = {}
+    locked_labels_by_code: dict[str, set[str]] = {}
     metadata: dict[str, dict[str, Any]] = {}
     seen_mappings: set[int] = set()
     for _, _, parent in _walk(safe_results):
@@ -265,8 +281,11 @@ def _collect_entities(safe_results: list[dict[str, Any]]) -> tuple[Authoritative
         if not code:
             continue
         labels_by_code.setdefault(code, set())
+        locked_labels_by_code.setdefault(code, set())
         if label:
             labels_by_code[code].add(label)
+            if locked:
+                locked_labels_by_code[code].add(label)
         current = metadata.setdefault(code, {})
         if entity_ref:
             current["entity_ref"] = entity_ref
@@ -276,7 +295,13 @@ def _collect_entities(safe_results: list[dict[str, Any]]) -> tuple[Authoritative
     return tuple(
         AuthoritativeEntity(
             code=code,
-            labels=tuple(sorted(labels_by_code.get(code) or set())),
+            labels=tuple(
+                sorted(
+                    locked_labels_by_code.get(code)
+                    or labels_by_code.get(code)
+                    or set()
+                )
+            ),
             entity_ref=str(metadata.get(code, {}).get("entity_ref") or ""),
             source=str(metadata.get(code, {}).get("source") or ""),
             locked=bool(metadata.get(code, {}).get("locked")),
@@ -285,19 +310,42 @@ def _collect_entities(safe_results: list[dict[str, Any]]) -> tuple[Authoritative
     )
 
 
+def _result_available(item: dict[str, Any]) -> bool:
+    status = str(item.get("status") or "").strip().lower()
+    payload = item.get("payload", item.get("data"))
+    return status in {"completed", "partial", "proposal_ready"} and isinstance(payload, dict) and bool(payload)
+
+
+def is_portfolio_adjustment_request(objective: str) -> bool:
+    """Return whether the user asks for a concrete current-portfolio change plan.
+
+    The plan is still unexecuted: W05 must produce ``ReviewedProposal`` and the
+    later approval/revalidation boundary remains unchanged.
+    """
+
+    text = " ".join(str(objective or "").split())
+    if not text:
+        return False
+    in_portfolio_scope = any(marker in text for marker in _PORTFOLIO_SCOPE_MARKERS)
+    requests_adjustment = any(marker in text for marker in _ADJUSTMENT_REQUEST_MARKERS)
+    return bool(in_portfolio_scope and requests_adjustment)
+
+
 def build_report_policy(objective: str, safe_results: list[dict[str, Any]]) -> ReportPolicy:
     text = " ".join(str(objective or "").split())
+    available_results = [item for item in safe_results if _result_available(item)]
     output_types = tuple(
         sorted(
             {
                 str(item.get("output_type") or "")
-                for item in safe_results
+                for item in available_results
                 if str(item.get("output_type") or "")
             }
         )
     )
     risk_requested = any(marker in text for marker in _RISK_REQUEST_MARKERS)
-    advice_requested = any(marker in text for marker in _ADVICE_REQUEST_MARKERS)
+    adjustment_requested = is_portfolio_adjustment_request(text)
+    advice_requested = adjustment_requested or any(marker in text for marker in _ADVICE_REQUEST_MARKERS)
     analysis_requested = any(marker in text for marker in _ANALYSIS_REQUEST_MARKERS)
     view_requested = any(marker in text for marker in _VIEW_REQUEST_MARKERS)
     return ReportPolicy(
@@ -305,11 +353,12 @@ def build_report_policy(objective: str, safe_results: list[dict[str, Any]]) -> R
         view_only=bool(view_requested and not risk_requested and not advice_requested and not analysis_requested),
         risk_requested=risk_requested,
         advice_requested=advice_requested,
+        adjustment_requested=adjustment_requested,
         risk_available=bool(set(output_types) & _RISK_OUTPUT_TYPES),
         strategy_available=bool(set(output_types) & _STRATEGY_OUTPUT_TYPES),
         impact_available=bool(set(output_types) & _IMPACT_OUTPUT_TYPES),
         output_types=output_types,
-        entities=_collect_entities(safe_results),
+        entities=_collect_entities(available_results),
     )
 
 
@@ -335,6 +384,27 @@ def view_scope_expansion_text(value: str) -> str:
         if match:
             return match.group(0)
     return ""
+
+
+def _clean_reported_entity_label(value: Any) -> str:
+    """Remove report action wording that may precede a parenthesized code.
+
+    Natural Chinese recommendations often read ``维持紫金矿业（601899）``.
+    The entity parser must compare ``紫金矿业`` with the authoritative label,
+    not misclassify the action verb as part of the company name.
+    """
+
+    label = _clean_label(value)
+    prefix = re.compile(
+        r"^(?:(?:待审批调整预案|待审批预案|调整预案|调仓预案|调整建议|操作建议)[:：\s]*)?"
+        r"(?:(?:建议|可考虑|应当|推荐)(?:将)?[:：\s]*)?"
+        r"(?:维持|持有|保留|观察|增仓|减仓|增加|降低|买入|卖出|替换|移除|新增|调高|调低)?[:：\s]*"
+    )
+    previous = ""
+    while label and label != previous:
+        previous = label
+        label = prefix.sub("", label).strip()
+    return label
 
 
 def _reported_entity_pairs(text: str) -> list[tuple[str, str, str]]:
@@ -363,7 +433,7 @@ def _reported_entity_pairs(text: str) -> list[tuple[str, str, str]]:
                 pairs.append(
                     (
                         match.group("code"),
-                        _clean_label(match.group("name")),
+                        _clean_reported_entity_label(match.group("name")),
                         stripped[:200],
                     )
                 )
@@ -457,7 +527,10 @@ def validate_report_output(answer: str, policy: ReportPolicy) -> ReportValidatio
                 issues.append(
                     ReportValidationIssue(
                         code="missing_strategy_worker_grounding",
-                        message="报告包含操作建议，但用户目标或上游 ReviewedProposal 不支持该内容。",
+                        message=(
+                            "报告包含操作建议，但用户目标或上游 "
+                            "ReviewedProposal 不支持该内容。"
+                        ),
                         evidence=match.group(0)[:200],
                     )
                 )
@@ -476,6 +549,86 @@ def validate_report_output(answer: str, policy: ReportPolicy) -> ReportValidatio
                 )
                 break
 
+    # Goal-completion validation is separate from scope validation. A report may
+    # contain no fabricated fact and still fail the user by omitting the requested
+    # adjustment advice or by claiming that advice was never requested.
+    if policy.adjustment_requested and not policy.risk_available:
+        issues.append(
+            ReportValidationIssue(
+                code="missing_required_risk_worker_output",
+                message="持仓调整方案需要上游 PortfolioRiskResult，但当前没有可用风险结果。",
+                evidence="PortfolioRiskResult unavailable",
+                repairable=False,
+            )
+        )
+    if policy.advice_requested and not policy.strategy_available:
+        issues.append(
+            ReportValidationIssue(
+                code="missing_required_strategy_worker_output",
+                message="用户要求持仓调整方案，但当前没有可用的 ReviewedProposal。",
+                evidence="ReviewedProposal unavailable",
+                repairable=False,
+            )
+        )
+    incorrect_intent = re.search(
+        r"用户未请求.{0,24}(?:建议|调整|调仓)|因用户未请求.{0,24}(?:建议|调整|调仓)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if policy.advice_requested and incorrect_intent:
+        issues.append(
+            ReportValidationIssue(
+                code="incorrect_user_intent_statement",
+                message="报告错误声称用户没有请求调整建议。",
+                evidence=incorrect_intent.group(0)[:200],
+                repairable=True,
+            )
+        )
+    if policy.advice_requested and policy.strategy_available:
+        advice_content = re.search(
+            r"增仓|减仓|调仓|调整方案|目标权重|建议权重|增加|降低|买入|卖出|持有|保留|维持|替换|移除|新增|观察",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not advice_content:
+            issues.append(
+                ReportValidationIssue(
+                    code="goal_not_satisfied",
+                    message="用户要求持仓调整方案，但报告没有呈现上游 ReviewedProposal 的调整结论。",
+                    evidence=policy.objective[:200],
+                    repairable=True,
+                )
+            )
+
+        pending_boundary = re.search(
+            r"待审批|待确认|尚未执行|未执行|需要确认|需确认|仅为预案",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if policy.adjustment_requested and not pending_boundary:
+            issues.append(
+                ReportValidationIssue(
+                    code="proposal_boundary_missing",
+                    message="持仓调整回答必须明确这是待审批且尚未执行的 Proposal。",
+                    evidence=policy.objective[:200],
+                    repairable=True,
+                )
+            )
+        execution_claim = re.search(
+            r"已执行|已完成调仓|已完成调整|已经买入|已经卖出|持仓已调整",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if execution_claim:
+            issues.append(
+                ReportValidationIssue(
+                    code="unsupported_execution_claim",
+                    message="当前上游只有 ReviewedProposal，报告不得声称已经执行持仓调整。",
+                    evidence=execution_claim.group(0)[:200],
+                    repairable=True,
+                )
+            )
+
     deduped: list[ReportValidationIssue] = []
     seen_issue: set[tuple[str, str]] = set()
     for issue in issues:
@@ -492,6 +645,7 @@ __all__ = [
     "ReportValidationIssue",
     "ReportValidationResult",
     "build_report_policy",
+    "is_portfolio_adjustment_request",
     "is_view_only_request",
     "validate_report_output",
     "view_scope_expansion_text",

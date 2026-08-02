@@ -91,6 +91,7 @@ def _validate_decision(payload: dict[str, Any]) -> None:
         raise EntryDecisionError(f"invalid_entry_language:{language}")
 
 
+
 class MainEntryDecisionPlanner:
     """Only semantic request-mode decision point for the Agent surface."""
 
@@ -124,15 +125,20 @@ class MainEntryDecisionPlanner:
             )
 
         system = (
-            "你是系统唯一的主 Agent 入口。你只能理解用户业务目标并决定后续模式，"
-            "不能看到、猜测、列举或输出任何 Tool、函数、API、数据库表、旧 intent、关键词规则或参数 Schema。"
-            "模式只能是：analysis（查询、比较、解释、诊断）、proposal（生成但不执行模拟盘/策略/资金变更预案）、"
-            "confirm（确认已有待审批计划）、reject（拒绝或取消已有计划）、language（仅修改回复语言）、"
-            "unsupported（系统能力范围外）。"
-            "分析‘是否应该买卖’仍属于 analysis；只有要求形成待审批变更方案才属于 proposal；"
-            "只有明确批准已有计划才属于 confirm。"
-            "严格输出 JSON：{\"mode\":\"...\",\"reason\":\"...\","
-            "\"reply_language\":\"zh|en|\",\"confidence\":0.0}。"
+            "你是系统唯一的主 Agent 入口。你只负责理解用户最终业务目标和期望副作用，"
+            "并决定后续 request_mode；你不能选择 Worker、规划工具或输出实现细节。"
+            "模式定义如下：analysis 表示查询、查看、比较、解释、研究、风险分析或系统诊断，"
+            "不会形成可审批的状态变更方案；proposal 表示用户希望生成一个具体但尚未执行的"
+            "账户、持仓、策略或其他业务状态变更方案，后续仍需要审批和重新校验；"
+            "confirm 只用于明确确认已经存在的待审批计划；reject 只用于拒绝或取消已有计划；"
+            "language 只修改回复语言；unsupported 表示目标超出系统能力。"
+            "判断时关注用户最终希望获得的产物，而不是是否立即执行："
+            "询问观点、风险、原因或是否值得买卖通常属于 analysis；"
+            "要求给出具体调仓方案、目标仓位、策略变更配置或待确认操作清单属于 proposal，"
+            "即使用户没有要求立即执行；仅说‘确认’但上下文中没有待审批计划不能判为 confirm。"
+            "必须忠实保留用户目标，不得把具体方案请求弱化为普通分析，也不得把查看请求扩大为 proposal。"
+            '严格输出 JSON：{"mode":"...","reason":"...",'
+            '"reply_language":"zh|en|","confidence":0.0}。'
         )
         payload = self.llm_service.generate_json(
             stage="main_agent_single_entry",
@@ -159,14 +165,17 @@ class MainEntryDecisionPlanner:
             operation="request_mode_decision",
         )
         mode = RequestMode(str(payload.get("mode") or "").strip().lower())
+        reason = str(payload.get("reason") or "")[:500]
+        source = "main_coordinator_llm"
         try:
             confidence = max(0.0, min(float(payload.get("confidence", 0.0)), 1.0))
         except (TypeError, ValueError):
             confidence = 0.0
+
         return EntryDecision(
             mode=mode,
-            reason=str(payload.get("reason") or "")[:500],
+            reason=reason,
             reply_language=str(payload.get("reply_language") or "").strip().lower(),
-            source="main_coordinator_llm",
+            source=source,
             confidence=confidence,
         )

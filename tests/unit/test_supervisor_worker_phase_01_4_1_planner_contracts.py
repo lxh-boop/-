@@ -6,9 +6,16 @@ from unittest.mock import patch
 import pytest
 
 from agent.collaboration.agent_directory import AgentDirectory
-from agent.collaboration.planner import CoordinatorPlanner, CoordinatorPlanningError
+from agent.collaboration.planner import (
+    PLAN_SCHEMA,
+    CoordinatorPlanner,
+    CoordinatorPlanningError,
+)
+from agent.collaboration.worker_contracts import WorkerContractViolation
 from agent.graph.contracts import GraphNodeKind, GraphRef
 from core.llm.service import LLMService
+
+from tests.unit._forward_plan_helpers import decorate_forward_plan
 
 
 def _focus_ref() -> GraphRef:
@@ -20,6 +27,32 @@ def _focus_ref() -> GraphRef:
         confidence=1.0,
         locked=True,
     )
+
+
+_INITIAL_SLOTS = [
+    "user_request",
+    "user_identity",
+    "reply_language",
+    "authoritative_graph_refs",
+    "authoritative_financial_entities",
+    "authoritative_security_entities",
+    "analysis_permission",
+]
+
+
+def _analysis_goal(*output_types: str) -> dict:
+    desired = list(dict.fromkeys([*output_types, "FinalReport"]))
+    return {
+        "goal_summary": "完成证券研究并生成最终报告",
+        "desired_output_types": desired,
+        "completion_criteria": ["返回用户要求的专业结果和最终报告"],
+        "constraints": [],
+        "side_effect_policy": {
+            "allow_derived_writes": True,
+            "allow_proposal": False,
+            "allow_commit": False,
+        },
+    }
 
 
 def _runtime_values() -> dict:
@@ -35,7 +68,10 @@ def _runtime_values() -> dict:
 
 
 def _real_failed_candidate() -> dict:
-    return {
+    plan = {
+        "goal_contract": _analysis_goal(
+            "EntityResearchResult", "ModelPredictionResult"
+        ),
         "tasks": [
             {
                 "task_id": "W01_001",
@@ -90,11 +126,19 @@ def _real_failed_candidate() -> dict:
             },
         ]
     }
+    return decorate_forward_plan(
+        plan,
+        initial_slots=_INITIAL_SLOTS,
+        goal_slots=["entity_evidence_analysis", "entity_model_signals", "user_facing_report"],
+    )
 
 
 def _corrected_candidate(*, include_top_k: bool = False) -> dict:
     prediction_args = {"top_k": 10} if include_top_k else {}
-    return {
+    plan = {
+        "goal_contract": _analysis_goal(
+            "EntityResearchResult", "ModelPredictionResult"
+        ),
         "tasks": [
             {
                 "task_id": "W01_001",
@@ -144,6 +188,11 @@ def _corrected_candidate(*, include_top_k: bool = False) -> dict:
             },
         ]
     }
+    return decorate_forward_plan(
+        plan,
+        initial_slots=_INITIAL_SLOTS,
+        goal_slots=["entity_evidence_analysis", "entity_model_signals", "user_facing_report"],
+    )
 
 
 def test_public_worker_contract_separates_args_and_semantic_inputs() -> None:
@@ -187,7 +236,8 @@ def test_real_failed_candidate_gets_precise_field_placement_error() -> None:
     assert "planner_field_placement_error" in message
     assert "task=W01_001;move_to_args=research_question" in message
     assert "task=W02_001;move_to_args=model_name,top_k" in message
-    assert "inputs_accept_only=from_task_id+expected_output_type" in message
+    assert "inputs_shape=semantic_role_to_reference" in message
+    assert "reference_fields=from_task_id+expected_output_type" in message
 
 
 def test_default_top_k_10_is_applied_by_code_when_omitted() -> None:
@@ -241,15 +291,136 @@ def test_llm_json_repair_receives_caller_contract_guidance() -> None:
             messages=[{"role": "system", "content": "schema"}],
             max_output_tokens=100,
             validator=validator,
+            repair_mode="targeted",
             repair_guidance=(
                 "将 move_to_args 字段从 inputs 移到 args；"
-                "inputs 只能包含 from_task_id 和 expected_output_type。"
+                "inputs 的一级键必须是 semantic role。"
             ),
         )
 
     assert result == {"ok": True}
-    repair_text = captured_messages[1][-1]["content"]
-    assert "planner_field_placement_error" in repair_text
-    assert "本次精确修复要求" in repair_text
-    assert "move_to_args" in repair_text
-    assert "from_task_id" in repair_text
+    repair_payload = __import__("json").loads(
+        captured_messages[1][-1]["content"]
+    )
+    assert repair_payload["repair_mode"] == "targeted_complete_json"
+    assert repair_payload["invalid_candidate"] == {"ok": False}
+    assert "planner_field_placement_error" in repair_payload[
+        "validation_error"
+    ]["message"]
+    assert "move_to_args" in repair_payload["caller_repair_guidance"]
+    assert "semantic role" in repair_payload["caller_repair_guidance"]
+
+
+def test_input_contract_schema_makes_code_owned_fields_optional() -> None:
+    task_schema = PLAN_SCHEMA["properties"]["tasks"]["items"]
+    input_contract = task_schema["properties"]["input_contract"]
+
+    assert set(input_contract["required"]) == {
+        "upstream_information_slots",
+        "available_context_slots",
+    }
+    assert input_contract["properties"]["direct_arg_names"]["readOnly"] is True
+    assert input_contract["properties"]["runtime_bound_args"]["readOnly"] is True
+
+
+def test_prepare_payload_canonicalizes_code_owned_input_contract_fields() -> None:
+    planner = CoordinatorPlanner(AgentDirectory(), llm_service=SimpleNamespace())
+    candidate = _corrected_candidate(include_top_k=False)
+    prediction = next(
+        row for row in candidate["tasks"] if row["task_type"] == "query_stock_prediction"
+    )
+    prediction["input_contract"].pop("direct_arg_names", None)
+    prediction["input_contract"].pop("runtime_bound_args", None)
+
+    prepared, audit = planner._prepare_payload(
+        candidate, runtime_values=_runtime_values()
+    )
+    prediction = next(
+        row for row in prepared["tasks"] if row["task_type"] == "query_stock_prediction"
+    )
+
+    assert prediction["input_contract"]["direct_arg_names"] == ["top_k"]
+    assert prediction["input_contract"]["runtime_bound_args"] == [
+        "focus_ref_ids"
+    ]
+    audit_row = next(
+        row for row in audit["tasks"] if row["task_id"] == "W02_001"
+    )
+    assert audit_row["input_contract_code_owned_fields"] == {
+        "direct_arg_names": ["top_k"],
+        "runtime_bound_args": ["focus_ref_ids"],
+    }
+
+
+def test_structured_repair_error_uses_contract_code_path_and_detail() -> None:
+    outer = CoordinatorPlanningError("wrapped")
+    cause = WorkerContractViolation(
+        "planner_field_placement_error",
+        "$.tasks[0].inputs",
+        "wrap_reference_under_semantic_role=from_task_id",
+    )
+    outer.__cause__ = cause
+
+    context = LLMService._validation_error_context(outer)
+
+    assert context["contract_code"] == "planner_field_placement_error"
+    assert context["path"] == "$.tasks[0].inputs"
+    assert "wrap_reference_under_semantic_role" in context["detail"]
+
+
+def test_unwrapped_reference_fields_receive_semantic_role_guidance() -> None:
+    planner = CoordinatorPlanner(AgentDirectory(), llm_service=SimpleNamespace())
+    candidate = _corrected_candidate(include_top_k=False)
+    report = next(
+        row for row in candidate["tasks"] if row["task_type"] == "write_report"
+    )
+    report["inputs"] = {
+        "from_task_id": "W01_001",
+        "expected_output_type": "EntityResearchResult",
+    }
+    prepared, _ = planner._prepare_payload(
+        candidate, runtime_values=_runtime_values()
+    )
+
+    with pytest.raises(WorkerContractViolation) as captured:
+        planner._validate_payload(
+            prepared,
+            request_mode="analysis",
+            authoritative_ref_ids={"cn:security:sse:600519"},
+            authoritative_user_id="cht",
+            reply_language="zh",
+        )
+
+    message = str(captured.value)
+    assert "planner_field_placement_error" in message
+    assert "wrap_reference_under_semantic_role" in message
+    assert "from_task_id" in message
+    assert "expected_output_type" in message
+
+
+def test_self_dependency_is_rejected_after_valid_role_wrapping() -> None:
+    planner = CoordinatorPlanner(AgentDirectory(), llm_service=SimpleNamespace())
+    candidate = _corrected_candidate(include_top_k=False)
+    report = next(
+        row for row in candidate["tasks"] if row["task_type"] == "write_report"
+    )
+    report["inputs"] = {
+        "upstream_results": {
+            "from_task_id": "W06_001",
+            "expected_output_type": "FinalReport",
+        }
+    }
+    prepared, _ = planner._prepare_payload(
+        candidate, runtime_values=_runtime_values()
+    )
+
+    with pytest.raises(WorkerContractViolation) as captured:
+        planner._validate_payload(
+            prepared,
+            request_mode="analysis",
+            authoritative_ref_ids={"cn:security:sse:600519"},
+            authoritative_user_id="cht",
+            reply_language="zh",
+        )
+
+    assert "self_dependency_not_allowed" in str(captured.value)

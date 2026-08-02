@@ -42,6 +42,11 @@ def safe_public_value(
     max_depth: int = 5,
     max_items: int = 40,
 ) -> Any:
+    # Scalar types stay typed even at the depth boundary. Converting ``False``
+    # to the string ``"False"`` would later become truthy and could let an
+    # unlocked identity overwrite a locked graph identity.
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
     if depth >= max_depth:
         return "<summarized>" if isinstance(value, (dict, list, tuple, set)) else str(value)[:1000]
     if isinstance(value, dict):
@@ -67,8 +72,6 @@ def safe_public_value(
         ]
     if isinstance(value, str):
         return value[:3000] + ("…" if len(value) > 3000 else "")
-    if isinstance(value, (int, float, bool)) or value is None:
-        return value
     if hasattr(value, "to_dict") and callable(value.to_dict):
         return safe_public_value(
             value.to_dict(),
