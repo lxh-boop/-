@@ -7,7 +7,7 @@ from typing import Any
 
 KRONOS_BACKEND = "kronos_mini"
 KRONOS_MODEL_NAME = "kronos_mini"
-KRONOS_MODEL_VERSION = "target_mode_recent_20260520_epoch2"
+KRONOS_MODEL_VERSION = "target_mode_up_first_20260520_epoch2"
 KRONOS_RANKING_ORIENTATION = "ascending"
 KRONOS_TRAINING_PENALTY = {
     "top20_false_positive": 4.0,
@@ -25,14 +25,14 @@ KRONOS_TARGET_VALIDATION = {
     "label_rule": "real_return > 0 on the exact next trading day",
     "universe_next_day_up_probability": 0.5251084672225612,
     "top5_next_day_up_probability": 0.58,
-    "top10_next_day_up_probability": 0.57,
-    "top15_next_day_up_probability": 0.5466666666666666,
+    "top10_next_day_up_probability": 0.565,
+    "top15_next_day_up_probability": 0.56,
     "top5_lift_vs_universe": 0.054891532777438835,
-    "top10_lift_vs_universe": 0.04489153277743882,
-    "top15_lift_vs_universe": 0.021558199444105478,
-    "top5_daily_mean_return": 0.004664720655472989,
-    "top10_daily_mean_return": 0.0032483478361436864,
-    "top15_daily_mean_return": 0.0024646058128843787,
+    "top10_lift_vs_universe": 0.03989153277743881,
+    "top15_lift_vs_universe": 0.03489153277743882,
+    "top5_daily_mean_return": 0.0011858118663451804,
+    "top10_daily_mean_return": -0.0006665251821770847,
+    "top15_daily_mean_return": -0.0006438326836035738,
     "all_topk_above_universe": True,
 }
 

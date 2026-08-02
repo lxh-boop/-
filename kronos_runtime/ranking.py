@@ -34,10 +34,14 @@ def build_kronos_ranking(
         raise RuntimeError("Kronos 目标模式排序信号存在空值")
     if KRONOS_RANKING_ORIENTATION != "ascending":
         raise RuntimeError(f"不支持的 Kronos 目标模式方向：{KRONOS_RANKING_ORIENTATION}")
+    out["predicted_up_first"] = expected_return.gt(0.0)
     out["target_order_score"] = -target_signal
-    out["score"] = out["target_order_score"].rank(method="average", pct=True).clip(0.0, 1.0)
-    out = out.sort_values(["target_ranking_signal", "code"], ascending=[True, True]).reset_index(drop=True)
+    out = out.sort_values(
+        ["predicted_up_first", "target_ranking_signal", "code"],
+        ascending=[False, True, True],
+    ).reset_index(drop=True)
     out.insert(0, "rank", np.arange(1, len(out) + 1))
+    out["score"] = (len(out) - out.index.to_numpy(dtype=float)) / max(len(out), 1)
     out["raw_score"] = out["target_order_score"]
     out["pred_score"] = out["target_order_score"]
     out["pred_5d_ret"] = out["pred_return"]
@@ -63,7 +67,7 @@ def build_kronos_ranking(
     ranking_report = {
         "source": "kronos_mini_next_day_ohlcva",
         "native_output": ["pred_open", "pred_high", "pred_low", "pred_close", "pred_volume", "pred_amount"],
-        "ranking_basis": "target_mode_ranking_signal_ascending",
+        "ranking_basis": "predicted_up_first_then_target_mode_signal_ascending",
         "ranking_head_used": True,
         "ranking_orientation": KRONOS_RANKING_ORIENTATION,
         "sentiment_fusion": False,

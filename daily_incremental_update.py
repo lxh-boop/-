@@ -312,7 +312,7 @@ def kronos_daily_update(
         "ranking_rows": int(len(ranking)),
         "model_feature_source": "adjusted_ohlcva_256_observations",
         "model_native_output": "next_trading_day_ohlcva",
-        "ranking_basis": "target_mode_ranking_signal_ascending",
+        "ranking_basis": "predicted_up_first_then_target_mode_signal_ascending",
         "rolling_training_mode": "fixed_trained_checkpoint_with_incremental_market_data",
         "training_false_positive_penalty": dict(KRONOS_TRAINING_PENALTY),
         "kronos_assets": adapter.asset_report,
@@ -320,7 +320,7 @@ def kronos_daily_update(
         "ranking": ranking_report,
         "historical_validation": {
             **KRONOS_TARGET_VALIDATION,
-            "ranking_basis": "target_mode_ranking_signal_ascending",
+            "ranking_basis": "predicted_up_first_then_target_mode_signal_ascending",
         },
         "probability_calibration": calibration_report,
         "disclaimer": "本项目仅用于机器学习、金融数据分析和项目展示，不构成投资建议，不用于实盘交易。",
