@@ -17,9 +17,13 @@ export interface RankingRecord {
   raw_score?: number
   pred_5d_ret?: number
   pred_return?: number
-  kronos_raw_score?: number
-  kronos_oriented_score?: number
-  kronos_score?: number
+  expected_next_day_return?: number
+  pred_open?: number
+  pred_high?: number
+  pred_low?: number
+  pred_close?: number
+  pred_volume?: number
+  pred_amount?: number
   up_prob?: number
   up_prob_calibrated?: number
   calibrated?: boolean

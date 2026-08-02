@@ -20,12 +20,15 @@ def build_kronos_ranking(
         raise RuntimeError("Kronos 没有生成预测")
     out = predictions.copy()
     out["code"] = out["code"].astype(str).str.zfill(6)
-    out["kronos_score"] = out["kronos_oriented_score"].rank(method="average", pct=True)
-    out["score"] = out["kronos_score"].clip(0.0, 1.0)
-    out = out.sort_values(["score", "kronos_score", "code"], ascending=[False, False, True]).reset_index(drop=True)
+    expected_return = pd.to_numeric(out["pred_return"], errors="coerce")
+    if expected_return.isna().any():
+        raise RuntimeError("Kronos 下一交易日预测收益存在空值")
+    out["expected_next_day_return"] = expected_return
+    out["score"] = expected_return.rank(method="average", pct=True).clip(0.0, 1.0)
+    out = out.sort_values(["expected_next_day_return", "code"], ascending=[False, True]).reset_index(drop=True)
     out.insert(0, "rank", np.arange(1, len(out) + 1))
-    out["raw_score"] = out["kronos_oriented_score"]
-    out["pred_score"] = out["score"]
+    out["raw_score"] = out["expected_next_day_return"]
+    out["pred_score"] = out["expected_next_day_return"]
     out["pred_5d_ret"] = out["pred_return"]
     # The ranking head confidence is not a calibrated probability. A neutral
     # placeholder is kept until archived top-15 outcomes can calibrate it.
@@ -46,7 +49,10 @@ def build_kronos_ranking(
     validate_ranking_schema(out)
     out.attrs["probability_calibration"] = calibration_report
     ranking_report = {
-        "source": "kronos_mini_raw_ranking_head",
+        "source": "kronos_mini_next_day_ohlcva",
+        "native_output": ["pred_open", "pred_high", "pred_low", "pred_close", "pred_volume", "pred_amount"],
+        "ranking_basis": "pred_close / current_close - 1",
+        "ranking_head_used": False,
         "sentiment_fusion": False,
         "training_penalty_note": (
             "3/5/8 false-positive penalties remain training-only and use realized T+1 labels; "

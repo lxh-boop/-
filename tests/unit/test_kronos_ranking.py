@@ -23,8 +23,10 @@ def test_original_kronos_ranking_has_no_sentiment_adjustment(tmp_path) -> None:
                 "vol_20": 0.01,
                 "drawdown_20": 0.0,
                 "pred_return": 0.01,
-                "kronos_oriented_score": 1.0,
-                "kronos_raw_score": -1.0,
+                "pred_open": 10.0,
+                "pred_high": 10.2,
+                "pred_low": 9.9,
+                "pred_close": 10.1,
             },
             {
                 "date": "2026-07-31",
@@ -39,9 +41,11 @@ def test_original_kronos_ranking_has_no_sentiment_adjustment(tmp_path) -> None:
                 "ret_20": 0.0,
                 "vol_20": 0.01,
                 "drawdown_20": 0.0,
-                "pred_return": 0.01,
-                "kronos_oriented_score": 0.5,
-                "kronos_raw_score": -0.5,
+                "pred_return": -0.02,
+                "pred_open": 9.9,
+                "pred_high": 10.0,
+                "pred_low": 9.7,
+                "pred_close": 9.8,
             },
         ]
     )
@@ -53,7 +57,11 @@ def test_original_kronos_ranking_has_no_sentiment_adjustment(tmp_path) -> None:
     )
 
     assert ranking["rank"].tolist() == [1, 2]
-    assert ranking["kronos_score"].tolist() == ranking["score"].tolist()
+    assert ranking["code"].tolist() == ["000001", "000002"]
+    assert ranking["expected_next_day_return"].tolist() == [0.01, -0.02]
+    assert not any("kronos_score" in column for column in ranking.columns)
     assert set(ranking["model_name"]) == {KRONOS_MODEL_NAME}
     assert not any("moneyflow" in column for column in ranking.columns)
+    assert report["ranking_head_used"] is False
+    assert report["native_output"][:4] == ["pred_open", "pred_high", "pred_low", "pred_close"]
     assert report["sentiment_fusion"] is False

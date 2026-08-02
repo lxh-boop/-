@@ -16,7 +16,6 @@ from kronos_runtime.settings import (
     lab_root,
     market_panel_path,
     model_dir,
-    orientation,
     predictor_dir,
     tokenizer_dir,
     validate_kronos_assets,
@@ -260,7 +259,6 @@ class KronosMiniInferenceAdapter:
         model.to(self.device).eval()
 
         rows: list[dict[str, Any]] = []
-        selected_orientation = orientation()
         with torch.no_grad():
             for start in range(0, len(records), self.batch_size):
                 batch = records[start : start + self.batch_size]
@@ -275,10 +273,7 @@ class KronosMiniInferenceAdapter:
                 )
                 predicted = output["predicted_values"].float().cpu().numpy()
                 returns = output["predicted_return"].float().cpu().numpy()
-                raw_scores = output["ranking_score"].float().cpu().numpy()
                 for index, item in enumerate(batch):
-                    raw_score = float(raw_scores[index])
-                    oriented_score = -raw_score if selected_orientation == "ascending" else raw_score
                     divisor = item.current_adj_factor if item.current_adj_factor > 0 else 1.0
                     values = predicted[index] / divisor
                     rows.append(
@@ -295,12 +290,8 @@ class KronosMiniInferenceAdapter:
                             "pred_volume": float(predicted[index][4]),
                             "pred_amount": float(predicted[index][5]),
                             "pred_return": float(returns[index]),
-                            "kronos_raw_score": raw_score,
-                            "kronos_oriented_score": oriented_score,
-                            "kronos_model_confidence": float(torch.sigmoid(torch.tensor(oriented_score)).item()),
-                            "ranking_orientation": selected_orientation,
                             "model_version": KRONOS_MODEL_VERSION,
                         }
                     )
         result = pd.DataFrame(rows)
-        return result.sort_values(["kronos_oriented_score", "code"], ascending=[False, True]).reset_index(drop=True)
+        return result.sort_values(["pred_return", "code"], ascending=[False, True]).reset_index(drop=True)

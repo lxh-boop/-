@@ -310,6 +310,8 @@ def kronos_daily_update(
         "prediction_date": str(market_window["prediction_target_date"]),
         "ranking_rows": int(len(ranking)),
         "model_feature_source": "adjusted_ohlcva_256_observations",
+        "model_native_output": "next_trading_day_ohlcva",
+        "ranking_basis": "predicted_close_return_descending",
         "rolling_training_mode": "fixed_trained_checkpoint_with_incremental_market_data",
         "training_false_positive_penalty": {
             "top20_false_positive": 3,
@@ -322,12 +324,13 @@ def kronos_daily_update(
         "historical_validation": {
             "valid_test_days": 20,
             "label_rule": "real_return > 0 on the exact next trading day",
-            "top5_next_day_up_probability": 0.53,
-            "top10_next_day_up_probability": 0.56,
-            "top15_next_day_up_probability": 0.5766666666666667,
-            "top5_daily_mean_return": 0.002825191210556318,
-            "top10_daily_mean_return": 0.004988490837886494,
-            "top15_daily_mean_return": 0.004007014099090959,
+            "ranking_basis": "predicted_close_return_descending",
+            "top5_next_day_up_probability": 0.43,
+            "top10_next_day_up_probability": 0.435,
+            "top15_next_day_up_probability": 0.4366666666666667,
+            "top5_daily_mean_return": -0.0059895602700496585,
+            "top10_daily_mean_return": -0.006874450997477031,
+            "top15_daily_mean_return": -0.006978042898475367,
         },
         "probability_calibration": calibration_report,
         "disclaimer": "本项目仅用于机器学习、金融数据分析和项目展示，不构成投资建议，不用于实盘交易。",
@@ -338,7 +341,11 @@ def kronos_daily_update(
     print(f"[Save] latest ranking -> {RANKING_LATEST_PATH}")
     print(f"[Save] dated ranking -> {dated_path}")
     print(f"[Save] Kronos metrics -> {KRONOS_LATEST_METRICS_PATH}")
-    print(ranking.head(5)[["rank", "code", "name", "kronos_score", "score"]])
+    print(
+        ranking.head(5)[
+            ["rank", "code", "name", "pred_open", "pred_high", "pred_low", "pred_close", "pred_return"]
+        ]
+    )
     return ranking, metrics
 
 

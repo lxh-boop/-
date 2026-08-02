@@ -393,7 +393,8 @@ class DashboardApplicationService:
                 "backend": KRONOS_BACKEND,
                 "status": "ready" if report.get("ready") else "missing",
                 "version": report.get("model_version"),
-                "ranking_source": "Kronos-mini 原始排名头",
+                "prediction_output": "下一交易日预测 OHLCVA",
+                "ranking_source": "预测收盘价相对当前收盘价的涨跌幅",
             }]
         )
 
@@ -474,7 +475,8 @@ class DashboardApplicationService:
             "backend": KRONOS_BACKEND,
             "model_name": KRONOS_MODEL_NAME,
             "status": "ready",
-            "ranking_source": "Kronos-mini 原始排名头",
+            "prediction_output": "下一交易日预测 OHLCVA",
+            "ranking_source": "预测收盘价相对当前收盘价的涨跌幅",
             "assets": validate_kronos_assets(),
         }
 

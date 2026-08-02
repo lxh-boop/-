@@ -21,7 +21,7 @@ export function RankingPage() {
   const records = rankings.data?.records ?? []
   const top15 = rankings.data?.top15_statistics
   return <Space direction="vertical" size="large" style={{width:'100%'}}>
-    <PageHeader title="首页 / 预测排名" description="使用 Kronos-mini 原始排名结果，不叠加资金流情绪。" />
+    <PageHeader title="首页 / 预测排名" description="展示 Kronos-mini 预测的下一交易日开盘、最高、最低和收盘；按预测收盘涨跌幅排序。" />
     <ReadOnlyNotice />
     {summary.data && <ModelStatusCards summary={summary.data}/>}
     <Card title={`最新预测排名 · ${rankings.data?.total ?? 0} 条`}><RankingTable records={records} onSelect={(code)=>navigate(`/stocks/${code}`)}/></Card>

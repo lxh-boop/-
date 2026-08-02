@@ -7,7 +7,7 @@ from typing import Any
 
 KRONOS_BACKEND = "kronos_mini"
 KRONOS_MODEL_NAME = "kronos_mini"
-KRONOS_MODEL_VERSION = "initial_recent_year_20260520_orientation_calibrated"
+KRONOS_MODEL_VERSION = "initial_recent_year_20260520"
 KRONOS_TRAINING_PENALTY = {
     "top20_false_positive": 3.0,
     "top10_non_positive": 5.0,
@@ -50,13 +50,6 @@ def market_panel_path() -> Path:
     return lab_root() / "data" / "processed" / "market_panel.parquet"
 
 
-def orientation() -> str:
-    value = str(os.environ.get("KRONOS_RANKING_ORIENTATION") or "ascending").strip().lower()
-    if value not in {"ascending", "descending"}:
-        raise ValueError(f"不支持的 Kronos 排名方向：{value}")
-    return value
-
-
 def validate_kronos_assets() -> dict[str, Any]:
     paths = {
         "lab_root": lab_root(),
@@ -74,7 +67,6 @@ def validate_kronos_assets() -> dict[str, Any]:
         "backend": KRONOS_BACKEND,
         "model_name": KRONOS_MODEL_NAME,
         "model_version": KRONOS_MODEL_VERSION,
-        "orientation": orientation(),
         "training_false_positive_penalty": dict(KRONOS_TRAINING_PENALTY),
         "paths": {name: str(path) for name, path in paths.items()},
     }
