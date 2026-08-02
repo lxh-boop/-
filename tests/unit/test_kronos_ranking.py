@@ -6,7 +6,7 @@ from kronos_runtime.ranking import build_kronos_ranking
 from kronos_runtime.settings import KRONOS_MODEL_NAME
 
 
-def test_original_kronos_ranking_has_no_sentiment_adjustment(tmp_path) -> None:
+def test_target_mode_kronos_ranking_uses_validation_selected_signal_without_sentiment(tmp_path) -> None:
     predictions = pd.DataFrame(
         [
             {
@@ -27,6 +27,8 @@ def test_original_kronos_ranking_has_no_sentiment_adjustment(tmp_path) -> None:
                 "pred_high": 10.2,
                 "pred_low": 9.9,
                 "pred_close": 10.1,
+                "target_ranking_signal": 0.2,
+                "target_confidence": 0.55,
             },
             {
                 "date": "2026-07-31",
@@ -46,6 +48,8 @@ def test_original_kronos_ranking_has_no_sentiment_adjustment(tmp_path) -> None:
                 "pred_high": 10.0,
                 "pred_low": 9.7,
                 "pred_close": 9.8,
+                "target_ranking_signal": -0.1,
+                "target_confidence": 0.48,
             },
         ]
     )
@@ -57,11 +61,12 @@ def test_original_kronos_ranking_has_no_sentiment_adjustment(tmp_path) -> None:
     )
 
     assert ranking["rank"].tolist() == [1, 2]
-    assert ranking["code"].tolist() == ["000001", "000002"]
-    assert ranking["expected_next_day_return"].tolist() == [0.01, -0.02]
+    assert ranking["code"].tolist() == ["000002", "000001"]
+    assert ranking["expected_next_day_return"].tolist() == [-0.02, 0.01]
     assert not any("kronos_score" in column for column in ranking.columns)
     assert set(ranking["model_name"]) == {KRONOS_MODEL_NAME}
     assert not any("moneyflow" in column for column in ranking.columns)
-    assert report["ranking_head_used"] is False
+    assert report["ranking_head_used"] is True
+    assert report["ranking_orientation"] == "ascending"
     assert report["native_output"][:4] == ["pred_open", "pred_high", "pred_low", "pred_close"]
     assert report["sentiment_fusion"] is False

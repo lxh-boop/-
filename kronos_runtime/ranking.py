@@ -4,7 +4,12 @@ import numpy as np
 import pandas as pd
 
 from confidence_scoring import add_confidence_scores
-from kronos_runtime.settings import KRONOS_BACKEND, KRONOS_MODEL_NAME
+from kronos_runtime.settings import (
+    KRONOS_BACKEND,
+    KRONOS_MODEL_NAME,
+    KRONOS_MODEL_VERSION,
+    KRONOS_RANKING_ORIENTATION,
+)
 from ranking_probability_calibration import calibrate_ranking_probabilities
 from ranking_schema import normalize_ranking_columns, validate_ranking_schema
 from risk_scoring import add_risk_scores
@@ -24,11 +29,17 @@ def build_kronos_ranking(
     if expected_return.isna().any():
         raise RuntimeError("Kronos 下一交易日预测收益存在空值")
     out["expected_next_day_return"] = expected_return
-    out["score"] = expected_return.rank(method="average", pct=True).clip(0.0, 1.0)
-    out = out.sort_values(["expected_next_day_return", "code"], ascending=[False, True]).reset_index(drop=True)
+    target_signal = pd.to_numeric(out["target_ranking_signal"], errors="coerce")
+    if target_signal.isna().any():
+        raise RuntimeError("Kronos 目标模式排序信号存在空值")
+    if KRONOS_RANKING_ORIENTATION != "ascending":
+        raise RuntimeError(f"不支持的 Kronos 目标模式方向：{KRONOS_RANKING_ORIENTATION}")
+    out["target_order_score"] = -target_signal
+    out["score"] = out["target_order_score"].rank(method="average", pct=True).clip(0.0, 1.0)
+    out = out.sort_values(["target_ranking_signal", "code"], ascending=[True, True]).reset_index(drop=True)
     out.insert(0, "rank", np.arange(1, len(out) + 1))
-    out["raw_score"] = out["expected_next_day_return"]
-    out["pred_score"] = out["expected_next_day_return"]
+    out["raw_score"] = out["target_order_score"]
+    out["pred_score"] = out["target_order_score"]
     out["pred_5d_ret"] = out["pred_return"]
     # The ranking head confidence is not a calibrated probability. A neutral
     # placeholder is kept until archived top-15 outcomes can calibrate it.
@@ -43,6 +54,7 @@ def build_kronos_ranking(
         feature_data=feature_data,
         history_dir=history_dir,
         model_name=KRONOS_MODEL_NAME,
+        model_version=KRONOS_MODEL_VERSION,
     )
     out = add_confidence_scores(out, calibration_report=calibration_report)
     out = normalize_ranking_columns(out)
@@ -51,11 +63,12 @@ def build_kronos_ranking(
     ranking_report = {
         "source": "kronos_mini_next_day_ohlcva",
         "native_output": ["pred_open", "pred_high", "pred_low", "pred_close", "pred_volume", "pred_amount"],
-        "ranking_basis": "pred_close / current_close - 1",
-        "ranking_head_used": False,
+        "ranking_basis": "target_mode_ranking_signal_ascending",
+        "ranking_head_used": True,
+        "ranking_orientation": KRONOS_RANKING_ORIENTATION,
         "sentiment_fusion": False,
         "training_penalty_note": (
-            "3/5/8 false-positive penalties remain training-only and use realized T+1 labels; "
+            "4/6/9/12/16 false-positive penalties remain training-only and use realized T+1 labels; "
             "no same-day sentiment adjustment is applied."
         ),
     }

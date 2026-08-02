@@ -136,6 +136,29 @@ def test_ranking_page_exposes_separate_top15_daily_statistics() -> None:
     assert present_ranking_page(payload)["top15_statistics"] == statistics
 
 
+def test_ranking_page_exposes_target_mode_validation_against_universe() -> None:
+    validation = {
+        "valid_test_days": 20,
+        "universe_next_day_up_probability": 0.5251,
+        "top5_next_day_up_probability": 0.58,
+        "top10_next_day_up_probability": 0.57,
+        "top15_next_day_up_probability": 0.5467,
+        "top5_lift_vs_universe": 0.0549,
+        "top10_lift_vs_universe": 0.0449,
+        "top15_lift_vs_universe": 0.0216,
+        "all_topk_above_universe": True,
+    }
+    payload = {
+        "records": [],
+        "total": 0,
+        "offset": 0,
+        "limit": 100,
+        "top15_statistics": None,
+        "target_validation": validation,
+    }
+    assert present_ranking_page(payload)["target_validation"] == validation
+
+
 def test_ranking_page_joins_signal_date_ohlc() -> None:
     service = WebReadApplicationService()
     service.ranking = lambda: pd.DataFrame([

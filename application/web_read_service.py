@@ -147,6 +147,41 @@ class WebReadApplicationService:
         return data.drop(columns=["_signal_code", "_signal_date"])
 
     def ranking_page(self, *, offset: int = 0, limit: int = 100) -> dict[str, Any]:
+        metrics = self.metrics()
+        validation = metrics.get("historical_validation", {}) if isinstance(metrics, dict) else {}
+        target_validation = None
+        if isinstance(validation, dict) and validation.get("valid_test_days"):
+            target_validation = {
+                "valid_test_days": self._safe_number(validation.get("valid_test_days")),
+                "test_start_date": self._text(validation.get("test_start_date")),
+                "test_end_date": self._text(validation.get("test_end_date")),
+                "train_end_date": self._text(validation.get("train_end_date")),
+                "best_epoch": self._safe_number(validation.get("best_epoch")),
+                "universe_next_day_up_probability": self._safe_number(
+                    validation.get("universe_next_day_up_probability")
+                ),
+                "top5_next_day_up_probability": self._safe_number(
+                    validation.get("top5_next_day_up_probability")
+                ),
+                "top10_next_day_up_probability": self._safe_number(
+                    validation.get("top10_next_day_up_probability")
+                ),
+                "top15_next_day_up_probability": self._safe_number(
+                    validation.get("top15_next_day_up_probability")
+                ),
+                "top5_lift_vs_universe": self._safe_number(
+                    validation.get("top5_lift_vs_universe")
+                ),
+                "top10_lift_vs_universe": self._safe_number(
+                    validation.get("top10_lift_vs_universe")
+                ),
+                "top15_lift_vs_universe": self._safe_number(
+                    validation.get("top15_lift_vs_universe")
+                ),
+                "all_topk_above_universe": bool(
+                    validation.get("all_topk_above_universe")
+                ),
+            }
         frame = self.ranking()
         if frame is None or getattr(frame, "empty", True):
             return {
@@ -155,6 +190,7 @@ class WebReadApplicationService:
                 "offset": int(offset),
                 "limit": int(limit),
                 "top15_statistics": None,
+                "target_validation": target_validation,
             }
         data = self._attach_signal_date_ohlc(frame)
         if "pred_score" not in data.columns:
@@ -209,6 +245,7 @@ class WebReadApplicationService:
             "offset": start,
             "limit": size,
             "top15_statistics": top15_statistics,
+            "target_validation": target_validation,
         }
 
     def data_freshness(self) -> list[dict[str, Any]]:

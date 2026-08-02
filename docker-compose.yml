@@ -24,7 +24,7 @@ services:
       NEO4J_URI: ${NEO4J_URI:-bolt://host.docker.internal:7687}
       QLIB_PROVIDER_URI: ${QLIB_PROVIDER_URI:-/app/data/qlib}
       KRONOS_LAB_ROOT: /kronos_model_lab
-      KRONOS_MODEL_DIR: /kronos_model_lab/outputs/models/initial_recent_year_20260520
+      KRONOS_MODEL_DIR: /kronos_model_lab/outputs/target_mode/target_full_recent_v1/model
       KRONOS_PREDICTOR_DIR: /kronos_model_lab/models/pretrained/Kronos-mini
       KRONOS_TOKENIZER_DIR: /kronos_model_lab/models/pretrained/Kronos-Tokenizer-2k
       PYTHONUNBUFFERED: "1"

@@ -31,6 +31,7 @@ def _read_prediction_source(
     path: Path,
     *,
     model_name: str,
+    model_version: str | None,
     source_priority: int,
 ) -> pd.DataFrame:
     try:
@@ -45,6 +46,7 @@ def _read_prediction_source(
                 "score",
                 "up_prob",
                 "model_name",
+                "model_version",
                 "model_backend",
                 "future_1d_ret",
                 "t1_ret",
@@ -65,6 +67,10 @@ def _read_prediction_source(
         ]
     elif model_name not in path.stem:
         return pd.DataFrame()
+    if model_version:
+        if "model_version" not in frame.columns:
+            return pd.DataFrame()
+        frame = frame[frame["model_version"].astype(str).eq(str(model_version))]
     if frame.empty:
         return pd.DataFrame()
 
@@ -92,6 +98,7 @@ def _load_archived_predictions(
     history_dir: str | Path,
     *,
     model_name: str,
+    model_version: str | None,
     before_date: pd.Timestamp,
     top_k_per_date: int,
 ) -> tuple[pd.DataFrame, int]:
@@ -110,6 +117,7 @@ def _load_archived_predictions(
         frame = _read_prediction_source(
             t1_history[-1],
             model_name=model_name,
+            model_version=model_version,
             source_priority=10,
         )
         if not frame.empty:
@@ -120,6 +128,7 @@ def _load_archived_predictions(
         frame = _read_prediction_source(
             standard_backtest,
             model_name=model_name,
+            model_version=model_version,
             source_priority=20,
         )
         if not frame.empty:
@@ -131,6 +140,7 @@ def _load_archived_predictions(
         frame = _read_prediction_source(
             path,
             model_name=model_name,
+            model_version=model_version,
             source_priority=30,
         )
         if not frame.empty:
@@ -223,6 +233,7 @@ def calibrate_ranking_probabilities(
     feature_data: pd.DataFrame,
     history_dir: str | Path,
     model_name: str,
+    model_version: str | None = None,
     min_samples: int = DEFAULT_MIN_SAMPLES,
     min_positive: int = DEFAULT_MIN_POSITIVE,
     min_negative: int = DEFAULT_MIN_NEGATIVE,
@@ -280,6 +291,7 @@ def calibrate_ranking_probabilities(
     history, source_files = _load_archived_predictions(
         history_dir,
         model_name=model_name,
+        model_version=model_version,
         before_date=before_date,
         top_k_per_date=top_k_per_date,
     )

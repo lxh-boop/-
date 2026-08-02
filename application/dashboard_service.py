@@ -394,7 +394,7 @@ class DashboardApplicationService:
                 "status": "ready" if report.get("ready") else "missing",
                 "version": report.get("model_version"),
                 "prediction_output": "下一交易日预测 OHLCVA",
-                "ranking_source": "预测收盘价相对当前收盘价的涨跌幅",
+                "ranking_source": "目标模式排序信号（验证期选择升序）",
             }]
         )
 
@@ -476,7 +476,7 @@ class DashboardApplicationService:
             "model_name": KRONOS_MODEL_NAME,
             "status": "ready",
             "prediction_output": "下一交易日预测 OHLCVA",
-            "ranking_source": "预测收盘价相对当前收盘价的涨跌幅",
+            "ranking_source": "目标模式排序信号（验证期选择升序）",
             "assets": validate_kronos_assets(),
         }
 

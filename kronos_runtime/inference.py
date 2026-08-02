@@ -273,6 +273,8 @@ class KronosMiniInferenceAdapter:
                 )
                 predicted = output["predicted_values"].float().cpu().numpy()
                 returns = output["predicted_return"].float().cpu().numpy()
+                ranking_signals = output["ranking_score"].float().cpu().numpy()
+                target_confidences = output["confidence"].float().cpu().numpy()
                 for index, item in enumerate(batch):
                     divisor = item.current_adj_factor if item.current_adj_factor > 0 else 1.0
                     values = predicted[index] / divisor
@@ -290,8 +292,12 @@ class KronosMiniInferenceAdapter:
                             "pred_volume": float(predicted[index][4]),
                             "pred_amount": float(predicted[index][5]),
                             "pred_return": float(returns[index]),
+                            "target_ranking_signal": float(ranking_signals[index]),
+                            "target_confidence": float(target_confidences[index]),
                             "model_version": KRONOS_MODEL_VERSION,
                         }
                     )
         result = pd.DataFrame(rows)
-        return result.sort_values(["pred_return", "code"], ascending=[False, True]).reset_index(drop=True)
+        return result.sort_values(
+            ["target_ranking_signal", "code"], ascending=[True, True]
+        ).reset_index(drop=True)

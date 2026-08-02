@@ -33,6 +33,7 @@ from kronos_runtime import (
     KronosMiniInferenceAdapter,
     build_kronos_ranking,
 )
+from kronos_runtime.settings import KRONOS_TARGET_VALIDATION, KRONOS_TRAINING_PENALTY
 from market_context import ensure_market_context_for_feature_data
 from model_zoo_backend import (
     is_zoo_backend,
@@ -311,26 +312,15 @@ def kronos_daily_update(
         "ranking_rows": int(len(ranking)),
         "model_feature_source": "adjusted_ohlcva_256_observations",
         "model_native_output": "next_trading_day_ohlcva",
-        "ranking_basis": "predicted_close_return_descending",
+        "ranking_basis": "target_mode_ranking_signal_ascending",
         "rolling_training_mode": "fixed_trained_checkpoint_with_incremental_market_data",
-        "training_false_positive_penalty": {
-            "top20_false_positive": 3,
-            "top10_non_positive": 5,
-            "top10_loss_below_2pct": 8,
-        },
+        "training_false_positive_penalty": dict(KRONOS_TRAINING_PENALTY),
         "kronos_assets": adapter.asset_report,
         "kronos_coverage": adapter.coverage_report,
         "ranking": ranking_report,
         "historical_validation": {
-            "valid_test_days": 20,
-            "label_rule": "real_return > 0 on the exact next trading day",
-            "ranking_basis": "predicted_close_return_descending",
-            "top5_next_day_up_probability": 0.43,
-            "top10_next_day_up_probability": 0.435,
-            "top15_next_day_up_probability": 0.4366666666666667,
-            "top5_daily_mean_return": -0.0059895602700496585,
-            "top10_daily_mean_return": -0.006874450997477031,
-            "top15_daily_mean_return": -0.006978042898475367,
+            **KRONOS_TARGET_VALIDATION,
+            "ranking_basis": "target_mode_ranking_signal_ascending",
         },
         "probability_calibration": calibration_report,
         "disclaimer": "本项目仅用于机器学习、金融数据分析和项目展示，不构成投资建议，不用于实盘交易。",

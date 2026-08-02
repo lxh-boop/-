@@ -64,6 +64,23 @@ export interface Top15Statistics {
 
 export interface RankingPageData extends TablePayload<RankingRecord> {
   top15_statistics?: Top15Statistics | null
+  target_validation?: TargetValidation | null
+}
+
+export interface TargetValidation {
+  valid_test_days?: number
+  test_start_date?: string
+  test_end_date?: string
+  train_end_date?: string
+  best_epoch?: number
+  universe_next_day_up_probability?: number
+  top5_next_day_up_probability?: number
+  top10_next_day_up_probability?: number
+  top15_next_day_up_probability?: number
+  top5_lift_vs_universe?: number
+  top10_lift_vs_universe?: number
+  top15_lift_vs_universe?: number
+  all_topk_above_universe?: boolean
 }
 
 export interface FreshnessItem {

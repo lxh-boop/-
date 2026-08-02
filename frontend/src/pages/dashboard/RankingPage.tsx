@@ -20,11 +20,28 @@ export function RankingPage() {
   if (summary.error || rankings.error) return <EmptyState title="只读首页加载失败" description={String(summary.error ?? rankings.error)} />
   const records = rankings.data?.records ?? []
   const top15 = rankings.data?.top15_statistics
+  const target = rankings.data?.target_validation
+  const liftText = (value?: number) => typeof value === 'number' ? `${value >= 0 ? '+' : ''}${(value * 100).toFixed(2)} 个百分点` : '—'
+  const percentage = (value?: number) => Number(((value ?? 0) * 100).toFixed(2))
   return <Space direction="vertical" size="large" style={{width:'100%'}}>
-    <PageHeader title="首页 / 预测排名" description="展示 Kronos-mini 预测的下一交易日开盘、最高、最低和收盘；按预测收盘涨跌幅排序。" />
+    <PageHeader title="首页 / 预测排名" description="展示 Kronos-mini 预测的下一交易日开盘、最高、最低和收盘；排名使用仅由验证期确定方向的目标模式排序信号。" />
     <ReadOnlyNotice />
     {summary.data && <ModelStatusCards summary={summary.data}/>}
     <Card title={`最新预测排名 · ${rankings.data?.total ?? 0} 条`}><RankingTable records={records} onSelect={(code)=>navigate(`/stocks/${code}`)}/></Card>
+    <Card title="目标模式未见数据验证">
+      {typeof target?.universe_next_day_up_probability === 'number' ? <>
+        <Row gutter={[16, 16]}>
+          <Col xs={12} lg={6}><Statistic title="同期股票池上涨基准" value={percentage(target.universe_next_day_up_probability)} precision={2} suffix="%" /></Col>
+          <Col xs={12} lg={6}><Statistic title={`Top5（${liftText(target.top5_lift_vs_universe)}）`} value={percentage(target.top5_next_day_up_probability)} precision={2} suffix="%" /></Col>
+          <Col xs={12} lg={6}><Statistic title={`Top10（${liftText(target.top10_lift_vs_universe)}）`} value={percentage(target.top10_next_day_up_probability)} precision={2} suffix="%" /></Col>
+          <Col xs={12} lg={6}><Statistic title={`Top15（${liftText(target.top15_lift_vs_universe)}）`} value={percentage(target.top15_next_day_up_probability)} precision={2} suffix="%" /></Col>
+        </Row>
+        <Typography.Text type="secondary">
+          测试区间 {target.test_start_date || '—'} 至 {target.test_end_date || '—'}，共 {target.valid_test_days ?? 0} 个训练和选模均未见的交易日；最佳检查点为第 {target.best_epoch ?? '—'} epoch。
+        </Typography.Text>
+        <div style={{marginTop: 8}}><Tag color={target.all_topk_above_universe ? 'success' : 'error'}>{target.all_topk_above_universe ? 'Top5 / Top10 / Top15 全部高于同期基准' : '未达到三档同时高于同期基准'}</Tag></div>
+      </> : <Typography.Text type="secondary">暂无目标模式未见数据验证结果。</Typography.Text>}
+    </Card>
     <Card title="历史每日排名前5名 / 前10名 / 前15名上涨统计">
       {typeof top15?.daily_average_up_rate === 'number' ? <>
         <Row gutter={[16, 16]}>
