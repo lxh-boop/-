@@ -74,3 +74,4 @@ streamlit_*.log
 *.sqlite3
 *.docx
 *.pdf
+frontend/node_modules/

@@ -17,6 +17,7 @@ from config import (
     DFT_UNET_LATEST_MODEL_PATH,
     LATEST_FEATURE_DATA_PATH,
     LATEST_RAW_DATA_PATH,
+    KRONOS_LATEST_METRICS_PATH,
     OUTPUT_DIR,
     RANKING_LATEST_PATH,
     RAW_DATA_PATH,
@@ -24,6 +25,14 @@ from config import (
     ensure_dirs,
 )
 from data_tushare import fetch_stock_pool_recent_daily_fast
+from data_tushare import build_market_data_window, init_tushare_pro
+from kronos_runtime import (
+    KRONOS_BACKEND,
+    KRONOS_MODEL_NAME,
+    KRONOS_MODEL_VERSION,
+    KronosMiniInferenceAdapter,
+    build_kronos_ranking,
+)
 from market_context import ensure_market_context_for_feature_data
 from model_zoo_backend import (
     is_zoo_backend,
@@ -47,7 +56,7 @@ from universe import get_stock_pool
 FETCH_RECENT_TRADE_DAYS = 10
 
 DFT_UNET_BACKEND = "dft_unet_external"
-DEFAULT_EXTERNAL_MODEL_BACKEND = "zoo:chronos_bolt_small"
+DEFAULT_EXTERNAL_MODEL_BACKEND = KRONOS_BACKEND
 
 
 # ============================================================
@@ -83,7 +92,7 @@ def normalize_raw_data(df: pd.DataFrame, stock_pool: dict) -> pd.DataFrame:
 
     needed_cols = [
         "date", "code", "name", "open", "close", "high", "low",
-        "volume", "amount", "pct_chg", "vwap", "turnover",
+        "volume", "amount", "pct_chg", "vwap", "turnover", "adj_factor",
     ]
 
     df = df[[c for c in needed_cols if c in df.columns]].copy()
@@ -205,6 +214,7 @@ def prepare_latest_feature_data(
         token=token,
         stock_pool=stock_pool,
         recent_trade_days=FETCH_RECENT_TRADE_DAYS,
+        include_adj_factor=True,
         max_workers=fetch_workers,
     )
     recent_raw = normalize_raw_data(recent_raw, stock_pool)
@@ -252,6 +262,84 @@ def prepare_latest_feature_data(
         )
 
     return feature_data, raw_data, new_data_start_date, stock_pool
+
+
+def kronos_daily_update(
+    token: str,
+    fetch_workers: int | None = None,
+):
+    """Produce the sole production ranking from the original Kronos-mini head."""
+
+    ensure_dirs()
+    print("=" * 80)
+    print("[Kronos Daily Update Start]", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    print("=" * 80)
+    feature_data, raw_data, _, stock_pool = prepare_latest_feature_data(
+        token,
+        include_news_features=False,
+        sync_news_db=False,
+        fetch_workers=fetch_workers,
+    )
+    market_window = build_market_data_window(init_tushare_pro(token))
+    adapter = KronosMiniInferenceAdapter(device="cpu", batch_size=32)
+    predictions = adapter.predict(
+        raw_data=raw_data,
+        stock_pool=stock_pool,
+        prediction_date=str(market_window["prediction_target_date"]),
+    )
+    signal_date = str(predictions["date"].iloc[0])
+    ranking, ranking_report = build_kronos_ranking(
+        predictions=predictions,
+        feature_data=feature_data,
+        history_dir=OUTPUT_DIR,
+    )
+    calibration_report = ranking.attrs.get("probability_calibration", {})
+    ranking.to_csv(RANKING_LATEST_PATH, index=False, encoding="utf-8-sig")
+    date_text = str(ranking["date"].iloc[0]).replace("-", "")[:8]
+    dated_path = os.path.join(OUTPUT_DIR, f"ranking_{date_text}_{KRONOS_MODEL_NAME}.csv")
+    ranking.to_csv(dated_path, index=False, encoding="utf-8-sig")
+
+    metrics = {
+        "model_name": KRONOS_MODEL_NAME,
+        "model_backend": KRONOS_BACKEND,
+        "model_version": KRONOS_MODEL_VERSION,
+        "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "update_type": "daily_kronos_incremental_prediction",
+        "prediction_horizon": "next_trading_day_T_plus_1",
+        "prediction_signal_date": signal_date,
+        "prediction_date": str(market_window["prediction_target_date"]),
+        "ranking_rows": int(len(ranking)),
+        "model_feature_source": "adjusted_ohlcva_256_observations",
+        "rolling_training_mode": "fixed_trained_checkpoint_with_incremental_market_data",
+        "training_false_positive_penalty": {
+            "top20_false_positive": 3,
+            "top10_non_positive": 5,
+            "top10_loss_below_2pct": 8,
+        },
+        "kronos_assets": adapter.asset_report,
+        "kronos_coverage": adapter.coverage_report,
+        "ranking": ranking_report,
+        "historical_validation": {
+            "valid_test_days": 20,
+            "label_rule": "real_return > 0 on the exact next trading day",
+            "top5_next_day_up_probability": 0.53,
+            "top10_next_day_up_probability": 0.56,
+            "top15_next_day_up_probability": 0.5766666666666667,
+            "top5_daily_mean_return": 0.002825191210556318,
+            "top10_daily_mean_return": 0.004988490837886494,
+            "top15_daily_mean_return": 0.004007014099090959,
+        },
+        "probability_calibration": calibration_report,
+        "disclaimer": "本项目仅用于机器学习、金融数据分析和项目展示，不构成投资建议，不用于实盘交易。",
+    }
+    os.makedirs(os.path.dirname(KRONOS_LATEST_METRICS_PATH), exist_ok=True)
+    with open(KRONOS_LATEST_METRICS_PATH, "w", encoding="utf-8") as file:
+        json.dump(metrics, file, ensure_ascii=False, indent=2)
+    print(f"[Save] latest ranking -> {RANKING_LATEST_PATH}")
+    print(f"[Save] dated ranking -> {dated_path}")
+    print(f"[Save] Kronos metrics -> {KRONOS_LATEST_METRICS_PATH}")
+    print(ranking.head(5)[["rank", "code", "name", "kronos_score", "score"]])
+    return ranking, metrics
 
 
 def keep_existing_ranking_when_prediction_unavailable(
@@ -330,6 +418,8 @@ def model_zoo_daily_update(
     model_backend: str,
     fetch_workers: int | None = None,
 ):
+    raise RuntimeError("模型库后端已下线，唯一运行模型为 kronos_mini")
+
     ensure_dirs()
 
     zoo_model_name = zoo_model_name_from_backend(model_backend)
@@ -419,6 +509,8 @@ def dft_unet_external_daily_update(
     checkpoint_path: str | None = None,
     fetch_workers: int | None = None,
 ):
+    raise RuntimeError("DFT_UNET 后端已下线，唯一运行模型为 kronos_mini")
+
     ensure_dirs()
 
     print("=" * 80)
@@ -589,20 +681,14 @@ def parse_args(argv: list[str] | None = None):
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     backend = str(args.model_backend or DEFAULT_EXTERNAL_MODEL_BACKEND).strip()
-    if is_zoo_backend(backend):
-        model_zoo_daily_update(
-            token=args.token,
-            model_backend=backend,
-            fetch_workers=args.fetch_workers,
+    if backend != KRONOS_BACKEND:
+        raise ValueError(
+            f"仅支持唯一模型后端 {KRONOS_BACKEND}；已拒绝旧模型后端：{backend}"
         )
-    elif backend == DFT_UNET_BACKEND:
-        dft_unet_external_daily_update(
-            token=args.token,
-            checkpoint_path=args.checkpoint_path or DEFAULT_DFT_UNET_CHECKPOINT_PATH,
-            fetch_workers=args.fetch_workers,
-        )
-    else:
-        raise ValueError(f"Unsupported external backend for daily update: {backend}")
+    kronos_daily_update(
+        token=args.token,
+        fetch_workers=args.fetch_workers,
+    )
     return 0
 
 

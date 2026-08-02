@@ -216,9 +216,10 @@ class WebReadApplicationService:
 
         items = [
             ("ranking", "最新排名", getattr(config, "RANKING_LATEST_PATH", "")),
-            ("metrics", "模型指标", getattr(config, "METRICS_PATH", "")),
+            ("metrics", "Kronos 模型指标", getattr(config, "KRONOS_LATEST_METRICS_PATH", "")),
             ("raw_data", "最新行情", getattr(config, "LATEST_RAW_DATA_PATH", "")),
             ("feature_data", "最新特征", getattr(config, "LATEST_FEATURE_DATA_PATH", "")),
+            ("kronos_history", "Kronos 复权历史缓存", getattr(config, "KRONOS_MARKET_HISTORY_CACHE_PATH", "")),
             ("news", "新闻缓存", getattr(config, "NEWS_CACHE_PATH", "")),
             ("announcement", "公告缓存", getattr(config, "ANNOUNCEMENT_CACHE_PATH", "")),
             ("rag_documents", "RAG 文档", getattr(config, "RAG_DOCUMENTS_PATH", "")),

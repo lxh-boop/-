@@ -74,9 +74,16 @@ def run_market_update_from_local_config(
 
     config = load_local_config()
     token = get_token()
-    model_backend = str(config.get("model_backend") or "zoo:chronos_bolt_small").strip()
-    model_version = str(config.get("model_version") or "latest").strip()
-    checkpoint = str(config.get("dft_unet_checkpoint_path") or "").strip()
+    from kronos_runtime.settings import KRONOS_BACKEND, KRONOS_MODEL_VERSION
+
+    configured_backend = str(config.get("model_backend") or "").strip()
+    model_backend = KRONOS_BACKEND
+    if configured_backend and configured_backend != KRONOS_BACKEND:
+        print(
+            f"[Scheduler] ignore retired model backend {configured_backend}; "
+            f"use {KRONOS_BACKEND}."
+        )
+    model_version = KRONOS_MODEL_VERSION
     timeout_seconds = max(1, int(config.get("scheduler_market_update_timeout_seconds") or 997200))
 
     project_root = Path(root).resolve()
@@ -94,8 +101,6 @@ def run_market_update_from_local_config(
         "--model-backend",
         model_backend,
     ]
-    if checkpoint:
-        command.extend(["--checkpoint-path", checkpoint])
 
     log_dir = project_root / SCHEDULER_LOG_DIR
     log_dir.mkdir(parents=True, exist_ok=True)

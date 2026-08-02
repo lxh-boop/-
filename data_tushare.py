@@ -494,6 +494,7 @@ def fetch_stock_pool_recent_daily_fast(
         "amount",
         "pct_chg",
         "turnover",
+        "adj_factor",
     ]
 
     for col in numeric_cols:
@@ -522,6 +523,9 @@ def fetch_stock_pool_recent_daily_fast(
         "vwap",
         "turnover",
     ]
+
+    if "adj_factor" in data.columns:
+        output_cols.append("adj_factor")
 
     data = data[output_cols].copy()
     data["code"] = data["code"].astype(str).str.zfill(6)

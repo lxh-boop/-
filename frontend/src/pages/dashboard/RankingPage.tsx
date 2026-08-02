@@ -21,16 +21,16 @@ export function RankingPage() {
   const records = rankings.data?.records ?? []
   const top15 = rankings.data?.top15_statistics
   return <Space direction="vertical" size="large" style={{width:'100%'}}>
-    <PageHeader title="首页 / 预测排名" description="展示已有排名、模型状态、数据新鲜度和只读图表。" />
+    <PageHeader title="首页 / 预测排名" description="使用 Kronos-mini 原始排名结果，不叠加资金流情绪。" />
     <ReadOnlyNotice />
     {summary.data && <ModelStatusCards summary={summary.data}/>}
     <Card title={`最新预测排名 · ${rankings.data?.total ?? 0} 条`}><RankingTable records={records} onSelect={(code)=>navigate(`/stocks/${code}`)}/></Card>
     <Card title="历史每日排名前5名 / 前10名 / 前15名上涨统计">
       {typeof top15?.daily_average_up_rate === 'number' ? <>
         <Row gutter={[16, 16]}>
-          <Col xs={12} lg={6}><Statistic title="排名前5名平均上涨率" value={Number(top15.top5_daily_average_up_rate ?? 0) * 100} precision={2} suffix="%" /></Col>
-          <Col xs={12} lg={6}><Statistic title="排名前10名平均上涨率" value={Number(top15.top10_daily_average_up_rate ?? 0) * 100} precision={2} suffix="%" /></Col>
-          <Col xs={12} lg={6}><Statistic title="排名前15名平均上涨率" value={top15.daily_average_up_rate * 100} precision={2} suffix="%" /></Col>
+          <Col xs={12} lg={6}><Statistic title="前5名下一交易日上涨概率" value={Number(top15.top5_daily_average_up_rate ?? 0) * 100} precision={2} suffix="%" /></Col>
+          <Col xs={12} lg={6}><Statistic title="前10名下一交易日上涨概率" value={Number(top15.top10_daily_average_up_rate ?? 0) * 100} precision={2} suffix="%" /></Col>
+          <Col xs={12} lg={6}><Statistic title="前15名下一交易日上涨概率" value={top15.daily_average_up_rate * 100} precision={2} suffix="%" /></Col>
           <Col xs={12} lg={6}><Statistic title="完整交易日" value={top15.complete_days ?? top15.observation_days ?? 0} /></Col>
         </Row>
         <Typography.Text type="secondary">

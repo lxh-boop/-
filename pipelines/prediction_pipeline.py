@@ -7,6 +7,7 @@ from typing import Any
 from database.repositories import PredictionRepository
 from pipelines.schemas import PipelineContext, PipelineStatus, PredictionPipelineResult
 from scoring.schemas import ModelPredictionSignal
+from kronos_runtime.settings import KRONOS_MODEL_NAME
 
 
 def _default_ranking_path(context: PipelineContext) -> Path:
@@ -64,6 +65,24 @@ def run_prediction_pipeline(
             output_count=0,
             output_paths={},
             errors=errors or [f"missing ranking file: {path}"],
+            warnings=warnings,
+            predictions=[],
+            source=source,
+        )
+
+    declared_models = {
+        str(row.get("model_name") or "").strip()
+        for row in rows
+        if str(row.get("model_name") or "").strip()
+    }
+    if declared_models and declared_models != {KRONOS_MODEL_NAME}:
+        models = ", ".join(sorted(declared_models))
+        return PredictionPipelineResult(
+            status=PipelineStatus.FAILED,
+            message=f"Rejected retired model ranking: {models}",
+            input_count=len(rows),
+            output_count=0,
+            errors=[f"expected_model={KRONOS_MODEL_NAME}; actual_models={models}"],
             warnings=warnings,
             predictions=[],
             source=source,

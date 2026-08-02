@@ -40,6 +40,7 @@ from config import (
     DEFAULT_LLM_MODEL,
     LATEST_FEATURE_DATA_PATH,
     LATEST_RAW_DATA_PATH,
+    KRONOS_LATEST_METRICS_PATH,
     LLM_API_KEY_ENV,
     LLM_BASE_URL_ENV,
     LLM_MODEL_ENV,
@@ -73,6 +74,7 @@ from llm_explainer import (
     load_cached_ai_explanation,
 )
 from local_config import load_local_config, save_local_config
+from kronos_runtime.settings import KRONOS_BACKEND, KRONOS_MODEL_NAME, validate_kronos_assets
 from market_context import MARKET_CONTEXT_COLUMNS, ensure_market_context_for_feature_data
 from model_zoo.metadata import bootstrap_registered_metadata, load_metadata
 from model_zoo.registry import list_model_names
@@ -101,6 +103,30 @@ from scheduler_manager import (
 ENABLE_NEWS_FEATURES = getattr(app_config, "ENABLE_NEWS_FEATURES", True)
 ENABLE_RAG = getattr(app_config, "ENABLE_RAG", True)
 ENABLE_LLM_EXPLAINER = getattr(app_config, "ENABLE_LLM_EXPLAINER", True)
+
+
+# Stage 6 freezes these callable names. Keep compatibility shells while making
+# the original Kronos-mini model as the only model they can expose.
+def downloaded_zoo_backends() -> dict[str, str]:
+    return {"Kronos-mini": KRONOS_BACKEND}
+
+
+def registered_zoo_backends() -> dict[str, str]:
+    return downloaded_zoo_backends()
+
+
+def list_model_names() -> list[str]:
+    return [KRONOS_MODEL_NAME]
+
+
+def is_zoo_backend(model_backend: str | None) -> bool:
+    return False
+
+
+def zoo_model_name_from_backend(model_backend: str) -> str:
+    if str(model_backend or "").strip() != KRONOS_BACKEND:
+        raise ValueError(f"旧模型后端已下线：{model_backend}")
+    return KRONOS_MODEL_NAME
 
 
 @dataclass
@@ -256,13 +282,12 @@ class DashboardApplicationService:
             cmd.append("--daily-update-child")
         else:
             cmd.append(str(self.rolling_update_script))
+        model_backend = KRONOS_BACKEND
         cmd.extend([
             "--token", str(token),
             "--base-version", str(base_version),
             "--model-backend", str(model_backend),
         ])
-        if model_backend == "dft_unet_external" and checkpoint_path:
-            cmd.extend(["--checkpoint-path", str(checkpoint_path)])
         masked = ["***" if i > 0 and cmd[i - 1] == "--token" else part for i, part in enumerate(cmd)]
         child_env = os.environ.copy()
         child_env["PYTHONIOENCODING"] = "utf-8"
@@ -314,11 +339,13 @@ class DashboardApplicationService:
         return frame
 
     @staticmethod
-    def load_metrics(path: str | Path = METRICS_PATH) -> Any:
-        file_path = Path(path)
+    def load_metrics(path: str | Path | None = None) -> Any:
+        file_path = Path(path or KRONOS_LATEST_METRICS_PATH)
         if not file_path.exists():
             return None
         try:
+            if file_path.suffix.lower() == ".json":
+                return json.loads(file_path.read_text(encoding="utf-8"))
             return joblib.load(file_path)
         except Exception:
             return None
@@ -359,12 +386,16 @@ class DashboardApplicationService:
 
     @staticmethod
     def load_model_zoo_table() -> pd.DataFrame:
-        try:
-            bootstrap_registered_metadata()
-            rows = (load_metadata() or {}).get("models", [])
-            return pd.DataFrame(rows or [])
-        except Exception:
-            return pd.DataFrame()
+        report = validate_kronos_assets()
+        return pd.DataFrame(
+            [{
+                "name": KRONOS_MODEL_NAME,
+                "backend": KRONOS_BACKEND,
+                "status": "ready" if report.get("ready") else "missing",
+                "version": report.get("model_version"),
+                "ranking_source": "Kronos-mini 原始排名头",
+            }]
+        )
 
     @staticmethod
     def load_external_backtest_summary() -> pd.DataFrame:
@@ -372,12 +403,17 @@ class DashboardApplicationService:
         if not path.exists():
             return pd.DataFrame()
         try:
-            return pd.read_csv(path, encoding="utf-8-sig")
+            frame = pd.read_csv(path, encoding="utf-8-sig")
+            if "model_name" in frame.columns:
+                frame = frame[frame["model_name"].astype(str).eq(KRONOS_MODEL_NAME)]
+            return frame
         except Exception:
             return pd.DataFrame()
 
     @staticmethod
     def load_external_daily_returns(model_name: str, topk: int) -> pd.DataFrame:
+        if str(model_name or "").strip() != KRONOS_MODEL_NAME:
+            return pd.DataFrame()
         path = Path(OUTPUT_DIR) / "backtests" / f"{model_name}_top{int(topk)}_daily_returns.csv"
         if not path.exists():
             return pd.DataFrame()
@@ -434,6 +470,16 @@ class DashboardApplicationService:
         checkpoint_path: str,
         ranking_df: pd.DataFrame | None = None,
     ) -> dict[str, Any]:
+        return {
+            "backend": KRONOS_BACKEND,
+            "model_name": KRONOS_MODEL_NAME,
+            "status": "ready",
+            "ranking_source": "Kronos-mini 原始排名头",
+            "assets": validate_kronos_assets(),
+        }
+
+        # Historical DFT implementation remains unreachable below because the
+        # Stage 6 method signature is frozen for transport compatibility.
         path = Path(checkpoint_path)
         summary_path = path.parent / "summary.json"
         summary: dict[str, Any] = {}
@@ -522,50 +568,13 @@ class DashboardApplicationService:
         checkpoint_path: str,
         token: str | None = None,
     ) -> tuple[pd.DataFrame, dict[str, Any]]:
-        if not Path(LATEST_FEATURE_DATA_PATH).exists():
-            raise RuntimeError("缺少最新特征文件，请先运行所选模型的每日更新生成特征缓存。")
-        feature_data = pd.read_csv(LATEST_FEATURE_DATA_PATH, dtype={"code": str})
-        feature_data["code"] = feature_data["code"].astype(str).str.zfill(6)
-        raw_data = DashboardApplicationService.load_latest_raw_data()
-        if model_backend == "dft_unet_external":
-            feature_data, market_context_report = ensure_market_context_for_feature_data(
-                feature_data=feature_data,
-                token=token,
-            )
-            from external_models.dft_unet_adapter import DFTUNetAdapter
-            adapter = DFTUNetAdapter(checkpoint_path=checkpoint_path, device="cpu").load()
-            ranking_df = adapter.predict(raw_data=raw_data, feature_data=feature_data)
-            backend_report = dict(adapter.load_report)
-            backend_report["market_context"] = market_context_report
-            snapshot_suffix = "dft_unet_external"
-        elif is_zoo_backend(model_backend):
-            if raw_data.empty:
-                raise RuntimeError("缺少 latest_raw_stock_data.csv，模型库时序模型需要原始行情序列。")
-            zoo_model_name = zoo_model_name_from_backend(model_backend)
-            ranking_df = make_zoo_latest_ranking(
-                model_name=zoo_model_name,
-                raw_data=raw_data,
-                feature_data=feature_data,
-                device="cpu",
-            )
-            backend_report = {
-                "model_backend": model_backend,
-                "model_name": zoo_model_name,
-                "mode": "rolling_window_prediction",
-            }
-            snapshot_suffix = zoo_model_name
-        else:
-            raise RuntimeError(f"不支持的模型：{model_backend}")
-        output_path = Path(RANKING_LATEST_PATH)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        ranking_df.to_csv(output_path, index=False, encoding="utf-8-sig")
-        if "date" in ranking_df.columns and not ranking_df.empty:
-            date_text = str(ranking_df["date"].iloc[0]).replace("-", "")[:8]
-            ranking_df.to_csv(
-                output_path.parent / f"ranking_{date_text}_{snapshot_suffix}.csv",
-                index=False,
-                encoding="utf-8-sig",
-            )
+        if model_backend != KRONOS_BACKEND:
+            raise RuntimeError(f"仅支持唯一模型后端 {KRONOS_BACKEND}")
+        if not token:
+            raise RuntimeError("运行 Kronos 每日更新需要 Tushare Token")
+        from daily_incremental_update import kronos_daily_update
+
+        ranking_df, backend_report = kronos_daily_update(token=token)
         return ranking_df, backend_report
 
 
@@ -587,24 +596,12 @@ class DashboardApplicationService:
 
     @staticmethod
     def inspect_model(model_backend: str, checkpoint_path: str, zoo_table: pd.DataFrame) -> dict[str, Any]:
-        if model_backend == "dft_unet_external":
-            from external_models.dft_unet_adapter import DFTUNetAdapter
-            adapter = DFTUNetAdapter(checkpoint_path=checkpoint_path, device="cpu")
-            report = adapter.inspect()
-            adapter.load()
-            return {
-                "kind": "dft_unet_external",
-                "report": report,
-                "load_report": adapter.load_report,
-            }
-        model_name = zoo_model_name_from_backend(model_backend)
-        row = pd.DataFrame()
-        if not zoo_table.empty and "name" in zoo_table.columns:
-            row = zoo_table[zoo_table["name"].astype(str) == model_name].tail(1)
+        if model_backend != KRONOS_BACKEND:
+            raise RuntimeError(f"旧模型后端已下线：{model_backend}")
         return {
-            "kind": "model_zoo",
-            "model_name": model_name,
-            "metadata": row.iloc[0].to_dict() if not row.empty else None,
+            "kind": KRONOS_BACKEND,
+            "model_name": KRONOS_MODEL_NAME,
+            "report": validate_kronos_assets(),
         }
 
 

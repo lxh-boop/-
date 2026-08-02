@@ -1,6 +1,8 @@
 akshare
 pandas
 numpy
+einops
+tqdm
 scikit-learn
 plotly
 joblib
