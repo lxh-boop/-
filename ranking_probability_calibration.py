@@ -48,15 +48,19 @@ def _read_prediction_source(
                 "model_name",
                 "model_version",
                 "model_backend",
+                "pred_return",
+                "expected_next_day_return",
+                "predicted_up_first",
                 "future_1d_ret",
                 "t1_ret",
                 "t1_up",
+                "real_return",
             },
         )
     except Exception:
         return pd.DataFrame()
 
-    required = {"date", "code", "up_prob"}
+    required = {"date", "code"}
     if frame.empty or not required.issubset(frame.columns):
         return pd.DataFrame()
     if "model_name" in frame.columns:
@@ -74,20 +78,54 @@ def _read_prediction_source(
     if frame.empty:
         return pd.DataFrame()
 
-    for column in ("rank", "score", "future_1d_ret", "t1_ret", "t1_up"):
+    for column in (
+        "rank",
+        "score",
+        "up_prob",
+        "pred_return",
+        "expected_next_day_return",
+        "predicted_up_first",
+        "future_1d_ret",
+        "t1_ret",
+        "t1_up",
+        "real_return",
+    ):
         if column not in frame.columns:
             frame[column] = np.nan
-    future_return = pd.to_numeric(
-        frame["future_1d_ret"],
-        errors="coerce",
-    ).where(
-        pd.to_numeric(frame["future_1d_ret"], errors="coerce").notna(),
-        pd.to_numeric(frame["t1_ret"], errors="coerce"),
+
+    predicted_return = pd.to_numeric(frame["pred_return"], errors="coerce")
+    predicted_return = predicted_return.where(
+        predicted_return.notna(),
+        pd.to_numeric(frame["expected_next_day_return"], errors="coerce"),
     )
+    explicit_up = frame["predicted_up_first"].astype(str).str.strip().str.lower().map(
+        {"true": 1.0, "false": 0.0, "1": 1.0, "0": 0.0}
+    )
+    predicted_up = explicit_up.where(
+        explicit_up.notna(),
+        (predicted_return > 0.0).astype(float),
+    )
+    predicted_up = predicted_up.where(
+        predicted_return.notna() | explicit_up.notna(),
+        (pd.to_numeric(frame["up_prob"], errors="coerce") > 0.5).astype(float),
+    )
+    predicted_up = predicted_up.where(
+        predicted_return.notna()
+        | explicit_up.notna()
+        | pd.to_numeric(frame["up_prob"], errors="coerce").notna()
+    )
+
+    future_return = pd.to_numeric(frame["future_1d_ret"], errors="coerce")
+    for fallback_column in ("t1_ret", "real_return"):
+        future_return = future_return.where(
+            future_return.notna(),
+            pd.to_numeric(frame[fallback_column], errors="coerce"),
+        )
     source_up = pd.to_numeric(frame["t1_up"], errors="coerce")
     source_up = source_up.where(source_up.notna(), (future_return > 0.0).astype(float))
     source_up = source_up.where(future_return.notna() | frame["t1_up"].notna())
     frame = frame.loc[:, ["date", "code", "rank", "score", "up_prob"]].copy()
+    frame["predicted_up"] = predicted_up
     frame["realized_up"] = source_up
     frame["_source_priority"] = int(source_priority)
     frame["_source_file"] = str(path)
@@ -100,7 +138,6 @@ def _load_archived_predictions(
     model_name: str,
     model_version: str | None,
     before_date: pd.Timestamp,
-    top_k_per_date: int,
 ) -> tuple[pd.DataFrame, int]:
     directory = Path(history_dir)
     if not directory.exists():
@@ -113,9 +150,9 @@ def _load_archived_predictions(
             f"*_{model_name}_t1_predictions.csv"
         )
     )
-    if t1_history:
+    for history_path in t1_history:
         frame = _read_prediction_source(
-            t1_history[-1],
+            history_path,
             model_name=model_name,
             model_version=model_version,
             source_priority=10,
@@ -156,17 +193,14 @@ def _load_archived_predictions(
         r"(\d{1,6})",
         expand=False,
     ).str.zfill(6)
-    history["up_prob"] = pd.to_numeric(
-        history["up_prob"],
-        errors="coerce",
+    history["up_prob"] = pd.to_numeric(history["up_prob"], errors="coerce")
+    history["predicted_up"] = pd.to_numeric(
+        history["predicted_up"], errors="coerce"
     )
     history["rank"] = pd.to_numeric(history["rank"], errors="coerce")
     history["score"] = pd.to_numeric(history["score"], errors="coerce")
-    history = history.dropna(subset=["date", "code", "up_prob"])
-    history = history[
-        history["date"].lt(before_date)
-        & history["up_prob"].between(0.0, 1.0)
-    ]
+    history = history.dropna(subset=["date", "code", "predicted_up"])
+    history = history[history["date"].lt(before_date)]
     history = history.sort_values(
         ["_source_priority", "_source_file", "date", "code"],
         kind="stable",
@@ -181,18 +215,15 @@ def _load_archived_predictions(
     history["_fallback_score"] = history["score"].where(
         history["score"].notna(),
         history["up_prob"],
-    )
+    ).fillna(0.5)
     history = history.sort_values(
         ["date", "_rank_sort", "_fallback_score", "up_prob", "code"],
         ascending=[True, True, False, False, True],
         kind="stable",
     )
-    history = history.groupby("date", sort=True, group_keys=False).head(
-        max(int(top_k_per_date), 1)
-    )
     history["top_position"] = history.groupby("date", sort=False).cumcount() + 1
     return history.loc[
-        :, ["date", "code", "up_prob", "realized_up", "top_position"]
+        :, ["date", "code", "predicted_up", "realized_up", "top_position"]
     ], source_files
 
 
@@ -240,11 +271,13 @@ def calibrate_ranking_probabilities(
     min_unique_dates: int = DEFAULT_MIN_UNIQUE_DATES,
     top_k_per_date: int = CALIBRATION_TOP_K_PER_DATE,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Calibrate ranking strength with realized next-trading-day outcomes.
+    """Estimate each stock's realized hit rate after a predicted-up signal.
 
     Archived daily rankings are point-in-time model outputs.  Only archives
     strictly earlier than the ranking being calibrated and only labels whose
-    next available trading close is already known are eligible.
+    next available trading close is already known are eligible.  Per-stock
+    rates use every predicted-up observation, while Top5/10/15 summaries keep
+    their rank-based population.
     """
 
     calibration_columns = [
@@ -276,8 +309,8 @@ def calibrate_ranking_probabilities(
     out["calibrated"] = False
     out["calibration_method"] = "unavailable"
 
-    if out.empty or not {"date", "code", "up_prob"}.issubset(out.columns):
-        report = _unavailable_report("ranking_missing_date_code_or_strength")
+    if out.empty or not {"date", "code"}.issubset(out.columns):
+        report = _unavailable_report("ranking_missing_date_or_code")
         out.attrs["probability_calibration"] = report
         return out, report
 
@@ -293,7 +326,6 @@ def calibrate_ranking_probabilities(
         model_name=model_name,
         model_version=model_version,
         before_date=before_date,
-        top_k_per_date=top_k_per_date,
     )
     labels = _realized_labels(feature_data)
     if history.empty:
@@ -306,33 +338,41 @@ def calibrate_ranking_probabilities(
         out.attrs["probability_calibration"] = report
         return out, report
 
-    samples = history.copy()
+    labeled_history = history.copy()
     if not labels.empty:
-        samples = samples.merge(
+        labeled_history = labeled_history.merge(
             labels,
             on=["date", "code"],
             how="left",
             validate="one_to_one",
         )
     else:
-        samples["fallback_realized_up"] = np.nan
-    samples["up"] = pd.to_numeric(samples["realized_up"], errors="coerce")
-    samples["up"] = samples["up"].where(
-        samples["up"].notna(),
-        pd.to_numeric(samples["fallback_realized_up"], errors="coerce"),
+        labeled_history["fallback_realized_up"] = np.nan
+    labeled_history["up"] = pd.to_numeric(
+        labeled_history["realized_up"], errors="coerce"
     )
-    samples = samples.dropna(subset=["up_prob", "up"])
-    samples["up"] = (samples["up"] > 0.0).astype(int)
+    labeled_history["up"] = labeled_history["up"].where(
+        labeled_history["up"].notna(),
+        pd.to_numeric(labeled_history["fallback_realized_up"], errors="coerce"),
+    )
+    labeled_history = labeled_history.dropna(subset=["predicted_up", "up"])
+    labeled_history["predicted_up"] = (
+        pd.to_numeric(labeled_history["predicted_up"], errors="coerce") > 0.0
+    )
+    labeled_history["up"] = (labeled_history["up"] > 0.0).astype(int)
 
-    # A daily top-15 hit rate is meaningful only after every member of that
-    # day's top 15 has a realized next-trading-day label.  In particular, this
-    # prevents the most recent, not-yet-realized archive from entering either
-    # the global daily average or the per-stock empirical rates.
-    observations_by_date = samples.groupby("date", sort=True)["up"].size()
+    ranked_samples = labeled_history[
+        labeled_history["top_position"] <= int(top_k_per_date)
+    ].copy()
+    observations_by_date = ranked_samples.groupby("date", sort=True)["up"].size()
     complete_dates = observations_by_date[
         observations_by_date >= int(top_k_per_date)
     ].index
-    samples = samples[samples["date"].isin(complete_dates)].copy()
+    topk_samples = ranked_samples[ranked_samples["date"].isin(complete_dates)].copy()
+
+    # The per-stock denominator is every historical occasion on which the
+    # model itself predicted a positive next-day return, not only Top15 rows.
+    samples = labeled_history[labeled_history["predicted_up"]].copy()
 
     sample_count = int(len(samples))
     positive_count = int(samples["up"].sum()) if sample_count else 0
@@ -350,7 +390,10 @@ def calibrate_ranking_probabilities(
         ),
         "unique_dates": unique_dates,
         "top_k_per_date": int(top_k_per_date),
-        "history_mode": "all_available_incremental",
+        "history_mode": "all_predicted_up_observations_incremental",
+        "prediction_condition": "pred_return > 0",
+        "realized_condition": "future_1d_ret > 0",
+        "history_rows": int(len(labeled_history)),
         "start_date": (
             samples["date"].min().strftime("%Y-%m-%d")
             if sample_count
@@ -382,19 +425,23 @@ def calibrate_ranking_probabilities(
         out.attrs["probability_calibration"] = report
         return out, report
 
-    daily_stats = samples.groupby("date", sort=True)["up"].agg(
+    daily_stats = topk_samples.groupby("date", sort=True)["up"].agg(
         observation_count="size",
         rise_count="sum",
     )
     daily_stats["up_rate"] = (
         daily_stats["rise_count"] / daily_stats["observation_count"]
     )
-    daily_average_up_rate = float(daily_stats["up_rate"].mean())
+    daily_average_up_rate = (
+        float(daily_stats["up_rate"].mean()) if not daily_stats.empty else np.nan
+    )
     tier_daily_average_up_rates: dict[int, float] = {}
     for tier in (5, 10, int(top_k_per_date)):
-        tier_samples = samples[samples["top_position"] <= tier]
-        tier_daily_average_up_rates[tier] = float(
-            tier_samples.groupby("date", sort=True)["up"].mean().mean()
+        tier_samples = topk_samples[topk_samples["top_position"] <= tier]
+        tier_daily_average_up_rates[tier] = (
+            float(tier_samples.groupby("date", sort=True)["up"].mean().mean())
+            if not tier_samples.empty
+            else np.nan
         )
     complete_days = int(len(daily_stats))
 
@@ -420,7 +467,7 @@ def calibrate_ranking_probabilities(
         stock_stats["up_prob_calibrated"]
     )
     out["calibrated"] = out["calibration_sample_count"] > 0
-    method_name = "empirical_stock_top15_next_day_hit_rate"
+    method_name = "empirical_stock_predicted_up_next_day_hit_rate"
     out["calibration_method"] = method_name
     out["calibration_positive_rate"] = out["up_prob_calibrated"]
     out["calibration_start_date"] = sample_details["start_date"]
@@ -433,17 +480,25 @@ def calibrate_ranking_probabilities(
     out["top15_daily_average_up_rate"] = daily_average_up_rate
     out["top15_observation_days"] = int(len(daily_stats))
     out["top15_complete_days"] = complete_days
-    out["top15_observation_count"] = sample_count
-    out["top15_rise_count"] = positive_count
-    out["top15_start_date"] = sample_details["start_date"]
-    out["top15_end_date"] = sample_details["end_date"]
+    out["top15_observation_count"] = int(len(topk_samples))
+    out["top15_rise_count"] = int(topk_samples["up"].sum())
+    out["top15_start_date"] = (
+        topk_samples["date"].min().strftime("%Y-%m-%d")
+        if not topk_samples.empty
+        else ""
+    )
+    out["top15_end_date"] = (
+        topk_samples["date"].max().strftime("%Y-%m-%d")
+        if not topk_samples.empty
+        else ""
+    )
     report = {
         **sample_details,
         "calibrated": True,
         "method": method_name,
         "target": CALIBRATION_TARGET,
         "horizon_trading_days": CALIBRATION_HORIZON_DAYS,
-        "source": "daily_top15_archives_and_realized_returns",
+        "source": "all_predicted_up_archives_and_realized_returns",
         "daily_average_up_rate": daily_average_up_rate,
         "daily_average_up_rates": {
             "top5": tier_daily_average_up_rates[5],

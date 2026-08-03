@@ -24,7 +24,7 @@ export function RankingPage() {
   const liftText = (value?: number) => typeof value === 'number' ? `${value >= 0 ? '+' : ''}${(value * 100).toFixed(2)} 个百分点` : '—'
   const percentage = (value?: number) => Number(((value ?? 0) * 100).toFixed(2))
   return <Space direction="vertical" size="large" style={{width:'100%'}}>
-    <PageHeader title="首页 / 预测排名" description="展示 Kronos-mini 预测的下一交易日开盘、最高、最低和收盘；预测上涨股票优先，其后按验证期确定方向的目标模式信号排序。" />
+    <PageHeader title="首页 / 预测排名" description="展示 Kronos-mini 预测的下一交易日开盘、最高、最低和收盘；预测上涨股票优先，上涨组内按该股历史预测上涨后的真实上涨率从高到低排序。" />
     <ReadOnlyNotice />
     {summary.data && <ModelStatusCards summary={summary.data}/>}
     <Card title={`最新预测排名 · ${rankings.data?.total ?? 0} 条`}><RankingTable records={records} onSelect={(code)=>navigate(`/stocks/${code}`)}/></Card>

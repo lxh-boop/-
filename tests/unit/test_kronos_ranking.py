@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+import kronos_runtime.ranking as ranking_module
 from kronos_runtime.ranking import build_kronos_ranking
 from kronos_runtime.settings import KRONOS_MODEL_NAME
 
@@ -69,6 +70,80 @@ def test_target_mode_kronos_ranking_uses_validation_selected_signal_without_sent
     assert not any("moneyflow" in column for column in ranking.columns)
     assert report["ranking_head_used"] is True
     assert report["ranking_orientation"] == "ascending"
-    assert report["ranking_basis"] == "predicted_up_first_then_target_mode_signal_ascending"
+    assert report["ranking_basis"] == "predicted_up_then_stock_hit_rate_desc_then_target_signal_ascending"
     assert report["native_output"][:4] == ["pred_open", "pred_high", "pred_low", "pred_close"]
     assert report["sentiment_fusion"] is False
+
+
+def test_predicted_up_group_orders_by_stock_hit_rate_then_sample_count(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    predictions = pd.DataFrame(
+        [
+            {
+                "date": "2026-07-31",
+                "prediction_date": "2026-08-03",
+                "code": code,
+                "name": code,
+                "close": 10.0,
+                "amount": 1000.0,
+                "volume": 100.0,
+                "pct_chg": 0.0,
+                "ret_5": 0.0,
+                "ret_20": 0.0,
+                "vol_20": 0.01,
+                "drawdown_20": 0.0,
+                "pred_return": 0.01,
+                "pred_open": 10.0,
+                "pred_high": 10.2,
+                "pred_low": 9.9,
+                "pred_close": 10.1,
+                "target_ranking_signal": signal,
+                "target_confidence": 0.55,
+            }
+            for code, signal in (
+                ("000001", -0.9),
+                ("000002", 0.5),
+                ("000003", 0.0),
+            )
+        ]
+    )
+
+    def fake_calibration(frame, **_kwargs):
+        out = frame.copy()
+        out["up_prob_calibrated"] = out["code"].map(
+            {"000001": 0.4, "000002": 0.8, "000003": 0.8}
+        )
+        out["calibration_sample_count"] = out["code"].map(
+            {"000001": 10, "000002": 2, "000003": 5}
+        )
+        out["calibration_positive_count"] = out["code"].map(
+            {"000001": 4, "000002": 2, "000003": 4}
+        )
+        out["calibrated"] = True
+        out["calibration_method"] = "empirical_stock_predicted_up_next_day_hit_rate"
+        report = {"calibrated": True}
+        out.attrs["probability_calibration"] = report
+        return out, report
+
+    monkeypatch.setattr(
+        ranking_module,
+        "ensure_kronos_validation_history",
+        lambda _history_dir: {"ready": True},
+    )
+    monkeypatch.setattr(
+        ranking_module,
+        "calibrate_ranking_probabilities",
+        fake_calibration,
+    )
+
+    ranking, _ = build_kronos_ranking(
+        predictions=predictions,
+        feature_data=pd.DataFrame(),
+        history_dir=str(tmp_path),
+    )
+
+    assert ranking["code"].tolist() == ["000003", "000002", "000001"]
+    assert ranking["up_prob_calibrated"].tolist() == [0.8, 0.8, 0.4]
+    assert ranking["calibration_sample_count"].tolist() == [5, 2, 10]

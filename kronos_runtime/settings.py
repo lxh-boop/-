@@ -7,7 +7,7 @@ from typing import Any
 
 KRONOS_BACKEND = "kronos_mini"
 KRONOS_MODEL_NAME = "kronos_mini"
-KRONOS_MODEL_VERSION = "target_mode_up_first_20260520_epoch2"
+KRONOS_MODEL_VERSION = "stock_hit_rate_order_20260520_epoch2"
 KRONOS_RANKING_ORIENTATION = "ascending"
 KRONOS_TRAINING_PENALTY = {
     "top20_false_positive": 4.0,
@@ -24,16 +24,16 @@ KRONOS_TARGET_VALIDATION = {
     "best_epoch": 2,
     "label_rule": "real_return > 0 on the exact next trading day",
     "universe_next_day_up_probability": 0.5251084672225612,
-    "top5_next_day_up_probability": 0.58,
-    "top10_next_day_up_probability": 0.565,
-    "top15_next_day_up_probability": 0.56,
-    "top5_lift_vs_universe": 0.054891532777438835,
-    "top10_lift_vs_universe": 0.03989153277743881,
-    "top15_lift_vs_universe": 0.03489153277743882,
-    "top5_daily_mean_return": 0.0011858118663451804,
-    "top10_daily_mean_return": -0.0006665251821770847,
-    "top15_daily_mean_return": -0.0006438326836035738,
-    "all_topk_above_universe": True,
+    "top5_next_day_up_probability": 0.46,
+    "top10_next_day_up_probability": 0.475,
+    "top15_next_day_up_probability": 0.48,
+    "top5_lift_vs_universe": -0.06510846722256125,
+    "top10_lift_vs_universe": -0.05010846722256129,
+    "top15_lift_vs_universe": -0.04510846722256123,
+    "top5_daily_mean_return": -0.00873534348824044,
+    "top10_daily_mean_return": -0.007937000461786022,
+    "top15_daily_mean_return": -0.008382750010835782,
+    "all_topk_above_universe": False,
 }
 
 
@@ -72,6 +72,29 @@ def market_panel_path() -> Path:
     return lab_root() / "data" / "processed" / "market_panel.parquet"
 
 
+def validation_predictions_path() -> Path:
+    return (
+        lab_root()
+        / "outputs"
+        / "target_mode"
+        / "target_full_recent_v1"
+        / "model"
+        / "epochs"
+        / "epoch_002"
+        / "validation_predictions.parquet"
+    )
+
+
+def test_predictions_path() -> Path:
+    return (
+        lab_root()
+        / "outputs"
+        / "target_mode"
+        / "target_full_recent_v1"
+        / "predictions.parquet"
+    )
+
+
 def validate_kronos_assets() -> dict[str, Any]:
     paths = {
         "lab_root": lab_root(),
@@ -79,6 +102,8 @@ def validate_kronos_assets() -> dict[str, Any]:
         "predictor_dir": predictor_dir(),
         "tokenizer_dir": tokenizer_dir(),
         "market_panel": market_panel_path(),
+        "validation_predictions": validation_predictions_path(),
+        "test_predictions": test_predictions_path(),
     }
     missing = [name for name, path in paths.items() if not path.exists()]
     if missing:

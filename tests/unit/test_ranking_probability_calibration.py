@@ -59,7 +59,7 @@ def _write_archived_rankings(
     prices: list[dict[str, object]] = []
     for stock_index, strength in enumerate(strengths):
         code = f"{stock_index + 1:06d}"
-        daily_multiplier = 1.02 if strength >= 0.5 else 0.98
+        daily_multiplier = 1.02 if stock_index % 2 == 0 else 0.98
         for date_index, trade_date in enumerate(realized_dates):
             prices.append(
                 {
@@ -89,7 +89,7 @@ def test_calibration_uses_only_realized_archived_rankings(
     current = pd.DataFrame(
         {
             "date": ["2026-06-09", "2026-06-09", "2026-06-09"],
-            "code": ["000020", "000006", "000001"],
+            "code": ["000019", "000020", "000001"],
             "up_prob": [0.9, 0.8, 0.7],
         }
     )
@@ -106,20 +106,21 @@ def test_calibration_uses_only_realized_archived_rankings(
     )
 
     assert report["calibrated"] is True
-    assert report["method"] == "empirical_stock_top15_next_day_hit_rate"
-    assert report["samples"] == 120
+    assert report["method"] == "empirical_stock_predicted_up_next_day_hit_rate"
+    assert report["samples"] == 80
     assert report["unique_dates"] == 8
     assert report["start_date"] == "2026-05-28"
     assert report["top_k_per_date"] == 15
-    assert report["history_mode"] == "all_available_incremental"
+    assert report["history_mode"] == "all_predicted_up_observations_incremental"
+    assert report["prediction_condition"] == "pred_return > 0"
     assert report["target"] == "future_1d_ret_gt_0"
     assert report["horizon_trading_days"] == 1
     assert report["daily_average_up_rates"] == {
-        "top5": 1.0,
-        "top10": 1.0,
-        "top15": 10 / 15,
+        "top5": 2 / 5,
+        "top10": 0.5,
+        "top15": 7 / 15,
     }
-    assert report["daily_average_up_rate"] == 10 / 15
+    assert report["daily_average_up_rate"] == 7 / 15
     assert report["complete_days"] == 8
     assert calibrated["calibrated"].tolist() == [True, True, False]
     assert calibrated["up_prob_calibrated"].iloc[0] == 1.0
@@ -128,8 +129,8 @@ def test_calibration_uses_only_realized_archived_rankings(
     assert calibrated["calibration_sample_count"].tolist() == [8, 8, 0]
     assert calibrated["calibration_positive_count"].tolist() == [8, 0, 0]
     assert calibrated["calibration_top_k"].tolist() == [15, 15, 15]
-    assert calibrated["top5_daily_average_up_rate"].tolist() == [1.0] * 3
-    assert calibrated["top10_daily_average_up_rate"].tolist() == [1.0] * 3
+    assert calibrated["top5_daily_average_up_rate"].tolist() == [2 / 5] * 3
+    assert calibrated["top10_daily_average_up_rate"].tolist() == [0.5] * 3
     assert calibrated["top15_observation_count"].tolist() == [120, 120, 120]
 
 
@@ -193,10 +194,10 @@ def test_daily_archives_are_included_incrementally_after_realization(
     first_report = report_for("2026-06-02")
     second_report = report_for("2026-06-03")
 
-    assert first_report["samples"] == 15
+    assert first_report["samples"] == 10
     assert first_report["unique_dates"] == 1
     assert first_report["end_date"] == "2026-06-01"
-    assert second_report["samples"] == 30
+    assert second_report["samples"] == 20
     assert second_report["unique_dates"] == 2
     assert second_report["end_date"] == "2026-06-02"
 
@@ -224,7 +225,7 @@ def test_explicit_rank_defines_top15_even_when_score_order_differs(
                 {
                     "date": "2026-06-02",
                     "code": code,
-                    "close": 101.0 if rank <= 10 else 99.0,
+                    "close": 101.0 if rank <= 15 else 99.0,
                 },
             ]
         )
@@ -251,6 +252,6 @@ def test_explicit_rank_defines_top15_even_when_score_order_differs(
         min_unique_dates=1,
     )
 
-    assert report["samples"] == 15
-    assert calibrated["calibrated"].tolist() == [True, False]
-    assert calibrated["calibration_sample_count"].tolist() == [1, 0]
+    assert report["samples"] == 10
+    assert calibrated["calibrated"].tolist() == [False, True]
+    assert calibrated["calibration_sample_count"].tolist() == [0, 1]

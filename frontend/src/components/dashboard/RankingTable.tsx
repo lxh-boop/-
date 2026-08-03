@@ -7,14 +7,14 @@ const percent = (value: unknown) => typeof value === 'number' ? <Tag color={valu
 
 function calibratedProbability(value: unknown, row: RankingRecord) {
   if (row.calibrated !== true || typeof value !== 'number') {
-    return <Tag color="warning">暂无前15样本</Tag>
+    return <Tag color="warning">暂无预测上涨样本</Tag>
   }
   const samples = Number(row.calibration_sample_count ?? 0)
   const rises = Number(row.calibration_positive_count ?? 0)
   const dateRange = row.calibration_start_date && row.calibration_end_date
     ? `${row.calibration_start_date} 至 ${row.calibration_end_date}`
     : '历史已实现区间'
-  const detail = `${row.code ?? '该股票'} 在 ${dateRange} 共进入每日前15名 ${samples.toLocaleString()} 次，其中下一交易日实际上涨 ${rises.toLocaleString()} 次`
+  const detail = `${row.code ?? '该股票'} 在 ${dateRange} 共被模型预测次日上涨 ${samples.toLocaleString()} 次，其中次日实际上涨 ${rises.toLocaleString()} 次`
   return <Tooltip title={detail}><span>{(value * 100).toFixed(2)}%</span></Tooltip>
 }
 
@@ -24,7 +24,7 @@ export function RankingTable({ records, onSelect }: { records: RankingRecord[]; 
     { title: '股票代码', dataIndex: 'code', width: 105, fixed: 'left', render: (value) => <a onClick={() => onSelect?.(String(value))}>{String(value ?? '')}</a> },
     { title: '股票名称', dataIndex: 'name', width: 115, fixed: 'left' },
     { title: '预测涨跌幅', dataIndex: 'pred_return', width: 120, render: percent },
-    { title: '该股前15后次日上涨概率', dataIndex: 'up_prob_calibrated', width: 200, render: calibratedProbability },
+    { title: '该股预测上涨后真实上涨率', dataIndex: 'up_prob_calibrated', width: 210, render: calibratedProbability },
     { title: '预测开盘', dataIndex: 'pred_open', width: 105, render: price },
     { title: '预测最高', dataIndex: 'pred_high', width: 105, render: price },
     { title: '预测最低', dataIndex: 'pred_low', width: 105, render: price },

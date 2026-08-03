@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 from confidence_scoring import add_confidence_scores
+from kronos_runtime.calibration_history import ensure_kronos_validation_history
 from kronos_runtime.settings import (
     KRONOS_BACKEND,
     KRONOS_MODEL_NAME,
@@ -53,12 +54,52 @@ def build_kronos_ranking(
     out["model_backend"] = KRONOS_BACKEND
 
     out = add_risk_scores(out)
+    calibration_history = ensure_kronos_validation_history(history_dir)
     out, calibration_report = calibrate_ranking_probabilities(
         out,
         feature_data=feature_data,
         history_dir=history_dir,
         model_name=KRONOS_MODEL_NAME,
         model_version=KRONOS_MODEL_VERSION,
+    )
+    calibrated_rate = pd.to_numeric(out["up_prob_calibrated"], errors="coerce")
+    calibration_samples = pd.to_numeric(
+        out.get(
+            "calibration_sample_count",
+            pd.Series(0, index=out.index, dtype=float),
+        ),
+        errors="coerce",
+    ).fillna(0)
+    out["_predicted_up_has_history"] = (
+        out["predicted_up_first"]
+        & out["calibrated"].eq(True)
+        & calibrated_rate.notna()
+    )
+    out["_predicted_up_hit_rate"] = calibrated_rate.where(
+        out["predicted_up_first"], -1.0
+    ).fillna(-1.0)
+    out["_predicted_up_sample_count"] = calibration_samples.where(
+        out["predicted_up_first"], 0
+    )
+    out = out.sort_values(
+        [
+            "predicted_up_first",
+            "_predicted_up_has_history",
+            "_predicted_up_hit_rate",
+            "_predicted_up_sample_count",
+            "target_ranking_signal",
+            "code",
+        ],
+        ascending=[False, False, False, False, True, True],
+    ).reset_index(drop=True)
+    out["rank"] = np.arange(1, len(out) + 1)
+    out["score"] = (len(out) - out.index.to_numpy(dtype=float)) / max(len(out), 1)
+    out = out.drop(
+        columns=[
+            "_predicted_up_has_history",
+            "_predicted_up_hit_rate",
+            "_predicted_up_sample_count",
+        ]
     )
     out = add_confidence_scores(out, calibration_report=calibration_report)
     out = normalize_ranking_columns(out)
@@ -67,7 +108,7 @@ def build_kronos_ranking(
     ranking_report = {
         "source": "kronos_mini_next_day_ohlcva",
         "native_output": ["pred_open", "pred_high", "pred_low", "pred_close", "pred_volume", "pred_amount"],
-        "ranking_basis": "predicted_up_first_then_target_mode_signal_ascending",
+        "ranking_basis": "predicted_up_then_stock_hit_rate_desc_then_target_signal_ascending",
         "ranking_head_used": True,
         "ranking_orientation": KRONOS_RANKING_ORIENTATION,
         "sentiment_fusion": False,
@@ -75,5 +116,6 @@ def build_kronos_ranking(
             "4/6/9/12/16 false-positive penalties remain training-only and use realized T+1 labels; "
             "no same-day sentiment adjustment is applied."
         ),
+        "calibration_history": calibration_history,
     }
     return out, ranking_report
