@@ -7,8 +7,10 @@ from typing import Any
 
 KRONOS_BACKEND = "kronos_mini"
 KRONOS_MODEL_NAME = "kronos_mini"
-KRONOS_MODEL_VERSION = "stock_hit_rate_order_20260520_epoch2"
-KRONOS_RANKING_ORIENTATION = "ascending"
+KRONOS_MODEL_VERSION = "hybrid_2017_20260730_causal_hit_rate"
+KRONOS_RANKING_ORIENTATION = "causal_stock_hit_rate_descending"
+KRONOS_HYBRID_RUN_ID = "hybrid_2017_step10_2026_daily_epoch3"
+KRONOS_LATEST_CUTOFF = "20260730"
 KRONOS_TRAINING_PENALTY = {
     "top20_false_positive": 4.0,
     "top15_false_positive": 6.0,
@@ -17,23 +19,29 @@ KRONOS_TRAINING_PENALTY = {
     "top10_loss_below_2pct": 16.0,
 }
 KRONOS_TARGET_VALIDATION = {
-    "valid_test_days": 20,
-    "test_start_date": "2026-07-03",
+    "valid_test_days": 2049,
+    "test_start_date": "2018-02-14",
     "test_end_date": "2026-07-30",
-    "train_end_date": "2026-05-20",
-    "best_epoch": 2,
+    "train_end_date": "2026-07-22",
+    "epochs_per_update": 3,
+    "rolling_update_rule": "2018-2025每10个交易日，2026起每个交易日",
     "label_rule": "real_return > 0 on the exact next trading day",
-    "universe_next_day_up_probability": 0.5251084672225612,
-    "top5_next_day_up_probability": 0.46,
-    "top10_next_day_up_probability": 0.475,
-    "top15_next_day_up_probability": 0.48,
-    "top5_lift_vs_universe": -0.06510846722256125,
-    "top10_lift_vs_universe": -0.05010846722256129,
-    "top15_lift_vs_universe": -0.04510846722256123,
-    "top5_daily_mean_return": -0.00873534348824044,
-    "top10_daily_mean_return": -0.007937000461786022,
-    "top15_daily_mean_return": -0.008382750010835782,
-    "all_topk_above_universe": False,
+    "ranking_rule": "predicted_up_then_causal_stock_hit_rate_then_predicted_return",
+    "stock_hit_rate_prior_mean": 0.5,
+    "stock_hit_rate_prior_strength": 5.0,
+    "universe_next_day_up_probability": 0.466596288675616,
+    "top5_next_day_up_probability": 0.48657881893606636,
+    "top10_next_day_up_probability": 0.48848218643240604,
+    "top15_next_day_up_probability": 0.4870668618838458,
+    "top5_lift_vs_universe": 0.01998253026045043,
+    "top10_lift_vs_universe": 0.021885897756790097,
+    "top15_lift_vs_universe": 0.02047057320822982,
+    "top5_daily_mean_return": 0.0005507924998280623,
+    "top10_daily_mean_return": 0.000543949722147752,
+    "top15_daily_mean_return": 0.0005738298019085285,
+    "all_topk_above_universe": True,
+    "selection_period_all_topk_above_universe": True,
+    "forward_2026_all_topk_above_universe": True,
 }
 
 
@@ -47,11 +55,15 @@ def lab_root() -> Path:
     return Path(os.environ.get("KRONOS_LAB_ROOT") or _default_lab_root()).expanduser()
 
 
+def hybrid_run_root() -> Path:
+    return lab_root() / "outputs" / "hybrid_finetune" / KRONOS_HYBRID_RUN_ID
+
+
 def model_dir() -> Path:
     configured = str(os.environ.get("KRONOS_MODEL_DIR") or "").strip()
     if configured:
         return Path(configured).expanduser()
-    return lab_root() / "outputs" / "target_mode" / "target_full_recent_v1" / "model"
+    return hybrid_run_root() / "models" / KRONOS_LATEST_CUTOFF
 
 
 def predictor_dir() -> Path:
@@ -73,26 +85,15 @@ def market_panel_path() -> Path:
 
 
 def validation_predictions_path() -> Path:
-    return (
-        lab_root()
-        / "outputs"
-        / "target_mode"
-        / "target_full_recent_v1"
-        / "model"
-        / "epochs"
-        / "epoch_002"
-        / "validation_predictions.parquet"
-    )
+    return hybrid_run_root() / "causal_stock_hit_rate_ranking" / "selection_predictions.parquet"
 
 
 def test_predictions_path() -> Path:
-    return (
-        lab_root()
-        / "outputs"
-        / "target_mode"
-        / "target_full_recent_v1"
-        / "predictions.parquet"
-    )
+    return hybrid_run_root() / "causal_stock_hit_rate_ranking" / "forward_predictions.parquet"
+
+
+def validation_report_path() -> Path:
+    return hybrid_run_root() / "causal_stock_hit_rate_ranking" / "report.json"
 
 
 def validate_kronos_assets() -> dict[str, Any]:
@@ -104,6 +105,7 @@ def validate_kronos_assets() -> dict[str, Any]:
         "market_panel": market_panel_path(),
         "validation_predictions": validation_predictions_path(),
         "test_predictions": test_predictions_path(),
+        "validation_report": validation_report_path(),
     }
     missing = [name for name, path in paths.items() if not path.exists()]
     if missing:

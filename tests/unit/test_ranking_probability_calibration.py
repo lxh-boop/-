@@ -106,7 +106,7 @@ def test_calibration_uses_only_realized_archived_rankings(
     )
 
     assert report["calibrated"] is True
-    assert report["method"] == "empirical_stock_predicted_up_next_day_hit_rate"
+    assert report["method"] == "beta_smoothed_stock_predicted_up_next_day_hit_rate"
     assert report["samples"] == 80
     assert report["unique_dates"] == 8
     assert report["start_date"] == "2026-05-28"
@@ -122,10 +122,12 @@ def test_calibration_uses_only_realized_archived_rankings(
     }
     assert report["daily_average_up_rate"] == 7 / 15
     assert report["complete_days"] == 8
+    assert report["stock_hit_prior_mean"] == 0.5
+    assert report["stock_hit_prior_strength"] == 5.0
     assert calibrated["calibrated"].tolist() == [True, True, False]
-    assert calibrated["up_prob_calibrated"].iloc[0] == 1.0
-    assert calibrated["up_prob_calibrated"].iloc[1] == 0.0
-    assert pd.isna(calibrated["up_prob_calibrated"].iloc[2])
+    assert calibrated["up_prob_calibrated"].iloc[0] == 10.5 / 13
+    assert calibrated["up_prob_calibrated"].iloc[1] == 2.5 / 13
+    assert calibrated["up_prob_calibrated"].iloc[2] == 0.5
     assert calibrated["calibration_sample_count"].tolist() == [8, 8, 0]
     assert calibrated["calibration_positive_count"].tolist() == [8, 0, 0]
     assert calibrated["calibration_top_k"].tolist() == [15, 15, 15]

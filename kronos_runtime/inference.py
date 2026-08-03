@@ -300,6 +300,6 @@ class KronosMiniInferenceAdapter:
         result = pd.DataFrame(rows)
         result["predicted_up_first"] = result["pred_return"].gt(0.0)
         return result.sort_values(
-            ["predicted_up_first", "target_ranking_signal", "code"],
-            ascending=[False, True, True],
+            ["predicted_up_first", "pred_return", "code"],
+            ascending=[False, False, True],
         ).reset_index(drop=True)

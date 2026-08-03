@@ -10,5 +10,5 @@ export function ProbabilityChart({ records }: { records: RankingRecord[] }) {
       x: String(record.code ?? index),
       y: Number(record.up_prob_calibrated),
     }))
-  return <ChartCard title="该股预测上涨后真实上涨率"><SimpleLineChart points={points} ariaLabel="该股预测上涨后真实上涨率"/></ChartCard>
+  return <ChartCard title="该股预测上涨后平滑真实上涨率"><SimpleLineChart points={points} ariaLabel="该股预测上涨后平滑真实上涨率"/></ChartCard>
 }

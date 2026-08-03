@@ -14,6 +14,8 @@ DEFAULT_MIN_SAMPLES = 300
 DEFAULT_MIN_POSITIVE = 30
 DEFAULT_MIN_NEGATIVE = 30
 DEFAULT_MIN_UNIQUE_DATES = 5
+STOCK_HIT_PRIOR_MEAN = 0.5
+STOCK_HIT_PRIOR_STRENGTH = 5.0
 
 
 def _unavailable_report(reason: str, **details: Any) -> dict[str, Any]:
@@ -451,7 +453,9 @@ def calibrate_ranking_probabilities(
     )
     stock_stats["up_prob_calibrated"] = (
         stock_stats["calibration_positive_count"]
-        / stock_stats["calibration_sample_count"]
+        + STOCK_HIT_PRIOR_MEAN * STOCK_HIT_PRIOR_STRENGTH
+    ) / (
+        stock_stats["calibration_sample_count"] + STOCK_HIT_PRIOR_STRENGTH
     )
     current_codes = out["code"].astype(str).str.extract(
         r"(\d{1,6})",
@@ -465,9 +469,9 @@ def calibrate_ranking_probabilities(
     ).fillna(0).astype(int)
     out["up_prob_calibrated"] = current_codes.map(
         stock_stats["up_prob_calibrated"]
-    )
+    ).fillna(STOCK_HIT_PRIOR_MEAN)
     out["calibrated"] = out["calibration_sample_count"] > 0
-    method_name = "empirical_stock_predicted_up_next_day_hit_rate"
+    method_name = "beta_smoothed_stock_predicted_up_next_day_hit_rate"
     out["calibration_method"] = method_name
     out["calibration_positive_rate"] = out["up_prob_calibrated"]
     out["calibration_start_date"] = sample_details["start_date"]
@@ -507,6 +511,8 @@ def calibrate_ranking_probabilities(
         },
         "complete_days": complete_days,
         "stock_count": int(len(stock_stats)),
+        "stock_hit_prior_mean": STOCK_HIT_PRIOR_MEAN,
+        "stock_hit_prior_strength": STOCK_HIT_PRIOR_STRENGTH,
     }
     out.attrs["probability_calibration"] = report
     return out, report

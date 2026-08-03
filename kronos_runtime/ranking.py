@@ -33,18 +33,18 @@ def build_kronos_ranking(
     target_signal = pd.to_numeric(out["target_ranking_signal"], errors="coerce")
     if target_signal.isna().any():
         raise RuntimeError("Kronos 目标模式排序信号存在空值")
-    if KRONOS_RANKING_ORIENTATION != "ascending":
+    if KRONOS_RANKING_ORIENTATION != "causal_stock_hit_rate_descending":
         raise RuntimeError(f"不支持的 Kronos 目标模式方向：{KRONOS_RANKING_ORIENTATION}")
     out["predicted_up_first"] = expected_return.gt(0.0)
     out["target_order_score"] = -target_signal
     out = out.sort_values(
-        ["predicted_up_first", "target_ranking_signal", "code"],
-        ascending=[False, True, True],
+        ["predicted_up_first", "expected_next_day_return", "code"],
+        ascending=[False, False, True],
     ).reset_index(drop=True)
     out.insert(0, "rank", np.arange(1, len(out) + 1))
     out["score"] = (len(out) - out.index.to_numpy(dtype=float)) / max(len(out), 1)
-    out["raw_score"] = out["target_order_score"]
-    out["pred_score"] = out["target_order_score"]
+    out["raw_score"] = out["expected_next_day_return"]
+    out["pred_score"] = out["expected_next_day_return"]
     out["pred_5d_ret"] = out["pred_return"]
     # The ranking head confidence is not a calibrated probability. A neutral
     # placeholder is kept until archived top-15 outcomes can calibrate it.
@@ -70,33 +70,22 @@ def build_kronos_ranking(
         ),
         errors="coerce",
     ).fillna(0)
-    out["_predicted_up_has_history"] = (
-        out["predicted_up_first"]
-        & out["calibrated"].eq(True)
-        & calibrated_rate.notna()
-    )
-    out["_predicted_up_hit_rate"] = calibrated_rate.where(
-        out["predicted_up_first"], -1.0
-    ).fillna(-1.0)
-    out["_predicted_up_sample_count"] = calibration_samples.where(
-        out["predicted_up_first"], 0
-    )
+    out["_predicted_up_hit_rate"] = calibrated_rate.fillna(0.5)
+    out["_predicted_up_sample_count"] = calibration_samples
     out = out.sort_values(
         [
             "predicted_up_first",
-            "_predicted_up_has_history",
             "_predicted_up_hit_rate",
             "_predicted_up_sample_count",
-            "target_ranking_signal",
+            "expected_next_day_return",
             "code",
         ],
-        ascending=[False, False, False, False, True, True],
+        ascending=[False, False, False, False, True],
     ).reset_index(drop=True)
     out["rank"] = np.arange(1, len(out) + 1)
     out["score"] = (len(out) - out.index.to_numpy(dtype=float)) / max(len(out), 1)
     out = out.drop(
         columns=[
-            "_predicted_up_has_history",
             "_predicted_up_hit_rate",
             "_predicted_up_sample_count",
         ]
@@ -108,8 +97,9 @@ def build_kronos_ranking(
     ranking_report = {
         "source": "kronos_mini_next_day_ohlcva",
         "native_output": ["pred_open", "pred_high", "pred_low", "pred_close", "pred_volume", "pred_amount"],
-        "ranking_basis": "predicted_up_then_stock_hit_rate_desc_then_target_signal_ascending",
-        "ranking_head_used": True,
+        "ranking_basis": "predicted_up_then_causal_stock_hit_rate_then_predicted_return",
+        "ranking_head_used": False,
+        "ranking_head_trained_but_not_selected": True,
         "ranking_orientation": KRONOS_RANKING_ORIENTATION,
         "sentiment_fusion": False,
         "training_penalty_note": (

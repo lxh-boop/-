@@ -68,9 +68,10 @@ def test_target_mode_kronos_ranking_uses_validation_selected_signal_without_sent
     assert not any("kronos_score" in column for column in ranking.columns)
     assert set(ranking["model_name"]) == {KRONOS_MODEL_NAME}
     assert not any("moneyflow" in column for column in ranking.columns)
-    assert report["ranking_head_used"] is True
-    assert report["ranking_orientation"] == "ascending"
-    assert report["ranking_basis"] == "predicted_up_then_stock_hit_rate_desc_then_target_signal_ascending"
+    assert report["ranking_head_used"] is False
+    assert report["ranking_head_trained_but_not_selected"] is True
+    assert report["ranking_orientation"] == "causal_stock_hit_rate_descending"
+    assert report["ranking_basis"] == "predicted_up_then_causal_stock_hit_rate_then_predicted_return"
     assert report["native_output"][:4] == ["pred_open", "pred_high", "pred_low", "pred_close"]
     assert report["sentiment_fusion"] is False
 
