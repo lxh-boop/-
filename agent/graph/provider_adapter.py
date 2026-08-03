@@ -98,6 +98,25 @@ class GraphProviderAdapter:
             db_path=db_path,
         )
 
+    def collect_external_evidence(
+        self,
+        refs: list[GraphRef],
+        *,
+        query: str,
+        top_k: int,
+        output_dir: str | Path,
+        db_path: str | Path | None,
+        as_of_time: str = "",
+    ) -> dict[str, Any]:
+        return self._evidence_provider.collect_external_evidence(
+            refs,
+            query=query,
+            top_k=top_k,
+            output_dir=output_dir,
+            db_path=db_path,
+            as_of_time=as_of_time,
+        )
+
     def retrieve_evidence(
         self,
         refs: list[GraphRef],
@@ -119,6 +138,49 @@ class GraphProviderAdapter:
             source_task_id=source_task_id,
             source_agent_id=source_agent_id,
             as_of_time=as_of_time,
+        )
+
+    def materialize_evidence_graph(
+        self,
+        *,
+        evidence_collection: dict[str, Any],
+        source_task_id: str,
+        source_agent_id: str,
+    ) -> dict[str, Any]:
+        return self._evidence_provider.materialize_evidence_graph(
+            evidence_collection=evidence_collection,
+            source_task_id=source_task_id,
+            source_agent_id=source_agent_id,
+        )
+
+    def read_portfolio_state(
+        self,
+        *,
+        user_id: str,
+        output_dir: str | Path,
+        db_path: str | Path | None,
+    ) -> dict[str, Any]:
+        return self._portfolio_provider.read_portfolio_state(
+            user_id=user_id,
+            output_dir=output_dir,
+            db_path=db_path,
+        )
+
+    def materialize_portfolio_snapshot(
+        self,
+        *,
+        user_id: str,
+        portfolio_state: dict[str, Any],
+        as_of_time: str,
+        source_task_id: str,
+        source_agent_id: str,
+    ) -> dict[str, Any]:
+        return self._portfolio_provider.materialize_portfolio_snapshot(
+            user_id=user_id,
+            portfolio_state=portfolio_state,
+            as_of_time=as_of_time,
+            source_task_id=source_task_id,
+            source_agent_id=source_agent_id,
         )
 
     def load_portfolio_snapshot(

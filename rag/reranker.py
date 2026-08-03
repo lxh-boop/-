@@ -26,7 +26,7 @@ class Reranker:
         try:
             from sentence_transformers import CrossEncoder
 
-            self.model = CrossEncoder(self.model_name, max_length=self.max_length)
+            self.model = CrossEncoder(self.model_name, max_length=self.max_length, local_files_only=True)
             self.available = True
         except Exception:
             self.model = None

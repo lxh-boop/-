@@ -140,33 +140,29 @@ def resolve_active_llm_settings(
     elif not _text(configured.get("llm_api_model")):
         configured["llm_api_model"] = _text(os.environ.get(LLM_MODEL_ENV))
 
-    selected_mode = _text(mode or configured.get("llm_mode") or DEFAULT_LLM_MODE).lower()
+    explicit_mode = _text(mode).lower() if mode is not None else ""
+    selected_mode = _text(explicit_mode or configured.get("llm_mode") or DEFAULT_LLM_MODE).lower()
     if selected_mode not in {"api", "local"}:
         selected_mode = DEFAULT_LLM_MODE
+
+    # The selected mode is authoritative. A stale profile identifier must never
+    # switch a new request from API back to local Ollama (or vice versa).
     if profile_id:
         requested_profile_id = str(profile_id)
-        saved_profile_modes = {
-            _text(configured.get("llm_api_profile_id")): "api",
-            _text(configured.get("llm_local_profile_id")): "local",
-        }
-        if requested_profile_id in saved_profile_modes:
-            selected_mode = saved_profile_modes[requested_profile_id]
-        else:
-            candidate = build_model_profile(
-                configured,
-                mode=selected_mode,
-                credential_ref="none",
+        candidate = build_model_profile(
+            configured,
+            mode=selected_mode,
+            credential_ref="none",
+        )
+        saved_profile_id = _text(configured.get(f"llm_{selected_mode}_profile_id"))
+        allowed_profile_ids = {candidate.profile_id}
+        if saved_profile_id:
+            allowed_profile_ids.add(saved_profile_id)
+        if requested_profile_id not in allowed_profile_ids:
+            raise ValueError(
+                f"Model Profile mode mismatch: profile {requested_profile_id} "
+                f"does not belong to selected mode {selected_mode}"
             )
-            if candidate.profile_id != requested_profile_id:
-                other_mode = "local" if selected_mode == "api" else "api"
-                candidate = build_model_profile(
-                    configured,
-                    mode=other_mode,
-                    credential_ref="none",
-                )
-                if candidate.profile_id != requested_profile_id:
-                    raise ValueError(f"Unknown Model Profile: {profile_id}")
-                selected_mode = other_mode
 
     credential, credential_ref = _credential(configured, api_key)
     profile = build_model_profile(

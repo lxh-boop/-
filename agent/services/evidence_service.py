@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from collections import OrderedDict
+from copy import deepcopy
+import threading
+import time
 
 from database.repositories import NewsRepository as DbNewsRepository
 
@@ -54,6 +58,47 @@ class NewsRepository:
 
 
 class RagRepository:
+    """Process-local cached RAG retrieval with visible stage timings.
+
+    Model downloads are disabled by the retriever classes. If dense/reranker
+    models are not already cached locally, the existing BM25/hybrid fallback is
+    used immediately instead of blocking an Agent request on network downloads.
+    """
+
+    _cache_lock = threading.RLock()
+    _cache: "OrderedDict[tuple[Any, ...], list[dict[str, Any]]]" = OrderedDict()
+    _cache_max_size = 128
+
+    def __init__(self) -> None:
+        self.last_diagnostics: dict[str, Any] = {}
+
+    @staticmethod
+    def _index_signature(index_dir: Path) -> tuple[str, int, int]:
+        bm25 = index_dir / "news_bm25.pkl"
+        dense = index_dir / "news_dense.pkl"
+        return (
+            str(index_dir.resolve()),
+            bm25.stat().st_mtime_ns if bm25.exists() else -1,
+            dense.stat().st_mtime_ns if dense.exists() else -1,
+        )
+
+    @classmethod
+    def _cache_get(cls, key: tuple[Any, ...]) -> list[dict[str, Any]] | None:
+        with cls._cache_lock:
+            value = cls._cache.get(key)
+            if value is None:
+                return None
+            cls._cache.move_to_end(key)
+            return deepcopy(value)
+
+    @classmethod
+    def _cache_put(cls, key: tuple[Any, ...], value: list[dict[str, Any]]) -> None:
+        with cls._cache_lock:
+            cls._cache[key] = deepcopy(value)
+            cls._cache.move_to_end(key)
+            while len(cls._cache) > cls._cache_max_size:
+                cls._cache.popitem(last=False)
+
     def retrieve_stock_context(
         self,
         *,
@@ -62,15 +107,34 @@ class RagRepository:
         top_k: int = 5,
         output_dir: str | Path = "outputs",
     ) -> list[dict[str, Any]]:
+        index_dir = Path(output_dir) / "rag_indexes"
+        signature = self._index_signature(index_dir)
+        cache_key = (*signature, str(stock_code), str(query), int(top_k))
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            self.last_diagnostics = {
+                "cache_hit": True,
+                "index_load_ms": 0.0,
+                "search_ms": 0.0,
+                "total_ms": 0.0,
+                "record_count": len(cached),
+            }
+            return cached
+
+        total_started = time.perf_counter()
         try:
             from rag.index_store import load_hybrid_index
 
-            retriever = load_hybrid_index(Path(output_dir) / "rag_indexes")
+            load_started = time.perf_counter()
+            retriever = load_hybrid_index(index_dir)
+            index_load_ms = (time.perf_counter() - load_started) * 1000.0
+            search_started = time.perf_counter()
             results = retriever.search(
                 query or stock_code,
                 final_top_k=int(top_k),
                 metadata_filter={"stock_code": stock_code},
             )
+            search_ms = (time.perf_counter() - search_started) * 1000.0
             records: list[dict[str, Any]] = []
             for item in results:
                 metadata = dict(item.metadata or {})
@@ -95,25 +159,53 @@ class RagRepository:
                         "retrieval_backend": "bm25_dense_rrf_reranker",
                     }
                 )
+            total_ms = (time.perf_counter() - total_started) * 1000.0
+            self.last_diagnostics = {
+                "cache_hit": False,
+                "index_load_ms": round(index_load_ms, 3),
+                "search_ms": round(search_ms, 3),
+                "total_ms": round(total_ms, 3),
+                "record_count": len(records),
+                "dense_available": bool(getattr(getattr(retriever, "dense", None), "available", False)),
+                "reranker_available": bool(getattr(getattr(retriever, "reranker", None), "available", False)),
+            }
+            self._cache_put(cache_key, records)
             return records
         except Exception as exc:
+            fallback_started = time.perf_counter()
             try:
                 from rag_retriever import retrieve_stock_context
 
                 frame = retrieve_stock_context(code=stock_code, query=query or stock_code, top_k=int(top_k))
-                if getattr(frame, "empty", True):
-                    return []
-                records = frame.fillna("").to_dict("records")
-                return [
+                records = [] if getattr(frame, "empty", True) else [
                     {
                         **dict(record),
                         "retrieval_backend": "legacy_tfidf_fallback",
                         "fallback_reason": f"{type(exc).__name__}: {exc}",
                     }
-                    for record in records
+                    for record in frame.fillna("").to_dict("records")
                 ]
+                self.last_diagnostics = {
+                    "cache_hit": False,
+                    "fallback_used": True,
+                    "fallback_ms": round((time.perf_counter() - fallback_started) * 1000.0, 3),
+                    "total_ms": round((time.perf_counter() - total_started) * 1000.0, 3),
+                    "record_count": len(records),
+                    "primary_error": f"{type(exc).__name__}: {exc}",
+                }
+                self._cache_put(cache_key, records)
+                return records
             except Exception as fallback_exc:
-                raise RuntimeError(f"{type(exc).__name__}: {exc}; fallback={type(fallback_exc).__name__}: {fallback_exc}") from fallback_exc
+                self.last_diagnostics = {
+                    "cache_hit": False,
+                    "fallback_used": True,
+                    "total_ms": round((time.perf_counter() - total_started) * 1000.0, 3),
+                    "primary_error": f"{type(exc).__name__}: {exc}",
+                    "fallback_error": f"{type(fallback_exc).__name__}: {fallback_exc}",
+                }
+                raise RuntimeError(
+                    f"{type(exc).__name__}: {exc}; fallback={type(fallback_exc).__name__}: {fallback_exc}"
+                ) from fallback_exc
 
 
 class McpEvidenceClient:
@@ -322,7 +414,10 @@ class EvidenceService:
                 sources=sources,
                 summary=self.build_evidence_summary(records=chunks, stock_code=code, query=query or code, evidence_type="rag"),
                 tool_name="evidence.search_rag",
-                extra={"chunks": chunks},
+                extra={
+                    "chunks": chunks,
+                    "retrieval_diagnostics": dict(self.rag_repository.last_diagnostics or {}),
+                },
             )
         except Exception as exc:
             return self._result(
@@ -335,7 +430,11 @@ class EvidenceService:
                 warnings=["rag_unavailable"],
                 errors=[f"{type(exc).__name__}: {exc}"],
                 tool_name="evidence.search_rag",
-                extra={"chunks": [], "error": f"{type(exc).__name__}: {exc}"},
+                extra={
+                    "chunks": [],
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "retrieval_diagnostics": dict(self.rag_repository.last_diagnostics or {}),
+                },
             )
 
     def merge_evidence(self, *payloads: dict[str, Any]) -> dict[str, Any]:

@@ -33,7 +33,7 @@ class DenseRetriever:
         try:
             from sentence_transformers import SentenceTransformer
 
-            self.model = SentenceTransformer(self.model_name)
+            self.model = SentenceTransformer(self.model_name, local_files_only=True)
             self.available = True
             self.load_error = ""
             self.fallback_reason = ""
@@ -41,7 +41,7 @@ class DenseRetriever:
             self.model = None
             self.available = False
             self.load_error = f"{type(exc).__name__}: {exc}"
-            self.fallback_reason = "Dense retrieval disabled because sentence-transformers model loading failed."
+            self.fallback_reason = "Dense retrieval disabled because the embedding model is not available in the local cache; network download is disabled in the request path."
 
     def embed_texts(self, texts: list[str]) -> np.ndarray:
         if not self.available or self.model is None:

@@ -173,10 +173,7 @@ TASK_INPUT_CONTRACT_SCHEMA = object_schema(
             string_schema(min_length=1), min_items=0, max_items=30
         ),
     },
-    required=[
-        "upstream_information_slots",
-        "available_context_slots",
-    ],
+    required=[],
 )
 
 TASK_EXPECTED_EFFECT_SCHEMA = object_schema(
@@ -414,6 +411,7 @@ class CoordinatorPlanner:
         payload: dict[str, Any],
         *,
         runtime_values: dict[str, Any],
+        authoritative_initial_information_slots: set[str] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Bind code-owned args and isolate upstream WorkerResult references.
 
@@ -505,9 +503,90 @@ class CoordinatorPlanner:
                         },
                     }
                 )
+        # Compile information-state metadata from the authoritative context and
+        # the semantic WorkerResult references. These fields do not choose a
+        # Worker or invent an edge; they describe the plan already produced by
+        # MainAgent and therefore should not consume a schema-repair LLM call.
+        initial_slots = set(authoritative_initial_information_slots or set())
+        output_slots_by_task = {
+            str(row.get("task_id") or ""): {
+                str(item)
+                for item in dict(row.get("expected_output") or {}).get("information_slots") or []
+                if str(item or "").strip()
+            }
+            for row in prepared_rows
+        }
+        for row in prepared_rows:
+            task_id = str(row.get("task_id") or "")
+            canonical_inputs = self._canonical_inputs(row.get("inputs") or {})
+            dependency_ids = {
+                str(item.get("from_task_id") or "")
+                for values in canonical_inputs.values()
+                for item in values
+                if str(item.get("from_task_id") or "").strip()
+            }
+            upstream_slots = sorted(
+                {
+                    slot
+                    for dependency_id in dependency_ids
+                    for slot in output_slots_by_task.get(dependency_id, set())
+                }
+            )
+            try:
+                card = self.directory.get(str(row.get("worker_id") or ""))
+                contract = card.task_contract(str(row.get("task_type") or ""))
+                context_slots = sorted(
+                    set(contract.required_context_slots).intersection(initial_slots)
+                )
+            except KeyError:
+                context_slots = []
+            input_contract = dict(row.get("input_contract") or {})
+            input_contract["upstream_information_slots"] = upstream_slots
+            input_contract["available_context_slots"] = context_slots
+            row["input_contract"] = input_contract
+            for audit in audit_rows:
+                if str(audit.get("task_id") or "") == task_id:
+                    audit.setdefault("input_contract_code_owned_fields", {}).update({
+                        "upstream_information_slots": upstream_slots,
+                        "available_context_slots": context_slots,
+                    })
+                    break
+            else:
+                audit_rows.append({
+                    "task_id": task_id,
+                    "worker_id": str(row.get("worker_id") or ""),
+                    "authoritative_args_bound": [],
+                    "default_args_applied": {},
+                    "misplaced_runtime_args_removed_from_inputs": [],
+                    "input_contract_code_owned_fields": {
+                        "direct_arg_names": list(input_contract.get("direct_arg_names") or []),
+                        "runtime_bound_args": list(input_contract.get("runtime_bound_args") or []),
+                        "upstream_information_slots": upstream_slots,
+                        "available_context_slots": context_slots,
+                    },
+                })
+
+        goal_contract = dict(payload.get("goal_contract") or {})
+        planning_state = dict(payload.get("planning_state") or {})
+        if initial_slots:
+            all_output_slots = {
+                slot
+                for slots in output_slots_by_task.values()
+                for slot in slots
+            }
+            final_slots = initial_slots | all_output_slots
+            required_slots = {
+                str(item)
+                for item in goal_contract.get("required_information_slots") or []
+                if str(item or "").strip()
+            }
+            planning_state["initial_available_information_slots"] = sorted(initial_slots)
+            planning_state["final_planned_information_slots"] = sorted(final_slots)
+            planning_state["unmet_information_slots"] = sorted(required_slots - final_slots)
+
         return {
-            "goal_contract": dict(payload.get("goal_contract") or {}),
-            "planning_state": dict(payload.get("planning_state") or {}),
+            "goal_contract": goal_contract,
+            "planning_state": planning_state,
             "tasks": prepared_rows,
         }, {"tasks": audit_rows}
 
@@ -724,6 +803,7 @@ class CoordinatorPlanner:
                 prepared_payload, _ = self._prepare_payload(
                     payload,
                     runtime_values=runtime_values,
+                    authoritative_initial_information_slots=set(initial_information_slots),
                 )
                 self._validate_payload(
                     prepared_payload,
@@ -755,11 +835,15 @@ class CoordinatorPlanner:
             "图影响分析都不是持仓建议的默认必选项，只有用户目标或已选下游合同明确需要时才能加入。"
             "一个任务必须满足至少一项：直接覆盖 goal_contract.required_information_slots；"
             "或其输出被某个已规划下游任务明确消费；或生成 FinalReport。"
-            "所有目标已覆盖后立即停止，并在 planning_state 中填写 final_planned_information_slots、"
-            "空 unmet_information_slots 和明确 stop_reason。连续一轮不能新增目标槽位或解锁能力时停止并让适当能力返回 need_context。"
+            "所有目标已覆盖后立即停止。planning_state.final_planned_information_slots 不是本轮新增槽位列表，"
+            "而必须严格等于 authoritative_initial_information_slots 与每个已规划任务 expected_output.information_slots 的去重并集；"
+            "即 final = initial ∪ outputs(T1) ∪ ... ∪ outputs(Tn)。同时填写空 unmet_information_slots 和明确 stop_reason。"
+            "goal_summary 和 completion_criteria 不得声称会使用模型信号、外部证据、图关系或其他可选材料，"
+            "除非 required_information_slots 明确需要它且当前计划确实选择了生产该槽位的任务。"
+            "连续一轮不能新增目标槽位或解锁能力时停止并让适当能力返回 need_context。"
             "每个任务必须同步生成 TaskExpectation：purpose 说明它在本次目标中的作用；why_selected 说明为何当前可执行且有贡献；"
-            "input_contract 只由 MainAgent填写 upstream_information_slots 和 available_context_slots；"
-            "direct_arg_names 与 runtime_bound_args 是程序拥有的字段，必须省略，程序会根据最终 args、默认值和能力合同生成。"
+            "input_contract 只输出空对象 {}。upstream_information_slots、available_context_slots、direct_arg_names 与 runtime_bound_args "
+            "均由程序根据语义 inputs、权威初始上下文、最终 args 和能力合同生成。"
             "expected_output 必须包含能力卡允许的 output_type、此次需要的信息槽位、覆盖范围、新鲜度和权威来源；"
             "expected_effect 说明直接满足哪些目标槽位、解锁哪些后续信息、会被哪些下游任务使用；"
             "completion_criteria 必须可用于执行后判断任务是否真正完成，不得只写返回某类型；"
@@ -846,7 +930,7 @@ class CoordinatorPlanner:
                 "包含 from_task_id 与 expected_output_type 的对象或对象数组。根任务必须写 inputs={}。"
                 "若出现 wrap_reference_under_semantic_role，必须根据 semantic_inputs_schema 选择正确 role 包裹引用；"
                 "若出现 move_to_args，把字段移到 args；若出现 omit_runtime_bound，从 args 和 inputs 删除，交由程序绑定。"
-                "input_contract 只输出 upstream_information_slots 与 available_context_slots，省略 direct_arg_names 和 runtime_bound_args。"
+                "input_contract 输出空对象 {}，四个字段都由程序生成。"
                 "不得新增用户未提供、GraphRef 未解析或上游结果未产生的证券、公告、画像、风险事实和限制。"
                 "每个 expected_output.information_slots 必须是能力卡 produces_information_slots 的子集；"
                 "无直接目标贡献且未被下游消费的任务必须删除。最终必须包含 FinalReport，并使"
@@ -856,6 +940,7 @@ class CoordinatorPlanner:
         prepared_payload, binding_audit = self._prepare_payload(
             semantic_payload,
             runtime_values=runtime_values,
+            authoritative_initial_information_slots=set(initial_information_slots),
         )
         flow_event(
             "WORKER_PLAN_AUTHORITATIVE_ARGS_BOUND",
@@ -1136,7 +1221,9 @@ class CoordinatorPlanner:
         def validate(payload: dict[str, Any]) -> None:
             try:
                 prepared_payload, _ = self._prepare_payload(
-                    payload, runtime_values=runtime_values
+                    payload,
+                    runtime_values=runtime_values,
+                    authoritative_initial_information_slots=set(initial_information_slots),
                 )
                 if dict(prepared_payload.get("goal_contract") or {}) != goal_contract:
                     raise WorkerContractViolation(
@@ -1206,7 +1293,10 @@ class CoordinatorPlanner:
                         "observations 中缺失信息或重新生成最终报告的最小任务。返回完整 active plan："
                         "所有 frozen_reusable_tasks 必须保留且不可修改；失败、部分完成和被替代任务不要保留；"
                         "新任务 ID 不得复用 previous_task_ids。新任务仍须生成完整 TaskExpectation。"
-                        "GoalContract、初始信息槽位和副作用边界不可改变。最终必须包含新的 FinalReport 生产者。"
+                        "GoalContract、初始信息槽位和副作用边界不可改变。planning_state.initial_available_information_slots"
+                        " 必须仍然严格等于 authoritative_initial_information_slots，绝不能替换成或混入 current_available_information_slots；"
+                        "current_available_information_slots 只用于判断当前哪些能力可执行。final_planned_information_slots 必须等于"
+                        " authoritative_initial_information_slots 与完整 active plan 中全部任务输出槽位的并集。最终必须包含新的 FinalReport 生产者。"
                         "严格输出 worker_dag_output_schema JSON。"
                     ),
                 },
@@ -1257,6 +1347,7 @@ class CoordinatorPlanner:
             repair_mode="targeted",
             repair_guidance=(
                 "保留 goal_contract 和 frozen_reusable_tasks；不要修改已复用任务。"
+                "planning_state 的 initial/final/unmet 槽位由程序根据 authoritative_initial_information_slots 和完整 active plan 输出生成。"
                 "只修复错误字段并从 current_available_information_slots 正向选择补齐缺失槽位的能力。"
                 "inputs 必须使用 semantic role 包裹 typed WorkerResult reference；根任务 inputs={}。"
                 "省略 input_contract.direct_arg_names 与 runtime_bound_args，由程序生成。"
@@ -1264,7 +1355,9 @@ class CoordinatorPlanner:
             ),
         )
         prepared, binding_audit = self._prepare_payload(
-            payload, runtime_values=runtime_values
+            payload,
+            runtime_values=runtime_values,
+            authoritative_initial_information_slots=set(initial_information_slots),
         )
         compiled = self._compile_payload(prepared)
         tasks: list[GraphAgentTask] = []

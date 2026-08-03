@@ -20,6 +20,7 @@ from agent.graph.portfolio_graph import PortfolioGraphService
 from agent.graph.provider_adapter import GraphProviderAdapter
 from agent.graph.impact_service import GraphImpactService
 
+from .completion import flow_decision, non_success_completion_report, validate_completion_report
 from .agent_directory import AgentDirectory, REPORT_WRITER
 from .control_gateway import ControlGateway
 from .entry_decision import MainEntryDecisionPlanner, RequestMode
@@ -69,6 +70,68 @@ def _clarification_question(items: list[MissingContextItem], language: str) -> s
     if language == "en":
         return "Please provide or select: " + "; ".join(descriptions[:4])
     return "请补充或选择：" + "；".join(descriptions[:4])
+
+
+def _authoritative_entity_catalog(
+    resolution_audit: dict[str, Any],
+    focus_refs: list[GraphRef],
+) -> list[dict[str, Any]]:
+    """Preserve labels confirmed by GraphRef resolution for downstream reporting."""
+
+    selected_ids = {ref.node_id for ref in focus_refs}
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in list((resolution_audit or {}).get("items") or []):
+        if not isinstance(item, dict):
+            continue
+        resolution = item.get("resolution") if isinstance(item.get("resolution"), dict) else {}
+        for candidate in list(resolution.get("candidates") or []):
+            if not isinstance(candidate, dict):
+                continue
+            graph_ref = candidate.get("graph_ref") if isinstance(candidate.get("graph_ref"), dict) else {}
+            node_id = str(graph_ref.get("node_id") or "")
+            if not node_id or node_id not in selected_ids or node_id in seen:
+                continue
+            display_label = str(candidate.get("display_name") or "").strip()
+            public_code = node_id.rsplit(":", 1)[-1]
+            if not (len(public_code) == 6 and public_code.isdigit()):
+                public_code = ""
+            rows.append(
+                {
+                    "entity_ref": dict(graph_ref),
+                    "node_id": node_id,
+                    "public_code": public_code,
+                    "display_label": display_label,
+                    "identity_source": str(candidate.get("matched_by") or graph_ref.get("source") or ""),
+                    "identity_locked": bool(graph_ref.get("locked")),
+                }
+            )
+            seen.add(node_id)
+    return rows
+
+
+def _bind_authoritative_task_context(
+    tasks: list[GraphAgentTask],
+    *,
+    entity_catalog: list[dict[str, Any]],
+) -> None:
+    for task in tasks:
+        task.metadata["authoritative_entity_catalog"] = [dict(item) for item in entity_catalog]
+
+
+def _bind_task_completion_contracts(
+    tasks: list[GraphAgentTask],
+    *,
+    directory: AgentDirectory,
+) -> None:
+    for task in tasks:
+        # Completion semantics belong to the registered Worker contract, not to
+        # an optional planner metadata flag. Compile whenever the task is known;
+        # legacy/non-strict Workers simply receive completion_report_required=false.
+        try:
+            task.completion_contract = directory.completion_contract_for_task(task)
+        except (KeyError, ValueError):
+            task.completion_contract = {}
 
 
 class AgentCollaborationCoordinator:
@@ -379,6 +442,9 @@ class AgentCollaborationCoordinator:
                 run_id=run_id,
             )
             raise
+        entity_catalog = _authoritative_entity_catalog(resolution_audit, focus_refs)
+        _bind_authoritative_task_context(tasks, entity_catalog=entity_catalog)
+        _bind_task_completion_contracts(tasks, directory=self.directory)
         flow_event(
             "WORKER_PLANNING_COMPLETED",
             {
@@ -505,6 +571,10 @@ class AgentCollaborationCoordinator:
                     }
                 )
                 break
+            _bind_authoritative_task_context(full_tasks, entity_catalog=entity_catalog)
+            _bind_authoritative_task_context(new_tasks, entity_catalog=entity_catalog)
+            _bind_task_completion_contracts(full_tasks, directory=self.directory)
+            _bind_task_completion_contracts(new_tasks, directory=self.directory)
             if self.runtime_services is not None:
                 self.runtime_services.register_tasks(new_tasks)
             combined_results, new_batches, new_timeline = self._run_dag(
@@ -684,9 +754,7 @@ class AgentCollaborationCoordinator:
     ) -> dict[str, Any]:
         expected_slots = {
             str(item)
-            for item in dict(task.expected_output or {}).get(
-                "information_slots", []
-            )
+            for item in dict(task.expected_output or {}).get("information_slots", [])
             if str(item or "").strip()
         }
         if result is None:
@@ -696,6 +764,7 @@ class AgentCollaborationCoordinator:
                 "task_type": task.task_type,
                 "expected_output_type": task.expected_output_type,
                 "actual_output_type": "",
+                "status": ResultStatus.NOT_EXECUTED.value,
                 "contract_valid": False,
                 "semantic_satisfied": False,
                 "produced_information_slots": [],
@@ -704,92 +773,100 @@ class AgentCollaborationCoordinator:
                 "retryable": False,
                 "repairable": True,
                 "replan_recommended": True,
+                "should_freeze": False,
+                "reusable": False,
+                "freeze_reason": "task_not_executed",
+                "completion": {},
             }
 
         contract_valid = result.output_type == task.expected_output_type
-        status = result.status
-        metadata = dict(result.metadata or {})
-        declared_actual = metadata.get("produced_information_slots")
-        actual_slots = {
-            str(item)
-            for item in (declared_actual if isinstance(declared_actual, list) else [])
-            if str(item or "").strip()
-        }
-        completed_status = status in {
-            ResultStatus.COMPLETED,
-            ResultStatus.PROPOSAL_READY,
-        }
-        payload_present = result.data is not None or bool(result.summary)
-        if completed_status and contract_valid and payload_present and not actual_slots:
-            # Existing Workers do not yet emit slot-level metadata. A completed,
-            # correctly typed result is provisionally credited with its planned
-            # slots; Workers may override this by setting coverage_satisfied=False
-            # or explicit produced_information_slots in result.metadata.
-            actual_slots = set(expected_slots)
-        coverage_satisfied = bool(metadata.get("coverage_satisfied", True))
-        missing_slots = expected_slots - actual_slots
+        completion = dict(result.completion or {})
+        completion_valid = False
+        completion_error = ""
+        if completion and task.completion_contract:
+            try:
+                validate_completion_report(completion, task.completion_contract)
+                completion_valid = True
+            except Exception as exc:
+                completion_error = str(exc)
+
+        if completion_valid:
+            produced = {str(item) for item in completion.get("produced_information_slots") or []}
+            missing = {str(item) for item in completion.get("missing_information_slots") or []}
+            decision = flow_decision(
+                result.status,
+                completion,
+                output_type=result.output_type,
+                retryable=bool((result.error or {}).get("retryable")),
+            )
+            semantic_satisfied = bool(contract_valid and decision.semantic_satisfied)
+            failure_kind = decision.failure_kind
+            retryable = bool((result.error or {}).get("retryable"))
+            repairable = bool(decision.replan_recommended)
+            should_freeze = bool(decision.should_freeze)
+            reusable = bool(decision.reusable)
+            freeze_reason = decision.freeze_reason
+        else:
+            # Legacy non-strict Workers retain their declared status. Strict
+            # Workers cannot be credited without a valid structured report.
+            strict = bool(task.completion_contract.get("completion_report_required"))
+            produced = set()
+            missing = set(expected_slots)
+            if not strict and result.status in {ResultStatus.COMPLETED, ResultStatus.PROPOSAL_READY}:
+                produced = set(expected_slots)
+                missing = set()
+                semantic_satisfied = contract_valid
+                failure_kind = "none"
+                retryable = False
+                repairable = False
+                should_freeze = result.output_type != "FinalReport"
+                reusable = should_freeze
+                freeze_reason = "legacy_non_llm_worker_declared_completed"
+            else:
+                semantic_satisfied = False
+                failure_kind = (
+                    "completion_report_invalid" if completion_error
+                    else "completion_report_missing" if strict
+                    else "worker_result_incomplete"
+                )
+                retryable = bool((result.error or {}).get("retryable"))
+                repairable = result.status not in {ResultStatus.NEED_CONTEXT}
+                should_freeze = False
+                reusable = False
+                freeze_reason = "structured_completion_required"
 
         error = dict(result.error or {})
-        error_code = str(error.get("code") or "").lower()
-        retryable = bool(error.get("retryable"))
-        if status == ResultStatus.NEED_CONTEXT:
-            failure_kind = "context_missing"
-        elif status in {ResultStatus.FAILED, ResultStatus.BLOCKED, ResultStatus.NOT_EXECUTED}:
-            if any(token in error_code for token in ("validation", "argument", "parameter")):
-                failure_kind = "parameter_contract_failure"
-            else:
-                failure_kind = "tool_execution_failure"
-        elif completed_status and not payload_present:
-            failure_kind = "business_result_empty"
-        elif status == ResultStatus.PARTIAL or not coverage_satisfied or missing_slots:
-            failure_kind = "business_result_insufficient"
-        else:
-            failure_kind = "none"
-
-        semantic_satisfied = (
-            contract_valid
-            and completed_status
-            and coverage_satisfied
-            and not missing_slots
-        )
-        if failure_kind == "business_result_empty" and contract_valid and completed_status:
-            # A successful authoritative query with no rows is a valid business
-            # result. It must be reported as empty, not treated as tool failure.
-            semantic_satisfied = True
-            actual_slots = set(expected_slots)
-            missing_slots = set()
-
-        repairable = failure_kind in {
-            "parameter_contract_failure",
-            "tool_execution_failure",
-            "business_result_insufficient",
-            "not_executed",
-        }
+        if completion_error and not error:
+            error = {
+                "code": "worker_completion_report_invalid",
+                "message": completion_error,
+                "component": result.agent_id,
+                "retryable": False,
+            }
         return {
             "task_id": task.task_id,
             "worker_id": task.worker_id,
             "task_type": task.task_type,
             "expected_output_type": task.expected_output_type,
             "actual_output_type": result.output_type,
-            "status": status.value,
+            "status": result.status.value,
             "contract_valid": contract_valid,
+            "completion_report_valid": completion_valid,
             "semantic_satisfied": semantic_satisfied,
-            "produced_information_slots": sorted(actual_slots),
-            "missing_information_slots": sorted(missing_slots),
-            "coverage_requirement": dict(task.expected_output or {}).get(
-                "coverage_requirement", ""
-            ),
-            "freshness_requirement": dict(task.expected_output or {}).get(
-                "freshness_requirement", ""
-            ),
-            "authority_requirement": dict(task.expected_output or {}).get(
-                "authority_requirement", ""
-            ),
+            "produced_information_slots": sorted(produced),
+            "missing_information_slots": sorted(missing),
+            "coverage_requirement": dict(task.expected_output or {}).get("coverage_requirement", ""),
+            "freshness_requirement": dict(task.expected_output or {}).get("freshness_requirement", ""),
+            "authority_requirement": dict(task.expected_output or {}).get("authority_requirement", ""),
             "failure_kind": failure_kind,
             "retryable": retryable,
             "repairable": repairable,
             "replan_recommended": bool(not semantic_satisfied and repairable),
+            "should_freeze": should_freeze,
+            "reusable": reusable,
+            "freeze_reason": freeze_reason,
             "error": error or None,
+            "completion": completion,
             "replan_triggers": list(task.replan_triggers),
         }
 
@@ -803,6 +880,21 @@ class AgentCollaborationCoordinator:
             cls._task_observation(task, results.get(task.task_id))
             for task in tasks
         ]
+
+    @staticmethod
+    def _worker_result_usable(result: GraphWorkerResult | None) -> bool:
+        """Return whether a dependency may unlock its downstream Worker."""
+
+        if result is None:
+            return False
+        completion = dict(result.completion or {})
+        if completion:
+            return bool(
+                completion.get("expected_task_completed")
+                and completion.get("completion_status") == "completed"
+                and result.status in {ResultStatus.COMPLETED, ResultStatus.PROPOSAL_READY}
+            )
+        return result.status in {ResultStatus.COMPLETED, ResultStatus.PROPOSAL_READY}
 
     def _run_dag(
         self,
@@ -822,9 +914,96 @@ class AgentCollaborationCoordinator:
         timeline: list[dict[str, Any]] = []
         batch_index = 0
         while pending:
-            ready = [task for task in pending.values() if all(dep in results for dep in task.dependency_task_ids)]
+            # A failed dependency pauses the downstream branch. The blocked
+            # Workers are not executed with invalid/empty upstream results; their
+            # structured BLOCKED results are reported to MainAgent for replan.
+            blocked_rows: list[dict[str, Any]] = []
+            propagated = True
+            while propagated:
+                propagated = False
+                for task_id, task in list(pending.items()):
+                    blocked_by = [
+                        dependency_id
+                        for dependency_id in task.dependency_task_ids
+                        if dependency_id in results
+                        and not self._worker_result_usable(results.get(dependency_id))
+                    ]
+                    if not blocked_by:
+                        continue
+                    result = GraphWorkerResult(
+                        task_id=task.task_id,
+                        agent_id=task.assigned_agent,
+                        status=ResultStatus.BLOCKED,
+                        output_type=task.expected_output_type,
+                        data=None,
+                        error={
+                            "code": "upstream_worker_failed",
+                            "message": "上游 Worker 执行失败，当前任务已暂停并等待 MainAgent 重规划。",
+                            "component": "worker_dag_executor",
+                            "retryable": True,
+                            "blocked_by_task_ids": sorted(blocked_by),
+                        },
+                        focus_refs=task.focus_refs,
+                        summary="上游 Worker 执行失败，当前 Worker 未执行并等待重规划。",
+                        warnings=["blocked_by_upstream_worker_failure"],
+                        completion=non_success_completion_report(
+                            task,
+                            execution_status="blocked",
+                            reason="Upstream Worker failed; this Worker was not executed.",
+                            failure_kind="upstream_worker_failed",
+                        ),
+                        metadata={
+                            "blocked_by_task_ids": sorted(blocked_by),
+                            "replan_required": True,
+                        },
+                    )
+                    results[task.task_id] = result
+                    if self.runtime_services is not None:
+                        self.runtime_services.record_result(task, result)
+                    timeline.append({
+                        "task_id": task.task_id,
+                        "worker_id": task.worker_id,
+                        "agent_id": task.assigned_agent,
+                        "task_type": task.task_type,
+                        "status": result.status.value,
+                        "output_type": result.output_type,
+                        "duration_ms": 0.0,
+                        "summary": result.summary[:500],
+                        "warning_count": len(result.warnings),
+                        "evidence_count": 0,
+                        "artifact_count": 0,
+                        "error": result.error,
+                    })
+                    pending.pop(task_id, None)
+                    blocked_rows.append({
+                        "task_id": task_id,
+                        "blocked_by_task_ids": sorted(blocked_by),
+                    })
+                    propagated = True
+            if blocked_rows:
+                flow_event(
+                    "WORKER_DAG_PAUSED_FOR_REPLAN",
+                    {
+                        "blocked_tasks": blocked_rows,
+                        "reason": "upstream_worker_failed",
+                    },
+                    run_id=str(tasks[0].run_id if tasks else ""),
+                    level="WARNING",
+                )
+            if not pending:
+                break
+
+            ready = [
+                task
+                for task in pending.values()
+                if all(
+                    dependency_id in results
+                    and self._worker_result_usable(results.get(dependency_id))
+                    for dependency_id in task.dependency_task_ids
+                )
+            ]
             if not ready:
-                for task in pending.values():
+                for task in list(pending.values()):
                     result = GraphWorkerResult(
                         task_id=task.task_id,
                         agent_id=task.assigned_agent,
@@ -842,6 +1021,7 @@ class AgentCollaborationCoordinator:
                         warnings=["unresolved_task_dependency"],
                     )
                     results[task.task_id] = result
+                    pending.pop(task.task_id, None)
                     if self.runtime_services is not None:
                         self.runtime_services.record_result(task, result)
                 break

@@ -2,8 +2,18 @@
 
 from .evidence import (
     EVIDENCE_ANALYZE_ENTITIES_TOOL,
+    EVIDENCE_COLLECT_EXTERNAL_TOOL,
+    EVIDENCE_FINALIZE_COLLECTION_TOOL,
     EVIDENCE_RETRIEVE_TOOL,
+    EVIDENCE_SEARCH_NEWS_TOOL,
+    EVIDENCE_SEARCH_RAG_TOOL,
     build_evidence_tool_definitions,
+)
+from .graph_context import (
+    DATABASE_WRITE_EVIDENCE_GRAPH_CONTEXT,
+    GRAPH_PORTFOLIO_MATERIALIZE_SNAPSHOT,
+    DATABASE_WRITE_PORTFOLIO_GRAPH_CONTEXT,
+    build_graph_context_tool_definitions,
 )
 from .internal_system import (
     INTERNAL_ACCOUNT_GET_STATE,
@@ -20,7 +30,14 @@ from .registry import WorkerToolDirectory, build_worker_tool_registry
 
 __all__ = [
     "EVIDENCE_ANALYZE_ENTITIES_TOOL",
+    "EVIDENCE_COLLECT_EXTERNAL_TOOL",
+    "EVIDENCE_FINALIZE_COLLECTION_TOOL",
     "EVIDENCE_RETRIEVE_TOOL",
+    "EVIDENCE_SEARCH_NEWS_TOOL",
+    "EVIDENCE_SEARCH_RAG_TOOL",
+    "DATABASE_WRITE_EVIDENCE_GRAPH_CONTEXT",
+    "GRAPH_PORTFOLIO_MATERIALIZE_SNAPSHOT",
+    "DATABASE_WRITE_PORTFOLIO_GRAPH_CONTEXT",
     "INTERNAL_ACCOUNT_GET_STATE",
     "INTERNAL_BACKTEST_GET_SUMMARY",
     "INTERNAL_MODEL_GET_METRICS",
@@ -29,6 +46,7 @@ __all__ = [
     "INTERNAL_RANKING_GET_LATEST",
     "INTERNAL_STRATEGY_GET_SELECTED",
     "INTERNAL_USER_PROFILE_GET",
+    "build_graph_context_tool_definitions",
     "build_internal_system_tool_definitions",
     "WorkerToolDirectory",
     "build_evidence_tool_definitions",

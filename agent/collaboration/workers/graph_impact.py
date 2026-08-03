@@ -1,19 +1,35 @@
-"""Execute portfolio-impact path analysis from upstream graph results.
-
-The executor requires a cause/evidence anchor and a portfolio snapshot reference,
-then queries validated graph paths. It does not retrieve evidence, load portfolio
-state, infer missing identities, or create portfolio changes.
-"""
+"""Retrieve auditable financial-graph relations without business interpretation."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from agent.graph.contracts import GraphNodeKind, refs_from
+from agent.graph.contracts import GraphNodeKind, GraphRef, refs_from
 from agent.graph.impact_service import GraphImpactService
 
 from ..models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus
 from .common import refs_from_dependencies, safe_public_value
+
+
+def _unique_refs(refs: list[GraphRef]) -> list[GraphRef]:
+    return refs_from([ref.to_dict() for ref in refs])
+
+
+def _direct_refs(
+    task: GraphAgentTask,
+    *,
+    arg_name: str,
+    allowed_roles: set[str],
+) -> list[GraphRef]:
+    requested_ids = {
+        str(item).strip()
+        for item in task.args.get(arg_name) or []
+        if str(item).strip()
+    }
+    candidates = task.focus_refs + task.context_refs
+    if requested_ids:
+        return [ref for ref in candidates if ref.node_id in requested_ids]
+    return [ref for ref in candidates if str(ref.role or "") in allowed_roles]
 
 
 def run_graph_impact(
@@ -22,61 +38,65 @@ def run_graph_impact(
     dependency_results: dict[str, dict[str, Any]],
     resolved_inputs: dict[str, Any] | None = None,
 ) -> GraphWorkerResult:
-    source_task_ids = task.input_task_ids("source_analysis")
-    target_task_ids = task.input_task_ids("target_state")
-    selected_dependencies = {
-        task_id: payload
-        for task_id, payload in dependency_results.items()
-        if not source_task_ids + target_task_ids
-        or task_id in set(source_task_ids + target_task_ids)
-    }
-    causes = [
-        ref
-        for ref in task.focus_refs + task.context_refs
-        if ref.node_kind in {GraphNodeKind.EVIDENCE, GraphNodeKind.ASSERTION}
-        or (
-            ref.node_kind == GraphNodeKind.OBJECT
-            and ref.role in {"cause", "focus", "event"}
-        )
-    ]
-    causes.extend(
-        refs_from_dependencies(
-            selected_dependencies,
-            kinds={GraphNodeKind.EVIDENCE, GraphNodeKind.ASSERTION},
-        )
+    if task.task_type != "retrieve_financial_relations":
+        raise ValueError(f"unsupported_relation_task:{task.task_type}")
+
+    source_task_ids = task.input_task_ids("source_graph_context")
+    target_task_ids = task.input_task_ids("target_graph_context")
+
+    source_refs = _direct_refs(
+        task,
+        arg_name="source_ref_ids",
+        allowed_roles={"source", "cause", "event"},
     )
-    causes = refs_from([ref.to_dict() for ref in causes])
-    portfolio_candidates = [
-        ref
-        for ref in task.focus_refs + task.context_refs
-        if ref.node_kind == GraphNodeKind.OBJECT
-        and ref.role in {"impact_target", "portfolio", "focus"}
-        and "portfolio" in ref.node_id.lower()
-    ]
-    portfolio_candidates.extend(
-        refs_from_dependencies(selected_dependencies, kinds={GraphNodeKind.OBJECT})
+    target_refs = _direct_refs(
+        task,
+        arg_name="target_ref_ids",
+        allowed_roles={"target", "impact_target", "portfolio", "holding"},
     )
-    portfolio_ref = next(
-        (ref for ref in portfolio_candidates if "portfolio" in ref.node_id.lower()),
-        None,
-    )
-    missing: list[MissingContextItem] = []
-    if not causes:
-        missing.append(
-            MissingContextItem(
-                key="cause_graph_ref",
-                description="缺少新闻、事件或声明原因锚点。",
-                expected_format="Evidence/Assertion/Event GraphRef",
-                searched_sources=["task refs", "dependency results"],
+
+    if source_task_ids:
+        source_refs.extend(
+            refs_from_dependencies(
+                {
+                    task_id: dependency_results[task_id]
+                    for task_id in source_task_ids
+                    if task_id in dependency_results
+                },
+                kinds={GraphNodeKind.EVIDENCE, GraphNodeKind.ASSERTION, GraphNodeKind.OBJECT},
             )
         )
-    if portfolio_ref is None:
+    if target_task_ids:
+        target_refs.extend(
+            refs_from_dependencies(
+                {
+                    task_id: dependency_results[task_id]
+                    for task_id in target_task_ids
+                    if task_id in dependency_results
+                },
+                kinds={GraphNodeKind.EVIDENCE, GraphNodeKind.ASSERTION, GraphNodeKind.OBJECT},
+            )
+        )
+
+    source_refs = _unique_refs(source_refs)
+    target_refs = _unique_refs(target_refs)
+    missing: list[MissingContextItem] = []
+    if not source_refs:
         missing.append(
             MissingContextItem(
-                key="portfolio_snapshot_ref",
-                description="缺少当前用户组合快照。",
-                expected_format="PortfolioSnapshot GraphRef",
-                searched_sources=["task refs", "dependency results"],
+                key="source_graph_context",
+                description="缺少关系查找的来源图对象集合。",
+                expected_format="source_ref_ids 或声明的上游图上下文",
+                searched_sources=["task refs", "task.args.source_ref_ids", "declared upstream results"],
+            )
+        )
+    if not target_refs:
+        missing.append(
+            MissingContextItem(
+                key="target_graph_context",
+                description="缺少关系查找的目标图对象集合。",
+                expected_format="target_ref_ids 或声明的上游图上下文",
+                searched_sources=["task refs", "task.args.target_ref_ids", "declared upstream results"],
             )
         )
     if missing:
@@ -84,43 +104,54 @@ def run_graph_impact(
             task_id=task.task_id,
             agent_id=task.assigned_agent,
             status=ResultStatus.NEED_CONTEXT,
-            output_type="ImpactAnalysisResult",
+            output_type="GraphRelationResult",
             data=None,
             error=None,
             focus_refs=task.focus_refs,
-            summary="影响路径分析缺少必要图锚点。",
+            summary="金融图关系查找缺少来源或目标图上下文。",
             missing_items=missing,
         )
-    paths = impact_service.find_paths(
-        cause_refs=causes,
-        portfolio_ref=portfolio_ref,
+
+    paths = impact_service.find_relation_paths(
+        source_refs=source_refs,
+        target_refs=target_refs,
         as_of_time=task.as_of_time,
     )
-    summary = impact_service.summarize_paths(paths)
+    summary = impact_service.summarize_relations(paths)
+    payload = {
+        "source_task_ids": source_task_ids,
+        "target_task_ids": target_task_ids,
+        "source_refs": [ref.to_dict() for ref in source_refs],
+        "target_refs": [ref.to_dict() for ref in target_refs],
+        "relation_paths": [path.to_dict() for path in paths],
+        "relation_summary": safe_public_value(summary),
+    }
     return GraphWorkerResult(
         task_id=task.task_id,
         agent_id=task.assigned_agent,
-        status=ResultStatus.COMPLETED if paths else ResultStatus.PARTIAL,
-        output_type="ImpactAnalysisResult",
-        data={
-            "source_task_ids": source_task_ids or list(selected_dependencies.keys()),
-            "target_task_ids": target_task_ids or list(selected_dependencies.keys()),
-            "impact_paths": [path.to_dict() for path in paths],
-            "impact_summary": safe_public_value(summary),
-        },
+        status=ResultStatus.COMPLETED,
+        output_type="GraphRelationResult",
+        payload_schema="graph_relation_result.v1",
+        payload=payload,
+        data=payload,
         error=None,
-        focus_refs=[*causes, portfolio_ref],
+        focus_refs=[*source_refs, *target_refs],
         summary=(
-            f"已找到 {len(paths)} 条可追踪影响路径，涉及 {summary.get('holding_count', 0)} 个持仓。"
+            f"已找到 {len(paths)} 条可追踪金融图关系路径。"
             if paths
-            else "当前权威图和证据图中未找到新闻到持仓的可验证路径。"
+            else "当前金融图中未找到符合条件的关系路径。"
         ),
-        findings=[{"kind": "portfolio_impact_paths", **safe_public_value(summary)}],
+        findings=[{"kind": "financial_relation_paths", **safe_public_value(summary)}],
         graph_path_refs=paths,
-        evidence_refs=[
-            ref for ref in causes if ref.node_kind == GraphNodeKind.EVIDENCE
-        ],
+        evidence_refs=[ref for ref in source_refs if ref.node_kind == GraphNodeKind.EVIDENCE],
         confidence=max((path.confidence for path in paths), default=0.0),
-        warnings=[] if paths else ["no_validated_impact_path"],
-        metadata={"produced_refs": [portfolio_ref.to_dict()]},
+        warnings=[] if paths else ["business_result_empty:no_financial_relation_path"],
+        metadata={
+            "relation_retrieval_only": True,
+            "business_interpretation": False,
+            "business_result_empty": not bool(paths),
+        },
     )
+
+
+__all__ = ["run_graph_impact"]

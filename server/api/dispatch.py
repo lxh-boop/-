@@ -25,8 +25,8 @@ DASHBOARD_FUNCTIONS = {
     "is_frozen_app",
     "is_prediction_only_date",
     "is_zoo_backend",
-    "list_local_models",
     "list_model_names",
+    "list_local_models",
     "load_cached_ai_explanation",
     "load_daily_returns_for_strategy",
     "load_local_config",
@@ -78,8 +78,8 @@ DASHBOARD_CONSTANTS = {
     "BACKTEST_METRICS_PATH",
     "BACKTEST_NAV_PATH",
     "BACKTEST_TRADES_PATH",
-    "BASE_DIR",
     "DEFAULT_DFT_UNET_CHECKPOINT_PATH",
+    "BASE_DIR",
     "DEFAULT_LLM_BASE_URL",
     "DEFAULT_LLM_MODEL",
     "ENABLE_LLM_EXPLAINER",
@@ -282,6 +282,13 @@ class LLMSettingsRegistry:
             "endpoint_scope": str(settings.endpoint_scope),
             "is_configured": bool(settings.is_configured),
         }
+
+    def resolve_current(self) -> Any:
+        """Resolve the latest persisted profile for a newly submitted task."""
+
+        from core.llm.runtime_settings import resolve_active_llm_settings
+
+        return resolve_active_llm_settings()
 
     def resolve(self, payload: Any) -> Any:
         from core.llm.runtime_settings import resolve_active_llm_settings

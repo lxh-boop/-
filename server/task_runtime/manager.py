@@ -11,6 +11,9 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import Request, urlopen
 
 from server.task_runtime.store import ACTIVE_STATUSES, TERMINAL_STATUSES, TaskStore, utc_now
 
@@ -141,6 +144,113 @@ class TaskManager:
             except Exception:
                 pass
 
+    @staticmethod
+    def _llm_descriptor(task: dict[str, Any]) -> dict[str, Any]:
+        request = task.get("request") if isinstance(task, dict) else {}
+        kwargs = request.get("kwargs") if isinstance(request, dict) else {}
+        descriptor = kwargs.get("llm_settings_descriptor") if isinstance(kwargs, dict) else {}
+        return dict(descriptor) if isinstance(descriptor, dict) else {}
+
+    @staticmethod
+    def _native_ollama_base_url(base_url: str) -> str:
+        parsed = urlsplit(str(base_url or "").strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return ""
+        path = str(parsed.path or "").rstrip("/")
+        if path.endswith("/v1"):
+            path = path[:-3]
+        return urlunsplit((parsed.scheme, parsed.netloc, path.rstrip("/"), "", ""))
+
+    def _other_task_uses_local_model(
+        self,
+        *,
+        task_id: str,
+        descriptor: dict[str, Any],
+    ) -> bool:
+        model = str(descriptor.get("model") or "").strip().lower()
+        base_url = self._native_ollama_base_url(str(descriptor.get("base_url") or "")).lower()
+        if not model or not base_url:
+            return False
+        for item in self.store.list(active_only=True, limit=200):
+            if str(item.get("task_id") or "") == str(task_id):
+                continue
+            other = self._llm_descriptor(item)
+            if str(other.get("mode") or "").strip().lower() != "local":
+                continue
+            if str(other.get("model") or "").strip().lower() != model:
+                continue
+            if self._native_ollama_base_url(str(other.get("base_url") or "")).lower() == base_url:
+                return True
+        return False
+
+    def _clear_local_model_cache(
+        self,
+        *,
+        task_id: str,
+        descriptor: dict[str, Any],
+    ) -> None:
+        if str(descriptor.get("mode") or "").strip().lower() != "local":
+            return
+        model = str(descriptor.get("model") or "").strip()
+        base_url = self._native_ollama_base_url(str(descriptor.get("base_url") or ""))
+        if not model or not base_url:
+            self.store.add_event(
+                task_id,
+                "ollama_cache_clear_failed",
+                {"message": "Local model descriptor is incomplete"},
+            )
+            return
+        if self._other_task_uses_local_model(task_id=task_id, descriptor=descriptor):
+            self.store.add_event(
+                task_id,
+                "ollama_cache_clear_skipped",
+                {
+                    "message": "The same local model is still used by another active task",
+                    "model": model,
+                },
+            )
+            return
+
+        self.store.add_event(
+            task_id,
+            "ollama_cache_clear_requested",
+            {"message": "Requesting Ollama runner unload", "model": model},
+        )
+        payload = json.dumps(
+            {
+                "model": model,
+                "prompt": "",
+                "stream": False,
+                "keep_alive": 0,
+            }
+        ).encode("utf-8")
+        request = Request(
+            f"{base_url}/api/generate",
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urlopen(request, timeout=12) as response:  # nosec B310: descriptor is server-built
+                response.read()
+            self.store.add_event(
+                task_id,
+                "ollama_cache_cleared",
+                {
+                    "message": "Ollama runner unload request completed",
+                    "model": model,
+                },
+            )
+        except (HTTPError, URLError, OSError) as exc:
+            self.store.add_event(
+                task_id,
+                "ollama_cache_clear_failed",
+                {
+                    "message": f"Ollama runner unload failed: {type(exc).__name__}",
+                    "model": model,
+                },
+            )
+
     def _monitor(self, task_id: str, process: subprocess.Popen[Any]) -> None:
         started = time.monotonic()
         try:
@@ -179,5 +289,38 @@ class TaskManager:
                 self._processes.pop(task_id, None)
 
     def cancel(self, task_id: str) -> dict[str, Any]:
-        return self.store.request_cancel(task_id)
+        task = self.store.request_cancel(task_id)
+        descriptor = self._llm_descriptor(task)
+        with self._lock:
+            process = self._processes.get(str(task_id))
+
+        if process is not None and process.poll() is None:
+            self.store.add_event(
+                task_id,
+                "worker_termination_requested",
+                {"message": "Terminating the task process tree", "worker_pid": process.pid},
+            )
+            self._terminate_tree(process)
+
+        current = self.store.get(task_id)
+        if current.get("status") not in TERMINAL_STATUSES:
+            self.store.update(
+                task_id,
+                status="cancelled",
+                finished_at=utc_now(),
+                progress=1,
+                message="任务已取消",
+                worker_pid=None,
+            )
+            self.store.add_event(
+                task_id,
+                "cancelled",
+                {"message": "任务进程已终止"},
+            )
+
+        # Closing the worker process aborts the in-flight HTTP request. The
+        # keep_alive=0 request then unloads Ollama's runner and KV cache without
+        # deleting the model files. API-mode tasks never call this branch.
+        self._clear_local_model_cache(task_id=task_id, descriptor=descriptor)
+        return self.store.get(task_id)
 

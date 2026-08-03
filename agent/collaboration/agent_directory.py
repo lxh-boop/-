@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+from .completion import compile_completion_contract, validate_completion_report
 from .models import (
     AgentCapabilityCard,
     GraphAgentTask,
@@ -20,13 +21,18 @@ from .worker_contracts import (
 
 
 COORDINATOR = "COORDINATOR"
-EVIDENCE_RETRIEVER = "EVIDENCE_RETRIEVER"
+EVIDENCE_COLLECTOR = "EVIDENCE_COLLECTOR"
+EVIDENCE_RETRIEVER = EVIDENCE_COLLECTOR  # compatibility alias
 PORTFOLIO_ANALYST = "PORTFOLIO_ANALYST"
-GRAPH_IMPACT_ANALYST = "GRAPH_IMPACT_ANALYST"
+GRAPH_RELATION_RETRIEVER = "GRAPH_RELATION_RETRIEVER"
+GRAPH_IMPACT_ANALYST = GRAPH_RELATION_RETRIEVER  # compatibility alias
 RISK_ANALYST = "RISK_ANALYST"
 STRATEGY_GUARD = "STRATEGY_GUARD"
 REPORT_WRITER = "REPORT_WRITER"
 SYSTEM_DIAGNOSTIC = "SYSTEM_DIAGNOSTIC"
+DATABASE_WRITER = "DATABASE_WRITER"
+GRAPH_CONTEXT_MANAGER = DATABASE_WRITER  # compatibility alias
+ENTITY_ANALYST = "ENTITY_ANALYST"
 
 W01 = "W01"
 W02 = "W02"
@@ -35,6 +41,8 @@ W04 = "W04"
 W05 = "W05"
 W06 = "W06"
 W07 = "W07"
+W08 = "W08"
+W09 = "W09"
 
 
 # Information-slot semantics used by goal-constrained forward planning.
@@ -45,45 +53,13 @@ W07 = "W07"
 # tasks that contribute to still-unmet GoalContract slots or unlock a necessary
 # downstream capability.
 _FORWARD_TASK_SEMANTICS: dict[tuple[str, str], dict[str, Any]] = {
-    (W01, "retrieve_evidence"): {
-        "consumes_information_slots": ["authoritative_financial_entities", "research_question"],
-        "produces_information_slots": ["entity_external_evidence", "evidence_source_refs"],
+    (W01, "collect_external_evidence"): {
+        "consumes_information_slots": ["authoritative_financial_entities", "collection_goal"],
+        "produces_information_slots": ["entity_external_evidence", "evidence_source_records"],
         "required_context_slots": ["authoritative_financial_entities"],
-        "coverage_semantics": {"scope": "focus_entities", "partial_results_allowed": True},
+        "coverage_semantics": {"scope": "entity_ref_set", "minimum_entities": 1, "partial_results_allowed": True},
         "freshness_semantics": {"policy": "respect_requested_time_range_or_latest"},
-        "authority_level": "external_evidence_with_source_refs",
-    },
-    (W01, "analyze_entity_evidence"): {
-        "consumes_information_slots": ["authoritative_financial_entities", "research_question"],
-        "produces_information_slots": ["entity_evidence_analysis", "evidence_uncertainty"],
-        "required_context_slots": ["authoritative_financial_entities"],
-        "coverage_semantics": {"scope": "focus_entities", "claims_require_evidence_refs": True},
-        "freshness_semantics": {"policy": "respect_requested_time_range_or_latest"},
-        "authority_level": "evidence_grounded_analysis",
-    },
-    (W01, "compare_entity_evidence"): {
-        "consumes_information_slots": ["multiple_authoritative_financial_entities", "research_question"],
-        "produces_information_slots": ["comparative_entity_evidence", "comparison_evidence_refs"],
-        "required_context_slots": ["multiple_authoritative_financial_entities"],
-        "coverage_semantics": {"scope": "all_comparison_entities", "minimum_entities": 2},
-        "freshness_semantics": {"policy": "same_requested_time_window"},
-        "authority_level": "external_evidence_with_source_refs",
-    },
-    (W01, "ingest_evidence"): {
-        "consumes_information_slots": ["authoritative_financial_entities", "research_question"],
-        "produces_information_slots": ["entity_external_evidence", "derived_evidence_graph_state"],
-        "required_context_slots": ["authoritative_financial_entities"],
-        "coverage_semantics": {"scope": "focus_entities", "write_scope": "derived_evidence_only"},
-        "freshness_semantics": {"policy": "refresh_requested_range"},
-        "authority_level": "derived_evidence_graph",
-    },
-    (W01, "resolve_context"): {
-        "consumes_information_slots": ["partial_evidence_context", "research_question"],
-        "produces_information_slots": ["resolved_evidence_context", "entity_external_evidence"],
-        "required_context_slots": ["authoritative_financial_entities"],
-        "coverage_semantics": {"scope": "missing_evidence_context", "may_return_need_context": True},
-        "freshness_semantics": {"policy": "preserve_requested_as_of_time"},
-        "authority_level": "evidence_context_resolution",
+        "authority_level": "external_evidence_with_source_records",
     },
     (W02, "query_stock_prediction"): {
         "consumes_information_slots": ["authoritative_security_entities"],
@@ -133,38 +109,6 @@ _FORWARD_TASK_SEMANTICS: dict[tuple[str, str], dict[str, Any]] = {
         "freshness_semantics": {"policy": "requested_as_of_time_or_latest_snapshot"},
         "authority_level": "portfolio_repository",
     },
-    (W02, "load_portfolio_snapshot"): {
-        "consumes_information_slots": ["user_identity"],
-        "produces_information_slots": ["current_portfolio_state", "portfolio_snapshot_ref", "authoritative_holding_entities"],
-        "required_context_slots": ["user_identity"],
-        "coverage_semantics": {"scope": "portfolio_snapshot"},
-        "freshness_semantics": {"policy": "requested_as_of_time_or_latest_snapshot"},
-        "authority_level": "portfolio_repository",
-    },
-    (W02, "analyze_portfolio"): {
-        "consumes_information_slots": ["user_identity"],
-        "produces_information_slots": ["current_portfolio_state", "portfolio_structure_facts", "authoritative_holding_entities"],
-        "required_context_slots": ["user_identity"],
-        "coverage_semantics": {"scope": "all_active_positions", "risk_conclusions_excluded": True},
-        "freshness_semantics": {"policy": "requested_as_of_time_or_latest_snapshot"},
-        "authority_level": "portfolio_repository",
-    },
-    (W02, "analyze_portfolio_fit"): {
-        "consumes_information_slots": ["user_identity"],
-        "produces_information_slots": ["current_portfolio_state", "portfolio_fit_state_baseline"],
-        "required_context_slots": ["user_identity"],
-        "coverage_semantics": {"scope": "all_active_positions", "fit_conclusion_excluded": True},
-        "freshness_semantics": {"policy": "requested_as_of_time_or_latest_snapshot"},
-        "authority_level": "portfolio_repository",
-    },
-    (W02, "compare_portfolios"): {
-        "consumes_information_slots": ["user_identity", "portfolio_references"],
-        "produces_information_slots": ["portfolio_comparison_state_facts"],
-        "required_context_slots": ["user_identity", "portfolio_references"],
-        "coverage_semantics": {"scope": "all_resolved_portfolios", "risk_comparison_excluded": True},
-        "freshness_semantics": {"policy": "aligned_snapshot_times_when_available"},
-        "authority_level": "portfolio_repository",
-    },
     (W02, "query_account_state"): {
         "consumes_information_slots": ["user_identity"],
         "produces_information_slots": ["account_financial_state"],
@@ -181,45 +125,45 @@ _FORWARD_TASK_SEMANTICS: dict[tuple[str, str], dict[str, Any]] = {
         "freshness_semantics": {"policy": "latest_confirmed_profile"},
         "authority_level": "user_profile_repository",
     },
-    (W02, "resolve_context"): {
-        "consumes_information_slots": ["user_identity", "partial_portfolio_context"],
-        "produces_information_slots": ["current_portfolio_state", "resolved_portfolio_context"],
-        "required_context_slots": ["user_identity"],
-        "coverage_semantics": {"scope": "missing_portfolio_context", "may_return_need_context": True},
-        "freshness_semantics": {"policy": "preserve_requested_as_of_time"},
-        "authority_level": "portfolio_repository",
-    },
-    (W03, "analyze_graph_impact"): {
-        "consumes_information_slots": ["entity_evidence_analysis", "current_portfolio_state"],
-        "produces_information_slots": ["portfolio_impact_analysis", "impact_relation_paths"],
+    (W08, "write_portfolio_graph_context"): {
+        "consumes_information_slots": ["current_portfolio_state"],
+        "produces_information_slots": ["portfolio_graph_context", "portfolio_snapshot_ref"],
         "required_context_slots": [],
-        "coverage_semantics": {"scope": "evidence_to_portfolio_relations", "claims_require_graph_paths": True},
-        "freshness_semantics": {"policy": "inherit_upstream_as_of_time"},
-        "authority_level": "financial_graph_derived_analysis",
+        "coverage_semantics": {"scope": "provided_portfolio_state", "write_scope": "database"},
+        "freshness_semantics": {"policy": "inherit_portfolio_as_of_time"},
+        "authority_level": "database_write_result",
     },
-    (W03, "map_evidence_to_holdings"): {
-        "consumes_information_slots": ["entity_external_evidence", "current_portfolio_state"],
-        "produces_information_slots": ["holding_evidence_mapping", "portfolio_impact_analysis"],
+    (W08, "write_evidence_graph_context"): {
+        "consumes_information_slots": ["entity_external_evidence"],
+        "produces_information_slots": ["evidence_graph_context", "evidence_graph_refs"],
         "required_context_slots": [],
-        "coverage_semantics": {"scope": "current_holdings", "report_unmapped_evidence": True},
-        "freshness_semantics": {"policy": "inherit_upstream_as_of_time"},
-        "authority_level": "financial_graph_derived_analysis",
+        "coverage_semantics": {"scope": "provided_evidence_collection", "write_scope": "database"},
+        "freshness_semantics": {"policy": "inherit_evidence_time_range"},
+        "authority_level": "database_write_result",
     },
-    (W03, "trace_financial_relation"): {
-        "consumes_information_slots": ["authoritative_financial_entities"],
-        "produces_information_slots": ["financial_relation_paths", "portfolio_impact_analysis"],
-        "required_context_slots": ["authoritative_financial_entities"],
-        "coverage_semantics": {"scope": "resolved_graph_paths"},
-        "freshness_semantics": {"policy": "graph_current_state"},
-        "authority_level": "financial_graph",
-    },
-    (W03, "resolve_context"): {
-        "consumes_information_slots": ["partial_impact_context"],
-        "produces_information_slots": ["resolved_impact_context", "portfolio_impact_analysis"],
+    (W03, "retrieve_financial_relations"): {
+        "consumes_information_slots": ["authoritative_graph_refs", "optional_source_graph_context", "optional_target_graph_context"],
+        "produces_information_slots": ["financial_relation_paths", "related_graph_objects"],
         "required_context_slots": [],
-        "coverage_semantics": {"scope": "missing_impact_context", "may_return_need_context": True},
+        "coverage_semantics": {"scope": "declared_source_and_target_graph_contexts", "interpretation_performed": False},
         "freshness_semantics": {"policy": "inherit_upstream_as_of_time"},
-        "authority_level": "financial_graph_derived_analysis",
+        "authority_level": "financial_graph_relation_retrieval",
+    },
+    (W09, "analyze_financial_entities"): {
+        "consumes_information_slots": ["entity_external_evidence", "optional_entity_model_signals", "optional_financial_relation_paths"],
+        "produces_information_slots": ["entity_analysis", "entity_analysis_uncertainty"],
+        "required_context_slots": [],
+        "coverage_semantics": {"scope": "provided_entity_set", "claims_require_upstream_support": True},
+        "freshness_semantics": {"policy": "inherit_upstream_time_range"},
+        "authority_level": "specialist_entity_analysis",
+    },
+    (W09, "compare_financial_entities"): {
+        "consumes_information_slots": ["entity_external_evidence", "optional_entity_model_signals", "optional_financial_relation_paths"],
+        "produces_information_slots": ["comparative_entity_analysis", "entity_analysis_uncertainty"],
+        "required_context_slots": [],
+        "coverage_semantics": {"scope": "provided_entity_set", "minimum_entities": 2, "claims_require_upstream_support": True},
+        "freshness_semantics": {"policy": "inherit_upstream_time_range"},
+        "authority_level": "specialist_entity_analysis",
     },
     (W04, "analyze_risk"): {
         "consumes_information_slots": ["current_portfolio_state"],
@@ -365,24 +309,143 @@ def _entity_research_result_schema() -> dict[str, Any]:
     )
 
 
+def _evidence_collection_result_schema() -> dict[str, Any]:
+    return worker_result_schema(
+        "EvidenceCollectionResult",
+        data_schema=object_schema(
+            {
+                "entity_refs": array_schema(_free_object()),
+                "collection_goal": {"type": "string"},
+                "results": array_schema(_free_object()),
+                "record_count": {"type": "integer"},
+                "source_count": {"type": "integer"},
+                "write_performed": {"type": "boolean"},
+            },
+            required=["entity_refs", "collection_goal", "results", "record_count", "source_count", "write_performed"],
+            additional_properties=True,
+        ),
+        completion_required=True,
+    )
+
+
+def _portfolio_graph_context_result_schema() -> dict[str, Any]:
+    return worker_result_schema(
+        "PortfolioGraphContextResult",
+        data_schema=object_schema(
+            {
+                "portfolio_ref": _free_object(),
+                "holding_refs": array_schema(_free_object()),
+                "unresolved_positions": array_schema(_free_object()),
+                "write_summary": _free_object(),
+                "source_task_ids": _task_ids(),
+            },
+            required=["portfolio_ref", "holding_refs", "unresolved_positions", "write_summary", "source_task_ids"],
+            additional_properties=True,
+        ),
+    )
+
+
+def _evidence_graph_context_result_schema() -> dict[str, Any]:
+    return worker_result_schema(
+        "EvidenceGraphContextResult",
+        data_schema=object_schema(
+            {
+                "evidence_refs": array_schema(_free_object()),
+                "written_record_count": {"type": "integer"},
+                "failed_record_count": {"type": "integer"},
+                "write_results": array_schema(_free_object()),
+                "source_task_ids": _task_ids(),
+            },
+            required=["evidence_refs", "written_record_count", "failed_record_count", "write_results", "source_task_ids"],
+            additional_properties=True,
+        ),
+    )
+
+
+def _graph_relation_result_schema() -> dict[str, Any]:
+    return worker_result_schema(
+        "GraphRelationResult",
+        data_schema=object_schema(
+            {
+                "source_task_ids": array_schema({"type": "string"}),
+                "target_task_ids": array_schema({"type": "string"}),
+                "source_refs": array_schema(_free_object()),
+                "target_refs": array_schema(_free_object()),
+                "relation_paths": array_schema(_free_object()),
+                "relation_summary": _free_object(),
+            },
+            required=["source_task_ids", "target_task_ids", "source_refs", "target_refs", "relation_paths", "relation_summary"],
+            additional_properties=True,
+        ),
+    )
+
+
+def _entity_analysis_result_schema() -> dict[str, Any]:
+    return worker_result_schema(
+        "EntityAnalysisResult",
+        data_schema=object_schema(
+            {
+                "entity_refs": array_schema(_free_object()),
+                "facts": array_schema(_free_object()),
+                "analysis": array_schema(_free_object()),
+                "model_signals": array_schema(_free_object()),
+                "relation_interpretations": array_schema(_free_object()),
+                "uncertainties": array_schema(_free_object()),
+                "conclusion": {"type": "string"},
+                "source_task_ids": array_schema({"type": "string"}),
+            },
+            required=["entity_refs", "facts", "analysis", "uncertainties", "conclusion", "source_task_ids"],
+            additional_properties=True,
+        ),
+        completion_required=True,
+    )
+
+
 def _portfolio_result_schema() -> dict[str, Any]:
     return worker_result_schema(
         "PortfolioAnalysisResult",
         data_schema=object_schema(
             {
-                "portfolio_ref": _free_object(),
-                "holding_refs": array_schema(_free_object()),
                 "entity_catalog": array_schema(_free_object()),
                 "display_positions": array_schema(_free_object()),
+                "account_snapshot": _free_object(),
+                "portfolio_totals": _free_object(),
                 "portfolio_summary": _free_object(),
                 "unresolved_positions": array_schema(_free_object()),
+                "as_of_time": {"type": "string"},
+                "graph_snapshot_materialized": {"type": "boolean"},
+            },
+            required=[
+                "entity_catalog",
+                "display_positions",
+                "account_snapshot",
+                "portfolio_totals",
+                "portfolio_summary",
+                "unresolved_positions",
+                "graph_snapshot_materialized",
+            ],
+            additional_properties=True,
+        ),
+    )
+
+
+def _portfolio_graph_snapshot_result_schema() -> dict[str, Any]:
+    return worker_result_schema(
+        "PortfolioGraphSnapshotResult",
+        data_schema=object_schema(
+            {
+                "portfolio_ref": _free_object(),
+                "holding_refs": array_schema(_free_object()),
+                "unresolved_positions": array_schema(_free_object()),
+                "graph_write_summary": _free_object(),
+                "source_task_ids": _task_ids(),
             },
             required=[
                 "portfolio_ref",
                 "holding_refs",
-                "entity_catalog",
-                "display_positions",
-                "portfolio_summary",
+                "unresolved_positions",
+                "graph_write_summary",
+                "source_task_ids",
             ],
             additional_properties=True,
         ),
@@ -456,6 +519,7 @@ def _final_report_result_schema() -> dict[str, Any]:
             required=["language", "source_task_ids", "content"],
             additional_properties=True,
         ),
+        completion_required=True,
     )
 
 
@@ -487,268 +551,103 @@ class AgentDirectory:
         cards = [
             AgentCapabilityCard(
                 worker_id=W01,
-                agent_id=EVIDENCE_RETRIEVER,
-                role=EVIDENCE_RETRIEVER,
+                agent_id=EVIDENCE_COLLECTOR,
+                role=EVIDENCE_COLLECTOR,
                 description=(
-                    "负责围绕一个或多个已经解析并锁定的金融实体，检索、整理、分析和比较外部证据。"
-                    "W01 处理新闻、公告、研报等证据层信息，输出带来源引用的 EntityResearchResult；"
-                    "它不读取用户账户或持仓，不评估组合风险，也不生成调仓或状态变更方案。"
+                    "负责查找一个或多个已确认金融实体的外部证据，并对证据进行整理、去重、排序和来源核验。"
+                    "实体集合可以只包含一个元素。W01 不分析证据含义，不写数据库。"
                 ),
                 responsibility=(
-                    "把用户的实体研究问题转换为可追踪的证据研究结果，明确证据时间、来源、"
-                    "覆盖范围和不确定性，并保持金融实体 GraphRef 在整个研究过程中一致。"
+                    "根据实体集合、收集目标和时间范围返回可追踪的 EvidenceCollectionResult。"
                 ),
-                accepted_task_types=[
-                    "retrieve_evidence",
-                    "analyze_entity_evidence",
-                    "compare_entity_evidence",
-                    "ingest_evidence",
-                    "resolve_context",
-                ],
+                accepted_task_types=["collect_external_evidence"],
                 task_contracts=[
                     WorkerTaskContract(
-                        task_type="retrieve_evidence",
+                        task_type="collect_external_evidence",
                         description=(
-                            "围绕已确认金融实体检索与用户问题直接相关的外部证据，"
-                            "适用于用户要求查看新闻、公告、研报、事件或证据来源的场景。"
+                            "查找一个或多个权威金融实体的新闻、公告、研报及其他外部证据，"
+                            "返回按实体归属组织的证据集合。"
                         ),
                         input_schema=object_schema(
                             {
-                                "focus_ref_ids": _ref_ids(),
-                                "research_question": string_schema(min_length=1),
+                                "entity_ref_ids": _ref_ids(),
+                                "collection_goal": string_schema(min_length=1),
                                 "time_range": _free_object(),
+                                "source_scope": array_schema({"type": "string"}),
+                                "top_k": {"type": "integer"},
                             },
-                            required=["focus_ref_ids", "research_question"],
+                            required=["entity_ref_ids", "collection_goal"],
                         ),
-                        output_schema=_entity_research_result_schema(),
-                        output_type="EntityResearchResult",
-                        authoritative_arg_bindings={"focus_ref_ids": "focus_ref_ids"},
+                        output_schema=_evidence_collection_result_schema(),
+                        output_type="EvidenceCollectionResult",
+                        authoritative_arg_bindings={"entity_ref_ids": "focus_ref_ids"},
                         selection_requirements=[
-                            "用户目标必须涉及已解析金融实体的外部证据、新闻、公告或研报。",
-                            "只需要本系统内部模型、账户、持仓或策略事实时不得选择。",
+                            "用户目标需要查找一个或多个已解析金融实体的外部证据。",
+                            "实体分析、组合风险、关系解释或方案生成不得由 W01 承担。",
                         ],
                         user_goal_examples=[
-                            "查询这只股票最近有哪些重要公告",
-                            "找出影响该公司的最新证据并给出来源",
+                            "查找贵州茅台最近的公告和新闻",
+                            "收集600519和000858同期的外部证据",
+                            "分析600519时先收集可用外部证据",
                         ],
                         negative_goal_examples=[
-                            "查看我的当前持仓",
-                            "分析我的组合风险",
+                            "解释这些新闻对公司的意义",
+                            "这些新闻会怎样影响我的持仓",
+                            "给我一个调仓方案",
                         ],
                         completion_criteria=[
-                            "返回与研究问题相关的结构化结果和 evidence_refs。",
-                            "明确没有检索到证据或证据不足的情况，不得自行补造。",
+                            "按实体返回证据记录、来源、时间范围和明确限制。",
+                            "未检索到证据时返回业务结果为空，不得补造。",
+                            "不得写入 Neo4j 或其他数据库。",
                         ],
+                        completion_report_required=True,
                         planning_notes=[
-                            "只使用任务中由运行时绑定的权威 focus_ref_ids。",
-                            "该任务只产出证据研究结果，不直接形成组合或策略结论。",
+                            "单实体与多实体使用同一个能力；单实体只是 entity_ref_ids 只有一个元素。",
+                            "W01 内部工具不会暴露给 MainAgent。",
                         ],
                         allowed_request_modes=["analysis", "proposal"],
-                        side_effect_policy={"kind": "read_and_derived_evidence", "commits_state": False},
+                        side_effect_policy={"kind": "read_only", "commits_state": False},
                         private_tool_ids=[
-                            "graph.evidence.analyze_entities",
-                            "graph.evidence.retrieve",
+                            "evidence.search_news",
+                            "evidence.search_rag",
+                            "evidence.finalize_collection",
                         ],
-                    ),
-                    WorkerTaskContract(
-                        task_type="analyze_entity_evidence",
-                        description=(
-                            "对已检索或可读取的实体证据进行归纳、冲突识别和结论提炼，"
-                            "适用于用户询问某个事件、公告或新闻对实体本身意味着什么。"
-                        ),
-                        input_schema=object_schema(
-                            {
-                                "focus_ref_ids": _ref_ids(),
-                                "research_question": string_schema(min_length=1),
-                                "time_range": _free_object(),
-                            },
-                            required=["focus_ref_ids", "research_question"],
-                        ),
-                        output_schema=_entity_research_result_schema(),
-                        output_type="EntityResearchResult",
-                        authoritative_arg_bindings={"focus_ref_ids": "focus_ref_ids"},
-                        selection_requirements=[
-                            "用户要求解释、归纳或判断实体证据本身时选择。",
-                            "用户要求组合影响时应由其他 Worker 消费本任务输出，而不是由 W01直接判断组合。",
-                        ],
-                        user_goal_examples=[
-                            "分析这些公告对公司的主要影响",
-                            "总结该股票近期证据中的一致结论和冲突点",
-                        ],
-                        negative_goal_examples=[
-                            "这些新闻会怎样影响我的持仓组合",
-                            "给我生成调仓方案",
-                        ],
-                        completion_criteria=[
-                            "结论可追溯到 evidence_refs。",
-                            "区分事实、证据解释和不确定性。",
-                        ],
-                        planning_notes=[
-                            "只分析实体层证据；组合映射应交给能够输出 ImpactAnalysisResult 的能力。",
-                        ],
-                        allowed_request_modes=["analysis", "proposal"],
-                        side_effect_policy={"kind": "read_and_derived_evidence", "commits_state": False},
-                        private_tool_ids=[
-                            "graph.evidence.analyze_entities",
-                            "graph.evidence.retrieve",
-                        ],
-                    ),
-                    WorkerTaskContract(
-                        task_type="compare_entity_evidence",
-                        description=(
-                            "比较两个或多个已解析金融实体的证据、事件和研究结论，"
-                            "输出可追踪的差异与共同点，不延伸到用户组合风险或交易建议。"
-                        ),
-                        input_schema=object_schema(
-                            {
-                                "focus_ref_ids": _ref_ids(min_items=2),
-                                "research_question": string_schema(min_length=1),
-                                "time_range": _free_object(),
-                                "comparison_mode": {"type": "boolean", "default": True},
-                            },
-                            required=["focus_ref_ids", "research_question"],
-                        ),
-                        default_args={"comparison_mode": True},
-                        output_schema=_entity_research_result_schema(),
-                        output_type="EntityResearchResult",
-                        authoritative_arg_bindings={"focus_ref_ids": "focus_ref_ids"},
-                        selection_requirements=[
-                            "至少存在两个已解析实体，并且用户明确要求比较证据或事件。",
-                        ],
-                        user_goal_examples=[
-                            "比较贵州茅台和五粮液最近公告的差异",
-                            "对比两只股票近期新闻证据",
-                        ],
-                        negative_goal_examples=[
-                            "比较我两个组合的风险",
-                        ],
-                        completion_criteria=[
-                            "分别保留各实体证据来源，并给出共同点与差异。",
-                        ],
-                        planning_notes=[
-                            "比较对象来自权威 GraphRef，不能由 MainAgent自行拼写代码。",
-                        ],
-                        allowed_request_modes=["analysis", "proposal"],
-                        side_effect_policy={"kind": "read_and_derived_evidence", "commits_state": False},
-                        private_tool_ids=[
-                            "graph.evidence.analyze_entities",
-                            "graph.evidence.retrieve",
-                        ],
-                    ),
-                    WorkerTaskContract(
-                        task_type="ingest_evidence",
-                        description=(
-                            "把允许进入证据层的外部材料解析并写入派生证据图，"
-                            "用于用户明确要求更新、导入或刷新证据数据的场景。"
-                        ),
-                        input_schema=object_schema(
-                            {
-                                "focus_ref_ids": _ref_ids(),
-                                "research_question": string_schema(min_length=1),
-                                "time_range": _free_object(),
-                            },
-                            required=["focus_ref_ids", "research_question"],
-                        ),
-                        output_schema=_entity_research_result_schema(),
-                        output_type="EntityResearchResult",
-                        authoritative_arg_bindings={"focus_ref_ids": "focus_ref_ids"},
-                        selection_requirements=[
-                            "只有用户目标明确要求导入、刷新或更新证据层时选择。",
-                            "普通查询和分析优先选择 retrieve_evidence 或 analyze_entity_evidence。",
-                        ],
-                        user_goal_examples=[
-                            "刷新这只股票最近五天的公告证据",
-                        ],
-                        negative_goal_examples=[
-                            "只查看已有新闻",
-                        ],
-                        completion_criteria=[
-                            "返回本次写入或刷新后的可追踪证据结果。",
-                        ],
-                        planning_notes=[
-                            "只允许派生证据图写入，不允许修改账户、持仓或策略状态。",
-                        ],
-                        allowed_request_modes=["analysis", "proposal"],
-                        side_effect_policy={
-                            "kind": "derived_evidence_graph_upsert_only",
-                            "commits_business_state": False,
-                        },
-                        private_tool_ids=[
-                            "graph.evidence.analyze_entities",
-                            "graph.evidence.retrieve",
-                        ],
-                    ),
-                    WorkerTaskContract(
-                        task_type="resolve_context",
-                        description=(
-                            "围绕已解析金融实体补齐研究问题所需的证据上下文；"
-                            "无法补齐时返回明确的缺失上下文，而不是猜测。"
-                        ),
-                        input_schema=object_schema(
-                            {
-                                "focus_ref_ids": _ref_ids(),
-                                "research_question": string_schema(min_length=1),
-                                "time_range": _free_object(),
-                            },
-                            required=["focus_ref_ids", "research_question"],
-                        ),
-                        output_schema=_entity_research_result_schema(),
-                        output_type="EntityResearchResult",
-                        authoritative_arg_bindings={"focus_ref_ids": "focus_ref_ids"},
-                        selection_requirements=[
-                            "研究目标已经明确，但完成研究仍缺少证据上下文时选择。",
-                        ],
-                        user_goal_examples=[
-                            "补齐上一轮股票研究缺少的公告上下文",
-                        ],
-                        negative_goal_examples=[
-                            "补齐用户账户ID",
-                        ],
-                        completion_criteria=[
-                            "返回可用研究结果或明确的 need_context。",
-                        ],
-                        planning_notes=[
-                            "该能力只处理证据研究上下文，不处理用户参数和组合状态。",
-                        ],
-                        allowed_request_modes=["analysis", "proposal"],
-                        side_effect_policy={"kind": "read_and_derived_evidence", "commits_state": False},
-                        private_tool_ids=[
-                            "graph.evidence.analyze_entities",
-                            "graph.evidence.retrieve",
-                        ],
-                    ),
+                    )
                 ],
                 input_schema=object_schema(
                     {
-                        "focus_ref_ids": _ref_ids(),
-                        "research_question": string_schema(min_length=1),
+                        "entity_ref_ids": _ref_ids(),
+                        "collection_goal": string_schema(min_length=1),
                         "time_range": _free_object(),
-                        "comparison_mode": {"type": "boolean"},
+                        "source_scope": array_schema({"type": "string"}),
+                        "top_k": {"type": "integer"},
                     },
-                    required=["focus_ref_ids", "research_question"],
+                    required=["entity_ref_ids", "collection_goal"],
                 ),
-                authoritative_arg_bindings={"focus_ref_ids": "focus_ref_ids"},
-                output_schema=_entity_research_result_schema(),
-                output_types=["EntityResearchResult"],
+                authoritative_arg_bindings={"entity_ref_ids": "focus_ref_ids"},
+                output_schema=_evidence_collection_result_schema(),
+                output_types=["EvidenceCollectionResult"],
                 selection_requirements=[
-                    "只处理已确认金融实体的外部证据研究。",
-                    "MainAgent 应依据具体 task_contract 区分检索、分析、比较、导入和上下文补齐。",
+                    "只用于收集已确认金融实体集合的外部证据。",
                 ],
                 non_responsibilities=[
-                    "读取或解释用户组合状态",
-                    "评估用户组合层面的风险",
-                    "生成状态调整 Proposal",
-                    "执行任何业务状态变更",
+                    "解释或分析证据含义",
+                    "查找金融图关系",
+                    "读取用户账户或持仓",
+                    "评估组合风险",
+                    "生成 Proposal",
+                    "写入数据库",
                 ],
-                side_effects=["derived_evidence_graph_upsert_only"],
+                side_effects=[],
                 private_tool_ids=[
-                    "graph.evidence.analyze_entities",
-                    "graph.evidence.retrieve",
+                    "evidence.search_news",
+                    "evidence.search_rag",
+                    "evidence.finalize_collection",
                 ],
                 private_worker_prompt=(
-                    "你负责金融实体证据研究。严格依据 task_type、权威 GraphRef 和研究问题工作；"
-                    "不得读取用户组合、生成 Proposal 或执行状态变更。"
-                    "最终必须返回 EntityResearchResult WorkerResult。"
+                    "你是外部证据收集 Worker。只负责收集、整理、去重、排序和核验来源；"
+                    "不得解释证据含义、生成风险或方案、写入数据库。"
+                    "最终必须返回 EvidenceCollectionResult。"
                 ),
             ),
             AgentCapabilityCard(
@@ -758,11 +657,12 @@ class AgentDirectory:
                 description=(
                     "负责读取并标准化本系统已经存在的权威结构化事实，包括证券预测、全市场排名、"
                     "模型指标、回测摘要、当前策略、用户画像、账户资金和组合持仓。"
-                    "W02 是内部事实查询 Worker，不检索外部新闻，不形成风险结论，不生成买卖建议或 Proposal。"
+                    "W02 是纯内部事实查询 Worker，不检索外部新闻，不写入 Neo4j，不形成风险结论，"
+                    "不生成买卖建议或 Proposal。"
                 ),
                 responsibility=(
-                    "根据每个 task_type 调用对应只读内部能力，把结果转换为稳定强类型 WorkerResult，"
-                    "并维护用户、证券、账户和组合实体在跨 Worker 传递中的一致性。"
+                    "根据每个 task_type 调用对应只读内部能力，把结果转换为稳定强类型 WorkerResult。"
+                    "证券身份只通过已有 Neo4j 身份表进行只读解析；组合图快照由 W08 单独物化。"
                 ),
                 accepted_task_types=[
                     "query_stock_prediction",
@@ -771,13 +671,8 @@ class AgentDirectory:
                     "query_backtest_summary",
                     "query_selected_strategy",
                     "query_portfolio_state",
-                    "load_portfolio_snapshot",
-                    "analyze_portfolio",
-                    "analyze_portfolio_fit",
-                    "compare_portfolios",
                     "query_account_state",
                     "query_user_profile",
-                    "resolve_context",
                 ],
                 task_contracts=[
                     WorkerTaskContract(
@@ -963,84 +858,53 @@ class AgentDirectory:
                         side_effect_policy={"kind": "read_only", "commits_state": False},
                         private_tool_ids=["internal.strategy.get_selected"],
                     ),
-                    *[
-                        WorkerTaskContract(
-                            task_type=task_type,
-                            description=spec["description"],
-                            input_schema=object_schema(
-                                {
-                                    "user_id": string_schema(min_length=1),
-                                    "as_of_time": {"type": "string"},
-                                    "portfolio_ref_ids": _ref_ids(min_items=0),
-                                },
-                                required=["user_id"],
-                            ),
-                            output_schema=_portfolio_result_schema(),
-                            output_type="PortfolioAnalysisResult",
-                            authoritative_arg_bindings={
-                                "user_id": "user_id",
-                                "as_of_time": "as_of_time",
+                    WorkerTaskContract(
+                        task_type="query_portfolio_state",
+                        description=(
+                            "只读取当前用户账户对应的权威组合和持仓事实，返回账户摘要、持仓明细、"
+                            "已存在的证券实体引用和未解析项。该任务不创建或更新 portfolio_snapshot，"
+                            "不写入 Neo4j，也不形成风险或调整结论。"
+                        ),
+                        input_schema=object_schema(
+                            {
+                                "user_id": string_schema(min_length=1),
+                                "as_of_time": {"type": "string"},
                             },
-                            selection_requirements=spec["selection_requirements"],
-                            user_goal_examples=spec["user_goal_examples"],
-                            negative_goal_examples=spec["negative_goal_examples"],
-                            completion_criteria=[
-                                "返回权威 portfolio_ref、holding_refs、entity_catalog、display_positions 和 portfolio_summary。",
-                                "证券代码和名称必须来自统一实体链路。",
-                            ],
-                            planning_notes=spec["planning_notes"],
-                            allowed_request_modes=["analysis", "proposal"],
-                            side_effect_policy={
-                                "kind": "read_and_derived_portfolio_snapshot",
-                                "commits_business_state": False,
-                            },
-                            private_tool_ids=["internal.portfolio.get_state"],
-                        )
-                        for task_type, spec in {
-                            "query_portfolio_state": {
-                                "description": "查询当前用户账户对应的最新权威组合和持仓状态，适用于查看当前持仓、仓位和组合市值。",
-                                "selection_requirements": ["用户明确需要当前组合或持仓事实时选择。"],
-                                "user_goal_examples": ["查看我当前的模拟盘持仓"],
-                                "negative_goal_examples": ["分析一只不在持仓中的股票"],
-                                "planning_notes": ["只返回状态事实，不形成风险或调整建议。"],
-                            },
-                            "load_portfolio_snapshot": {
-                                "description": "按当前运行上下文或指定时间读取权威组合快照，供其他专业 Worker 使用。",
-                                "selection_requirements": ["后续能力需要一个明确的组合状态基线时选择。"],
-                                "user_goal_examples": ["读取用于后续分析的当前组合快照"],
-                                "negative_goal_examples": ["只查询账户现金"],
-                                "planning_notes": ["该任务是状态基线生产者，不承担分析结论。"],
-                            },
-                            "analyze_portfolio": {
-                                "description": "读取并结构化展示当前组合构成、仓位和持仓事实；名称保留为历史兼容，但不生成风险结论。",
-                                "selection_requirements": ["用户需要组合结构事实，而不是风险判断时选择。"],
-                                "user_goal_examples": ["分析一下我当前组合都持有哪些股票"],
-                                "negative_goal_examples": ["我的组合风险高不高"],
-                                "planning_notes": ["需要风险结论时应由能输出 PortfolioRiskResult 的能力消费本结果。"],
-                            },
-                            "analyze_portfolio_fit": {
-                                "description": "读取组合事实作为适配性分析的状态输入；W02本身不判断适配性，结果仍是 PortfolioAnalysisResult。",
-                                "selection_requirements": ["后续风险或策略能力需要组合适配状态基线时选择。"],
-                                "user_goal_examples": ["读取我的持仓用于风险画像适配分析"],
-                                "negative_goal_examples": ["直接判断我的组合是否适合我"],
-                                "planning_notes": ["适配结论必须由专业风险或策略能力形成。"],
-                            },
-                            "compare_portfolios": {
-                                "description": "读取用于组合比较的权威组合快照；W02只提供事实，不自行给出风险优劣结论。",
-                                "selection_requirements": ["用户目标需要比较组合状态且上下文中存在可解析组合引用时选择。"],
-                                "user_goal_examples": ["读取两个组合的持仓用于比较"],
-                                "negative_goal_examples": ["比较两只股票的新闻"],
-                                "planning_notes": ["比较结论由消费这些状态结果的后续能力负责。"],
-                            },
-                            "resolve_context": {
-                                "description": "补齐与当前用户组合相关的权威状态上下文；无法找到时返回上下文缺失。",
-                                "selection_requirements": ["后续任务明确需要组合状态但当前上下文不足时选择。"],
-                                "user_goal_examples": ["恢复上一轮分析所需的组合上下文"],
-                                "negative_goal_examples": ["补齐某只股票的新闻证据"],
-                                "planning_notes": ["只处理组合状态上下文，不替用户猜测缺失参数。"],
-                            },
-                        }.items()
-                    ],
+                            required=["user_id"],
+                        ),
+                        output_schema=_portfolio_result_schema(),
+                        output_type="PortfolioAnalysisResult",
+                        authoritative_arg_bindings={
+                            "user_id": "user_id",
+                            "as_of_time": "as_of_time",
+                        },
+                        selection_requirements=[
+                            "用户需要当前组合、持仓、仓位或组合市值事实时选择。",
+                            "后续风险或 Proposal 能力需要权威组合状态输入时可以选择。",
+                            "后续能力明确需要 portfolio_snapshot GraphRef 或图路径时，还应另行选择 W08。",
+                        ],
+                        user_goal_examples=[
+                            "查看我当前的模拟盘持仓",
+                            "读取当前组合作为风险分析的事实输入",
+                        ],
+                        negative_goal_examples=[
+                            "把当前组合写入金融图并生成 portfolio_ref",
+                            "分析这些新闻如何影响我的持仓图路径",
+                            "直接给出调仓方案",
+                        ],
+                        completion_criteria=[
+                            "返回 entity_catalog、display_positions、account_snapshot、portfolio_totals、portfolio_summary、unresolved_positions 和数据时间。",
+                            "graph_snapshot_materialized 必须为 False。",
+                            "证券身份来自已有统一实体链路；无法解析时明确列入 unresolved_positions。",
+                        ],
+                        planning_notes=[
+                            "这是原子化只读能力；不得把读取组合和派生图写入合并成一个任务。",
+                            "需要组合 GraphRef 时由 W08 消费本结果并物化快照。",
+                        ],
+                        allowed_request_modes=["analysis", "proposal"],
+                        side_effect_policy={"kind": "read_only", "commits_state": False},
+                        private_tool_ids=["internal.portfolio.get_state"],
+                    ),
                     WorkerTaskContract(
                         task_type="query_account_state",
                         description=(
@@ -1105,7 +969,7 @@ class AgentDirectory:
                     "生成或执行调整方案",
                     "修改任何业务状态",
                 ],
-                side_effects=["derived_portfolio_graph_snapshot_only"],
+                side_effects=[],
                 private_tool_ids=[
                     "internal.prediction.get_stock", "internal.ranking.get_latest",
                     "internal.model.get_metrics", "internal.backtest.get_summary",
@@ -1114,171 +978,304 @@ class AgentDirectory:
                 ],
                 private_worker_prompt=(
                     "你是本系统内部权威数据查询 Worker。严格根据 task_type 调用对应只读私有能力，"
-                    "返回任务合同指定的强类型结果。不得检索外部新闻，不得生成风险结论、建议或写操作。"
+                    "返回任务合同指定的强类型结果。不得写入 Neo4j，不得物化组合图快照，"
+                    "不得检索外部新闻，不得生成风险结论、建议或 Proposal。"
+                ),
+            ),
+            AgentCapabilityCard(
+                worker_id=W08,
+                agent_id=DATABASE_WRITER,
+                role=DATABASE_WRITER,
+                description="负责写数据库。",
+                responsibility="执行已注册的非交易性数据库写入任务。",
+                accepted_task_types=[
+                    "write_portfolio_graph_context",
+                    "write_evidence_graph_context",
+                ],
+                task_contracts=[
+                    WorkerTaskContract(
+                        task_type="write_portfolio_graph_context",
+                        description="把权威组合状态写入数据库，生成可供关系查找使用的组合图上下文。",
+                        input_schema=object_schema(
+                            {"user_id": string_schema(min_length=1), "as_of_time": {"type": "string"}},
+                            required=["user_id"],
+                        ),
+                        output_schema=_portfolio_graph_context_result_schema(),
+                        output_type="PortfolioGraphContextResult",
+                        authoritative_arg_bindings={"user_id": "user_id", "as_of_time": "as_of_time"},
+                        upstream_input_bindings={
+                            "portfolio_state": {
+                                "description": "需要写入数据库的权威组合状态。",
+                                "accepted_output_types": ["PortfolioAnalysisResult"],
+                                "required": True,
+                                "min_items": 1,
+                                "max_items": 1,
+                            }
+                        },
+                        selection_requirements=[
+                            "后续任务明确需要组合图上下文或 portfolio_ref 时选择。",
+                            "必须存在一个上游 PortfolioAnalysisResult。",
+                        ],
+                        user_goal_examples=["保存当前组合图上下文，供关系查找使用"],
+                        negative_goal_examples=["只查看当前持仓", "执行模拟盘交易"],
+                        completion_criteria=["返回 portfolio_ref、holding_refs、写入结果和来源任务。"],
+                        planning_notes=["W08 不读取组合，输入必须来自声明的上游结果。"],
+                        allowed_request_modes=["analysis", "proposal"],
+                        side_effect_policy={"kind": "derived_database_write", "trading_state_write": False},
+                        private_tool_ids=["database.write_portfolio_graph_context"],
+                        required_upstream_output_groups=[["PortfolioAnalysisResult"]],
+                    ),
+                    WorkerTaskContract(
+                        task_type="write_evidence_graph_context",
+                        description="把外部证据集合写入数据库，生成可供关系查找使用的证据图上下文。",
+                        input_schema=object_schema({}, required=[], additional_properties=True),
+                        output_schema=_evidence_graph_context_result_schema(),
+                        output_type="EvidenceGraphContextResult",
+                        upstream_input_bindings={
+                            "evidence_collection": {
+                                "description": "需要写入数据库的外部证据集合。",
+                                "accepted_output_types": ["EvidenceCollectionResult"],
+                                "required": True,
+                                "min_items": 1,
+                                "max_items": 1,
+                            }
+                        },
+                        selection_requirements=[
+                            "后续任务明确需要证据 GraphRef 或图关系时选择。",
+                            "必须存在一个上游 EvidenceCollectionResult。",
+                        ],
+                        user_goal_examples=["把已收集的证据写入图数据库，供关系查找使用"],
+                        negative_goal_examples=["只收集新闻", "执行模拟盘交易"],
+                        completion_criteria=["返回 evidence_refs、写入数量、失败数量和来源任务。"],
+                        planning_notes=["W08 不收集或解释证据。"],
+                        allowed_request_modes=["analysis", "proposal"],
+                        side_effect_policy={"kind": "derived_database_write", "trading_state_write": False},
+                        private_tool_ids=["database.write_evidence_graph_context"],
+                        required_upstream_output_groups=[["EvidenceCollectionResult"]],
+                    ),
+                ],
+                input_schema=object_schema({}, required=[], additional_properties=True),
+                output_schema=_portfolio_graph_context_result_schema(),
+                output_types=["PortfolioGraphContextResult", "EvidenceGraphContextResult"],
+                selection_requirements=[
+                    "只在目标需要将非交易性数据写入数据库时选择。",
+                    "MainAgent 必须根据具体 task_contract 声明上游结果。",
+                ],
+                non_responsibilities=[
+                    "读取或分析业务数据",
+                    "生成业务结论或 Proposal",
+                    "执行模拟盘订单、现金或持仓写入",
+                ],
+                side_effects=["derived_database_write"],
+                supports_parallel=True,
+                can_generate_proposal=False,
+                private_tool_ids=[
+                    "database.write_portfolio_graph_context",
+                    "database.write_evidence_graph_context",
+                ],
+                private_worker_prompt=(
+                    "你是数据库写入 Worker。只能执行 task_type 对应的已注册非交易性写入；"
+                    "不得分析数据或执行模拟盘交易。"
                 ),
             ),
             AgentCapabilityCard(
                 worker_id=W03,
-                agent_id=GRAPH_IMPACT_ANALYST,
-                role=GRAPH_IMPACT_ANALYST,
+                agent_id=GRAPH_RELATION_RETRIEVER,
+                role=GRAPH_RELATION_RETRIEVER,
                 description=(
-                    "负责把上游实体研究结果映射到上游组合或持仓状态，分析证据对象、金融实体和持仓之间的"
-                    "可追踪关系路径。W03 只解释已有研究结果怎样关联当前组合，不自行检索证据、读取组合或生成调仓方案。"
+                    "负责从金融图中查找来源对象集合与目标对象集合之间的关系路径。"
+                    "W03 只查找关系，不解释关系意味着什么。"
+                ),
+                responsibility="返回可追踪的 GraphRelationResult。",
+                accepted_task_types=["retrieve_financial_relations"],
+                task_contracts=[
+                    WorkerTaskContract(
+                        task_type="retrieve_financial_relations",
+                        description=(
+                            "在权威金融图对象集合之间查找直接或间接关系路径。"
+                            "来源和目标可以来自当前 GraphRef，也可以来自上游数据库写入结果。"
+                        ),
+                        input_schema=object_schema(
+                            {
+                                "relation_goal": string_schema(min_length=1),
+                                "source_ref_ids": _ref_ids(min_items=1),
+                                "target_ref_ids": _ref_ids(min_items=1),
+                            },
+                            required=["relation_goal"],
+                        ),
+                        output_schema=_graph_relation_result_schema(),
+                        output_type="GraphRelationResult",
+                        upstream_input_bindings={
+                            "source_graph_context": {
+                                "description": "可选的来源图上下文。",
+                                "accepted_output_types": ["EvidenceGraphContextResult", "PortfolioGraphContextResult"],
+                                "required": False,
+                                "min_items": 0,
+                                "max_items": 8,
+                            },
+                            "target_graph_context": {
+                                "description": "可选的目标图上下文。",
+                                "accepted_output_types": ["EvidenceGraphContextResult", "PortfolioGraphContextResult"],
+                                "required": False,
+                                "min_items": 0,
+                                "max_items": 8,
+                            },
+                        },
+                        selection_requirements=[
+                            "用户目标需要知道哪些对象有关、关系路径是什么。",
+                            "来源和目标必须能够由权威 GraphRef 或声明的上游图上下文确定。",
+                            "需要判断影响方向、强度或业务含义时，还应由 W09 消费本结果。",
+                        ],
+                        user_goal_examples=[
+                            "查找600519和000858之间的金融图关系",
+                            "这些新闻和我的哪些持仓存在图关系",
+                            "查找证据到组合持仓的关系路径",
+                        ],
+                        negative_goal_examples=[
+                            "这些新闻对公司的影响是什么",
+                            "给我具体减仓方案",
+                        ],
+                        completion_criteria=[
+                            "输出来源、目标、关系路径和路径摘要。",
+                            "未找到路径时明确返回业务结果为空。",
+                            "不得把关系存在解释为因果影响。",
+                        ],
+                        planning_notes=[
+                            "已有实体 GraphRef 可直接用于关系查找，不强制经过 W08。",
+                            "只有外部证据集合或组合状态尚未形成图上下文时，才需要先选择 W08。",
+                            "W03 只做图关系查找，不做业务解释。",
+                        ],
+                        allowed_request_modes=["analysis", "proposal"],
+                        side_effect_policy={"kind": "read_only", "commits_state": False},
+                    )
+                ],
+                input_schema=object_schema(
+                    {
+                        "relation_goal": string_schema(min_length=1),
+                        "source_ref_ids": _ref_ids(min_items=1),
+                        "target_ref_ids": _ref_ids(min_items=1),
+                    },
+                    required=["relation_goal"],
+                ),
+                output_schema=_graph_relation_result_schema(),
+                output_types=["GraphRelationResult"],
+                selection_requirements=["只用于金融图关系查找。"],
+                non_responsibilities=[
+                    "收集外部证据",
+                    "解释关系的业务含义",
+                    "评估组合风险",
+                    "生成 Proposal",
+                    "写入数据库",
+                ],
+                side_effects=[],
+                private_worker_prompt=(
+                    "你是金融图关系查找 Worker。只返回关系是否存在、路径、涉及对象和证据引用；"
+                    "不得判断利好利空、影响强度、组合风险或建议。"
+                ),
+            ),
+            AgentCapabilityCard(
+                worker_id=W09,
+                agent_id=ENTITY_ANALYST,
+                role=ENTITY_ANALYST,
+                description=(
+                    "负责基于上游证据、模型事实和可选关系结果分析一个或多个金融实体。"
                 ),
                 responsibility=(
-                    "基于明确的 source_analysis 与 target_state，形成 ImpactAnalysisResult，"
-                    "保留关系路径、涉及持仓、影响方向和证据限制。"
+                    "区分事实、分析、模型信号、关系解释和不确定性，输出 EntityAnalysisResult。"
                 ),
-                accepted_task_types=[
-                    "analyze_graph_impact",
-                    "map_evidence_to_holdings",
-                    "trace_financial_relation",
-                    "resolve_context",
-                ],
+                accepted_task_types=["analyze_financial_entities", "compare_financial_entities"],
                 task_contracts=[
                     *[
                         WorkerTaskContract(
                             task_type=task_type,
-                            description=spec["description"],
+                            description=description_text,
                             input_schema=object_schema(
-                                {"analysis_question": string_schema(min_length=1)},
-                                required=["analysis_question"],
+                                {"analysis_goal": string_schema(min_length=1)},
+                                required=["analysis_goal"],
                             ),
-                            output_schema=_impact_result_schema(),
-                            output_type="ImpactAnalysisResult",
+                            output_schema=_entity_analysis_result_schema(),
+                            output_type="EntityAnalysisResult",
                             upstream_input_bindings={
-                                "source_analysis": {
-                                    "description": (
-                                        "已经由证据研究 Worker 形成的实体研究结果，"
-                                        "用于提供影响分析的源事实与证据。"
-                                    ),
-                                    "accepted_output_types": ["EntityResearchResult"],
+                                "evidence": {
+                                    "description": "W01 收集的外部证据集合。",
+                                    "accepted_output_types": ["EvidenceCollectionResult"],
                                     "required": True,
                                     "min_items": 1,
                                     "max_items": 8,
                                 },
-                                "target_state": {
-                                    "description": (
-                                        "已经由内部状态 Worker 形成的当前组合或持仓结果，"
-                                        "用于确定影响分析的目标对象。"
-                                    ),
-                                    "accepted_output_types": ["PortfolioAnalysisResult"],
-                                    "required": True,
-                                    "min_items": 1,
+                                "model_facts": {
+                                    "description": "可选的内部模型或结构化事实。",
+                                    "accepted_output_types": [
+                                        "ModelPredictionResult", "RankingResult", "ModelMetricsResult",
+                                        "BacktestSummaryResult", "SelectedStrategyResult",
+                                    ],
+                                    "required": False,
+                                    "min_items": 0,
+                                    "max_items": 8,
+                                },
+                                "relation_context": {
+                                    "description": "可选的金融图关系查找结果。",
+                                    "accepted_output_types": ["GraphRelationResult"],
+                                    "required": False,
+                                    "min_items": 0,
                                     "max_items": 8,
                                 },
                             },
-                            selection_requirements=spec["selection_requirements"],
-                            user_goal_examples=spec["user_goal_examples"],
-                            negative_goal_examples=spec["negative_goal_examples"],
+                            selection_requirements=selection_requirements,
+                            user_goal_examples=user_examples,
+                            negative_goal_examples=[
+                                "只查找新闻和公告",
+                                "只查找图关系路径",
+                                "分析我的组合风险",
+                                "生成调仓方案",
+                            ],
                             completion_criteria=[
-                                "输出 source_task_ids、target_task_ids、impact_paths 和 impact_summary。",
-                                "每个影响结论能够回溯到上游实体研究和组合状态。",
+                                "所有事实和分析能够回溯到上游结果。",
+                                "关系存在不得直接等同于因果影响。",
+                                "不得生成组合风险或操作建议。",
                             ],
-                            planning_notes=spec["planning_notes"],
+                            completion_report_required=True,
+                            planning_notes=["W09 不自行检索证据或查询数据库。"],
                             allowed_request_modes=["analysis", "proposal"],
-                            side_effect_policy={"kind": "derived_analysis_only", "commits_state": False},
-                            required_upstream_output_groups=[
-                                ["EntityResearchResult"],
-                                ["PortfolioAnalysisResult"],
-                            ],
+                            side_effect_policy={"kind": "read_only", "commits_state": False},
+                            required_upstream_output_groups=[["EvidenceCollectionResult"]],
                         )
-                        for task_type, spec in {
-                            "analyze_graph_impact": {
-                                "description": "分析一个或多个实体研究结果对当前组合或持仓的可追踪影响路径和影响摘要。",
-                                "selection_requirements": [
-                                    "用户明确询问某个金融实体、新闻、公告或事件如何影响当前组合或持仓时选择。",
-                                    "必须同时存在 EntityResearchResult 与 PortfolioAnalysisResult。",
-                                ],
-                                "user_goal_examples": [
-                                    "这家公司最近的公告会影响我哪些持仓",
-                                    "分析这个事件对当前组合的影响路径",
-                                ],
-                                "negative_goal_examples": [
-                                    "分析这只股票本身的公告",
-                                    "查看我当前持仓",
-                                ],
-                                "planning_notes": [
-                                    "先由其他能力生产源证据和目标组合状态，再选择本任务。",
-                                ],
-                            },
-                            "map_evidence_to_holdings": {
-                                "description": "把上游实体证据逐项映射到当前持仓，识别哪些持仓被直接或间接关联。",
-                                "selection_requirements": [
-                                    "用户目标重点是证据与持仓对象的映射，而不是一般性影响解释时选择。",
-                                ],
-                                "user_goal_examples": ["把这些公告映射到我当前持仓"],
-                                "negative_goal_examples": ["查询这些股票的最新排名"],
-                                "planning_notes": [
-                                    "只进行关系映射，不自行补充缺失证券或证据。",
-                                ],
-                            },
-                            "trace_financial_relation": {
-                                "description": "追踪源金融实体、关联关系和目标持仓之间的图路径，用于解释影响链路。",
-                                "selection_requirements": [
-                                    "用户明确要求关系链、传播路径或关联原因时选择。",
-                                ],
-                                "user_goal_examples": ["追踪这条新闻如何关联到我的持仓"],
-                                "negative_goal_examples": ["生成具体减仓方案"],
-                                "planning_notes": [
-                                    "输出关系路径，不把关联关系直接转化为买卖建议。",
-                                ],
-                            },
-                            "resolve_context": {
-                                "description": "补齐影响分析所需的源研究结果和目标组合状态引用；无法补齐时返回上下文缺失。",
-                                "selection_requirements": [
-                                    "影响分析目标明确，但缺少可引用的源分析或目标状态上下文时选择。",
-                                ],
-                                "user_goal_examples": ["恢复上一轮影响分析需要的组合和证据上下文"],
-                                "negative_goal_examples": ["补充用户风险偏好"],
-                                "planning_notes": [
-                                    "该任务不自行调用证据检索或组合查询能力。",
-                                ],
-                            },
-                        }.items()
-                    ],
+                        for task_type, description_text, selection_requirements, user_examples in [
+                            (
+                                "analyze_financial_entities",
+                                "基于上游材料分析一个或多个金融实体本身的状态和证据含义。",
+                                ["用户要求解释或分析金融实体本身时选择。"],
+                                ["分析600519", "分析贵州茅台近期情况"],
+                            ),
+                            (
+                                "compare_financial_entities",
+                                "基于同一范围的上游材料比较多个金融实体。",
+                                ["用户明确要求比较两个或多个金融实体时选择。"],
+                                ["比较贵州茅台和五粮液", "对比600519和000858"],
+                            ),
+                        ]
+                    ]
                 ],
                 input_schema=object_schema(
-                    {"analysis_question": string_schema(min_length=1)},
-                    required=["analysis_question"],
+                    {"analysis_goal": string_schema(min_length=1)},
+                    required=["analysis_goal"],
                 ),
-                output_schema=_impact_result_schema(),
-                output_types=["ImpactAnalysisResult"],
-                required_upstream_output_groups=[
-                    ["EntityResearchResult"],
-                    ["PortfolioAnalysisResult"],
-                ],
-                upstream_input_bindings={
-                    "source_analysis": {
-                        "description": "实体研究或证据分析结果",
-                        "accepted_output_types": ["EntityResearchResult"],
-                        "required": True,
-                        "min_items": 1,
-                        "max_items": 8,
-                    },
-                    "target_state": {
-                        "description": "当前组合状态分析结果",
-                        "accepted_output_types": ["PortfolioAnalysisResult"],
-                        "required": True,
-                        "min_items": 1,
-                        "max_items": 8,
-                    },
-                },
-                selection_requirements=[
-                    "只在用户目标需要把实体证据关联到当前组合或持仓时选择。",
-                    "MainAgent 必须依据具体 task_contract 选择影响分析、持仓映射或关系追踪。",
-                ],
+                output_schema=_entity_analysis_result_schema(),
+                output_types=["EntityAnalysisResult"],
+                required_upstream_output_groups=[["EvidenceCollectionResult"]],
+                selection_requirements=["只用于金融实体层面的分析或比较。"],
                 non_responsibilities=[
-                    "自行检索缺失源证据",
-                    "自行读取缺失组合状态",
-                    "普通实体研究",
-                    "生成状态调整 Proposal",
+                    "自行收集证据",
+                    "自行查询内部数据库",
+                    "查找图关系",
+                    "分析用户组合风险",
+                    "生成 Proposal",
+                    "写入数据库",
                 ],
                 side_effects=[],
                 private_worker_prompt=(
-                    "你负责分析上游实体研究结果到上游组合状态结果的可追踪关系。"
-                    "不得自行补取源数据或目标状态，不得生成调整方案。"
-                    "最终必须返回 ImpactAnalysisResult WorkerResult。"
+                    "你是金融实体分析 Worker。只能消费上游结构化结果，区分事实、分析和不确定性；"
+                    "不得自行检索、查询数据库、分析组合风险或生成方案。"
                 ),
             ),
             AgentCapabilityCard(
@@ -1332,10 +1329,10 @@ class AgentDirectory:
                                 "max_items": 4,
                             },
                             "related_analysis": {
-                                "description": "与风险问题直接相关的实体研究或影响分析。",
+                                "description": "与风险问题直接相关的实体分析或关系查找结果。",
                                 "accepted_output_types": [
-                                    "EntityResearchResult",
-                                    "ImpactAnalysisResult",
+                                    "EntityAnalysisResult",
+                                    "GraphRelationResult",
                                 ],
                                 "required": False,
                                 "min_items": 0,
@@ -1441,8 +1438,8 @@ class AgentDirectory:
                             "related_analysis": {
                                 "description": "需要接受风险约束审查的上游分析结果。",
                                 "accepted_output_types": [
-                                    "EntityResearchResult",
-                                    "ImpactAnalysisResult",
+                                    "EntityAnalysisResult",
+                                    "GraphRelationResult",
                                     "RankingResult",
                                     "SelectedStrategyResult",
                                 ],
@@ -1526,8 +1523,8 @@ class AgentDirectory:
                     "related_analysis": {
                         "description": "与风险问题相关的实体或影响分析结果",
                         "accepted_output_types": [
-                            "EntityResearchResult",
-                            "ImpactAnalysisResult",
+                            "EntityAnalysisResult",
+                            "GraphRelationResult",
                         ],
                         "required": False,
                         "min_items": 0,
@@ -1623,14 +1620,14 @@ class AgentDirectory:
                             },
                             "supporting_analysis": {
                                 "description": (
-                                    "支持调整方向和参数的模型信号、实体研究、影响分析、用户画像、"
+                                    "支持调整方向和参数的模型信号、实体分析、关系结果、用户画像、"
                                     "回测摘要或其他系统权威事实。"
                                 ),
                                 "accepted_output_types": [
                                     "RankingResult",
                                     "ModelPredictionResult",
-                                    "EntityResearchResult",
-                                    "ImpactAnalysisResult",
+                                    "EntityAnalysisResult",
+                                    "GraphRelationResult",
                                     "UserProfileResult",
                                     "AccountStateResult",
                                     "BacktestSummaryResult",
@@ -1919,6 +1916,7 @@ class AgentDirectory:
                             "正文中的实体、数值、风险和方案结论均能回溯到上游结果。",
                             "若上游是 ReviewedProposal，明确方案仍待审批且尚未执行。",
                         ],
+                        completion_report_required=True,
                         planning_notes=[
                             "先完成专业 Worker，再把需要呈现的结果引用到 upstream_results。",
                             "不要为了让回答更完整而增加用户未请求的风险、建议或明细。",
@@ -1959,6 +1957,7 @@ class AgentDirectory:
                         completion_criteria=[
                             "摘要不改变上游结论，并保留关键限制和来源任务。",
                         ],
+                        completion_report_required=True,
                         planning_notes=[
                             "若缺少完成用户目标所需的专业结果，应规划相应专业能力，而不是让 W06补写。",
                         ],
@@ -2393,6 +2392,11 @@ class AgentDirectory:
                     derived.append(from_task_id)
         return derived
 
+    def completion_contract_for_task(self, task: GraphAgentTask) -> dict[str, Any]:
+        card = self.get(task.worker_id or task.assigned_agent)
+        contract = card.task_contract(task.task_type)
+        return compile_completion_contract(task, contract)
+
     def validate_result(self, result: GraphWorkerResult, *, task_type: str = "") -> None:
         card = self.get(result.agent_id)
         if result.output_type not in card.output_types:
@@ -2409,6 +2413,14 @@ class AgentDirectory:
             result.safe_for_coordinator(),
             contract.output_schema if contract is not None else card.output_schema,
         )
+        if contract is not None and contract.completion_report_required:
+            completion_contract = dict(result.metadata.get("completion_contract") or {})
+            if not completion_contract:
+                raise WorkerContractViolation(
+                    "worker_completion_contract_missing",
+                    "$.metadata.completion_contract",
+                )
+            validate_completion_report(result.completion, completion_contract)
 
     def resolve_task_inputs(
         self, task: GraphAgentTask, dependency_results: dict[str, dict[str, Any]]

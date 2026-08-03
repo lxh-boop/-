@@ -267,6 +267,7 @@ class WorkerTaskContract:
     user_goal_examples: list[str] = field(default_factory=list)
     negative_goal_examples: list[str] = field(default_factory=list)
     completion_criteria: list[str] = field(default_factory=list)
+    completion_report_required: bool = False
     planning_notes: list[str] = field(default_factory=list)
     # Forward-planning semantics exposed to MainAgent.  These fields describe
     # what information a task can consume and produce independently of Worker
@@ -531,6 +532,7 @@ class GraphAgentTask:
     expected_output: dict[str, Any] = field(default_factory=dict)
     expected_effect: dict[str, Any] = field(default_factory=dict)
     completion_criteria: list[str] = field(default_factory=list)
+    completion_contract: dict[str, Any] = field(default_factory=dict)
     failure_policy: dict[str, Any] = field(default_factory=dict)
     replan_triggers: list[str] = field(default_factory=list)
     focus_refs: list[GraphRef] = field(default_factory=list)
@@ -563,6 +565,7 @@ class GraphAgentTask:
         self.expected_output = dict(self.expected_output or {})
         self.expected_effect = dict(self.expected_effect or {})
         self.completion_criteria = _str_list(self.completion_criteria, limit=30)
+        self.completion_contract = dict(self.completion_contract or {})
         self.failure_policy = dict(self.failure_policy or {})
         self.replan_triggers = _str_list(self.replan_triggers, limit=30)
         self.focus_refs = refs_from(self.focus_refs)
@@ -621,6 +624,7 @@ class GraphAgentTask:
             "expected_output": _compact(self.expected_output, max_depth=5),
             "expected_effect": _compact(self.expected_effect, max_depth=5),
             "completion_criteria": list(self.completion_criteria),
+            "completion_contract": _compact(self.completion_contract, max_depth=6),
             "failure_policy": _compact(self.failure_policy, max_depth=4),
             "replan_triggers": list(self.replan_triggers),
             "user_id": self.user_id,
@@ -666,6 +670,7 @@ class GraphWorkerResult:
     suggested_next_capabilities: list[str] = field(default_factory=list)
     artifact_refs: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    completion: dict[str, Any] = field(default_factory=dict)
     contract_version: str = "graph_worker_result.v1"
 
     def __post_init__(self) -> None:
@@ -714,6 +719,7 @@ class GraphWorkerResult:
         self.suggested_next_capabilities = _str_list(self.suggested_next_capabilities, limit=30)
         self.artifact_refs = _dict_list(self.artifact_refs, limit=100)
         self.metadata = dict(self.metadata or {})
+        self.completion = dict(self.completion or {})
         self.contract_version = "graph_worker_result.v1"
 
     def to_dict(self) -> dict[str, Any]:
@@ -752,6 +758,7 @@ class GraphWorkerResult:
             "missing_items": [item.to_dict() for item in self.missing_items[:12]],
             "artifact_refs": [_compact(item, max_depth=3) for item in self.artifact_refs[:20]],
             "metadata": _compact(safe_metadata, max_depth=3),
+            "completion": _compact(self.completion, max_depth=6),
         }
 
     def safe_for_coordinator(self) -> dict[str, Any]:

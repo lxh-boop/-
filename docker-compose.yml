@@ -31,6 +31,7 @@ services:
       AGENT_FLOW_TRACE: ${AGENT_FLOW_TRACE:-1}
       AGENT_FLOW_TRACE_MAX_CHARS: ${AGENT_FLOW_TRACE_MAX_CHARS:-30000}
       AGENT_CONSOLE_TRACE: ${AGENT_CONSOLE_TRACE:-0}
+      STOCK_LLM_PROMPT_DUMP_DIR: /app_runtime/llm_prompt_dumps
 
       WATCHFILES_FORCE_POLLING: "true"
     extra_hosts:
@@ -62,6 +63,9 @@ services:
       - type: bind
         source: .
         target: /app
+      - type: bind
+        source: ${STOCK_LLM_PROMPT_DUMP_HOST_DIR:-D:/google/llm_prompt_dumps}
+        target: /app_runtime/llm_prompt_dumps
       - type: bind
         source: ${KRONOS_LAB_HOST_DIR:-D:/google/kronos_model_lab}
         target: /kronos_model_lab

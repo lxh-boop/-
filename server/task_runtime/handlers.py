@@ -14,22 +14,42 @@ def _llm_settings_from_descriptor(descriptor: dict[str, Any] | None, secrets: di
         return None
     from core.llm.runtime_settings import resolve_active_llm_settings
 
-    mode = str(descriptor.get("mode") or "api")
-    config = {
+    mode = str(descriptor.get("mode") or "").strip().lower()
+    if mode not in {"api", "local"}:
+        raise RuntimeError("invalid_llm_settings_descriptor_mode")
+
+    config: dict[str, Any] = {
         "llm_mode": mode,
-        "llm_api_profile_id": descriptor.get("profile_id"),
-        "llm_api_provider": descriptor.get("provider"),
-        "llm_api_base_url": descriptor.get("base_url"),
-        "llm_api_model": descriptor.get("model"),
-        "llm_api_disable_thinking": descriptor.get("disable_thinking", False),
-        "llm_local_profile_id": descriptor.get("profile_id"),
-        "llm_local_base_url": descriptor.get("base_url"),
-        "llm_local_model": descriptor.get("model"),
-        "llm_local_disable_thinking": descriptor.get("disable_thinking", False),
         "llm_request_timeout_seconds": descriptor.get("request_timeout_seconds", 99120),
         "llm_max_retries": descriptor.get("max_retries", 0),
     }
-    return resolve_active_llm_settings(
+    if mode == "api":
+        config.update(
+            {
+                "llm_api_profile_id": descriptor.get("profile_id"),
+                "llm_api_provider": descriptor.get("provider"),
+                "llm_api_base_url": descriptor.get("base_url"),
+                "llm_api_model": descriptor.get("model"),
+                "llm_api_disable_thinking": descriptor.get("disable_thinking", False),
+                "llm_api_context_window": descriptor.get("context_window", 128000),
+                "llm_api_supports_json_schema": descriptor.get("supports_json_schema", True),
+                "llm_api_supports_tools": descriptor.get("supports_tools", True),
+            }
+        )
+    else:
+        config.update(
+            {
+                "llm_local_profile_id": descriptor.get("profile_id"),
+                "llm_local_base_url": descriptor.get("base_url"),
+                "llm_local_model": descriptor.get("model"),
+                "llm_local_disable_thinking": descriptor.get("disable_thinking", False),
+                "llm_local_context_window": descriptor.get("context_window", 32768),
+                "llm_local_supports_json_schema": descriptor.get("supports_json_schema", False),
+                "llm_local_supports_tools": descriptor.get("supports_tools", False),
+            }
+        )
+
+    settings = resolve_active_llm_settings(
         local_config=config,
         profile_id=str(descriptor.get("profile_id") or "") or None,
         mode=mode,
@@ -37,6 +57,30 @@ def _llm_settings_from_descriptor(descriptor: dict[str, Any] | None, secrets: di
         base_url=str(descriptor.get("base_url") or "") or None,
         model=str(descriptor.get("model") or "") or None,
     )
+
+    expected = {
+        "mode": mode,
+        "provider": str(descriptor.get("provider") or ""),
+        "model": str(descriptor.get("model") or ""),
+        "profile_id": str(descriptor.get("profile_id") or ""),
+    }
+    actual = {
+        "mode": str(settings.mode),
+        "provider": str(settings.provider),
+        "model": str(settings.model),
+        "profile_id": str(settings.profile_id),
+    }
+    mismatches = [
+        key
+        for key, expected_value in expected.items()
+        if expected_value and actual.get(key) != expected_value
+    ]
+    if mismatches:
+        raise RuntimeError(
+            "llm_settings_descriptor_mismatch:"
+            + ",".join(sorted(mismatches))
+        )
+    return settings
 
 
 def execute_task(

@@ -32,14 +32,7 @@ _TASK_TO_TOOL_OUTPUT = {
     "query_account_state": (INTERNAL_ACCOUNT_GET_STATE, "AccountStateResult"),
     "query_user_profile": (INTERNAL_USER_PROFILE_GET, "UserProfileResult"),
 }
-_PORTFOLIO_TASKS = {
-    "query_portfolio_state",
-    "load_portfolio_snapshot",
-    "analyze_portfolio",
-    "analyze_portfolio_fit",
-    "compare_portfolios",
-    "resolve_context",
-}
+_PORTFOLIO_TASKS = {"query_portfolio_state"}
 
 
 def _tool_context(
@@ -325,6 +318,85 @@ def _report_positions(
     return result
 
 
+def _resolve_portfolio_entities(
+    provider: Any,
+    portfolio: dict[str, Any],
+    *,
+    as_of_time: str = "",
+) -> tuple[list[GraphRef], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Resolve existing security identities by Neo4j reads only.
+
+    No portfolio snapshot, node, relationship, or other graph state is created.
+    Unresolved identities remain explicit so downstream Workers never guess.
+    """
+
+    data = portfolio.get("data") if isinstance(portfolio.get("data"), dict) else portfolio
+    rows = data.get("active_positions") or data.get("positions") or data.get("holdings") or []
+    identity = getattr(provider, "identity", None)
+    descriptor = getattr(provider, "public_entity_descriptor", None)
+    refs: list[GraphRef] = []
+    catalog: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            continue
+        code = _position_code(row)
+        label = str(
+            row.get("stock_name")
+            or row.get("security_name")
+            or row.get("name")
+            or ""
+        ).strip()
+        selected: GraphRef | None = None
+        if code and identity is not None:
+            try:
+                resolution = identity.resolve_request(
+                    code,
+                    role="holding",
+                    as_of_time=as_of_time,
+                    explicit_mentions=[code],
+                )
+                if not resolution.ambiguous_mentions and len(resolution.refs) == 1:
+                    selected = resolution.refs[0]
+            except Exception:
+                selected = None
+        if selected is None:
+            unresolved.append(
+                {
+                    "index": index,
+                    "public_code": code,
+                    "display_label": label,
+                    "reason": "authoritative_security_graph_ref_unavailable",
+                }
+            )
+            catalog.append(
+                {
+                    "entity_ref": {},
+                    "public_code": code,
+                    "display_label": label,
+                    "exchange": "",
+                    "identity_source": "portfolio_repository",
+                    "identity_locked": False,
+                }
+            )
+            continue
+        if not any(item.node_id == selected.node_id for item in refs):
+            refs.append(selected)
+        public: dict[str, Any] = {}
+        if callable(descriptor):
+            try:
+                public = dict(descriptor(selected) or {})
+            except Exception:
+                public = {}
+        public.setdefault("entity_ref", selected.to_dict())
+        public.setdefault("public_code", code)
+        public.setdefault("display_label", label)
+        public.setdefault("identity_source", str(selected.source or "graph_identity"))
+        public.setdefault("identity_locked", bool(selected.locked))
+        catalog.append(public)
+    return refs, catalog, unresolved
+
+
 def _run_portfolio_query(
     tool_executor: ToolExecutor,
     task: GraphAgentTask,
@@ -335,12 +407,14 @@ def _run_portfolio_query(
 ) -> GraphWorkerResult:
     tool_result = tool_executor.execute(
         INTERNAL_PORTFOLIO_GET_STATE,
-        {"user_id": task.user_id, "as_of_time": task.as_of_time},
+        {"user_id": task.user_id},
         context=_tool_context(task, output_dir, db_path),
         agent_type=task.assigned_agent,
     )
     raw = dict(tool_result.data or {})
     if not tool_result.success:
+        failure_kind = str((tool_result.metadata or {}).get("failure_kind") or raw.get("failure_kind") or "")
+        code = tool_result.error_type or str(raw.get("error_type") or "portfolio_dependency_failed")
         return GraphWorkerResult(
             task_id=task.task_id,
             agent_id=task.assigned_agent,
@@ -350,10 +424,11 @@ def _run_portfolio_query(
             payload=None,
             data=None,
             error={
-                "code": tool_result.error_type or str(raw.get("error_type") or "portfolio_dependency_failed"),
+                "code": code,
                 "message": tool_result.error_message or str(raw.get("message") or tool_result.message or "无法读取当前组合。"),
                 "component": tool_result.tool_name,
-                "retryable": True,
+                "retryable": bool((tool_result.metadata or {}).get("retryable", False)),
+                "failure_kind": failure_kind,
             },
             focus_refs=task.focus_refs,
             summary=str(raw.get("message") or tool_result.message or "无法读取当前组合。"),
@@ -361,52 +436,74 @@ def _run_portfolio_query(
             artifact_refs=_artifact_refs(tool_result),
             metadata={"tool_execution": _tool_execution_summary(tool_result)},
         )
-    portfolio_ref = GraphRef.from_dict(dict(raw["portfolio_ref"]))
-    holding_refs = refs_from(raw.get("holding_refs") or [])
-    produced = [portfolio_ref, *holding_refs]
     portfolio = dict(raw.get("portfolio") or {})
-    entity_catalog = _entity_catalog(provider, holding_refs)
+    holding_refs, entity_catalog, identity_unresolved = _resolve_portfolio_entities(
+        provider,
+        portfolio,
+        as_of_time=task.as_of_time,
+    )
+    unresolved = [
+        *[item for item in portfolio.get("unresolved_positions") or [] if isinstance(item, dict)],
+        *identity_unresolved,
+    ]
     payload = {
-        "portfolio_ref": portfolio_ref.to_dict(),
-        "holding_refs": [ref.to_dict() for ref in holding_refs],
         "entity_catalog": entity_catalog,
         "display_positions": _report_positions(portfolio, entity_catalog),
+        "account_snapshot": safe_public_value(portfolio.get("account") or {}),
+        "portfolio_totals": safe_public_value(
+            {
+                "cash": portfolio.get("cash"),
+                "total_assets": portfolio.get("total_assets"),
+                "position_market_value": (portfolio.get("cash_state") or {}).get("position_market_value")
+                if isinstance(portfolio.get("cash_state"), dict)
+                else None,
+                "cash_ratio": (portfolio.get("cash_state") or {}).get("cash_ratio")
+                if isinstance(portfolio.get("cash_state"), dict)
+                else None,
+                "snapshot_id": portfolio.get("snapshot_id"),
+                "as_of_date": portfolio.get("as_of_date"),
+            }
+        ),
         "portfolio_summary": safe_public_value(portfolio),
-        "unresolved_positions": safe_public_value(raw.get("unresolved_positions") or []),
+        "unresolved_positions": safe_public_value(unresolved),
+        "as_of_time": str(portfolio.get("as_of_date") or task.as_of_time or ""),
+        "graph_snapshot_materialized": False,
     }
     return GraphWorkerResult(
         task_id=task.task_id,
         agent_id=task.assigned_agent,
-        status=ResultStatus.PARTIAL if raw.get("unresolved_positions") else ResultStatus.COMPLETED,
+        status=ResultStatus.PARTIAL if unresolved else ResultStatus.COMPLETED,
         output_type="PortfolioAnalysisResult",
         payload_schema="portfolio_analysis_result.v1",
         payload=payload,
         data=payload,
         error=None,
-        focus_refs=[portfolio_ref],
-        summary="已读取当前组合，并生成 Neo4j 组合快照。",
+        focus_refs=holding_refs,
+        summary="已读取当前权威组合状态；未创建或更新 Neo4j 组合快照。",
         findings=[{
-            "kind": "portfolio_snapshot",
-            "portfolio_ref": portfolio_ref.to_dict(),
-            "holding_refs": [ref.to_dict() for ref in holding_refs],
-            "holding_count": len(holding_refs),
-            "unresolved_position_count": len(raw.get("unresolved_positions") or []),
+            "kind": "portfolio_state",
+            "holding_count": len(payload["display_positions"]),
+            "resolved_holding_count": len(holding_refs),
+            "unresolved_position_count": len(unresolved),
+            "graph_snapshot_materialized": False,
         }],
-        confidence=1.0 if not raw.get("unresolved_positions") else 0.75,
-        warnings=["portfolio_contains_unresolved_positions"] if raw.get("unresolved_positions") else [],
+        confidence=1.0 if not unresolved else 0.75,
+        warnings=["portfolio_contains_unresolved_positions"] if unresolved else [],
         artifact_refs=_artifact_refs(tool_result),
         memory_updates=[MemoryUpdate(
             key="active_graph_refs",
-            value=[ref.to_dict() for ref in produced],
+            value=[ref.to_dict() for ref in holding_refs],
             value_type="graph_ref_list",
             source_ref=task.task_id,
             confirmed=True,
             confidence=1.0,
-            summary="当前组合快照及持仓对象引用。",
-        )],
+            summary="当前持仓证券对象引用；未创建组合快照。",
+        )] if holding_refs else [],
         metadata={
-            "produced_refs": [ref.to_dict() for ref in produced],
+            "produced_refs": [ref.to_dict() for ref in holding_refs],
             "tool_execution": _tool_execution_summary(tool_result),
+            "derived_graph_write": False,
+            "mutates_business_state": False,
         },
     )
 

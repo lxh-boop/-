@@ -155,6 +155,130 @@ class GraphImpactService:
                 )
         return paths
 
+
+    def find_relation_paths(
+        self,
+        *,
+        source_refs: list[GraphRef],
+        target_refs: list[GraphRef],
+        as_of_time: str = "",
+    ) -> list[GraphPathRef]:
+        """Find auditable graph relations without interpreting business impact."""
+        source_object_ids = [ref.node_id for ref in source_refs if ref.node_kind == GraphNodeKind.OBJECT]
+        source_evidence_ids = [ref.node_id for ref in source_refs if ref.node_kind == GraphNodeKind.EVIDENCE]
+        source_assertion_ids = [ref.node_id for ref in source_refs if ref.node_kind == GraphNodeKind.ASSERTION]
+        target_object_ids = [ref.node_id for ref in target_refs if ref.node_kind == GraphNodeKind.OBJECT]
+        target_evidence_ids = [ref.node_id for ref in target_refs if ref.node_kind == GraphNodeKind.EVIDENCE]
+        target_assertion_ids = [ref.node_id for ref in target_refs if ref.node_kind == GraphNodeKind.ASSERTION]
+        max_depth = max(2, min(self.policy.maximum_object_hops * 2, 10))
+        rows = self.store.execute_read(
+            f"""
+            MATCH (source), (target)
+            WHERE ((source:GraphObject AND source.object_id IN $source_object_ids)
+                OR (source:GraphEvidence AND source.evidence_id IN $source_evidence_ids)
+                OR (source:GraphAssertion AND source.assertion_id IN $source_assertion_ids))
+              AND ((target:GraphObject AND target.object_id IN $target_object_ids)
+                OR (target:GraphEvidence AND target.evidence_id IN $target_evidence_ids)
+                OR (target:GraphAssertion AND target.assertion_id IN $target_assertion_ids))
+              AND source <> target
+            MATCH path = shortestPath((source)-[:SUBJECT|OBJECT|SUPPORTED_BY|CONTRADICTED_BY*..{max_depth}]-(target))
+            WITH source, target, path,
+                 [n IN nodes(path) WHERE n:GraphAssertion | n.assertion_id] AS assertion_ids,
+                 [n IN nodes(path) WHERE n:GraphObject | n.object_id] AS object_ids,
+                 [n IN nodes(path) WHERE n:GraphEvidence | n.evidence_id] AS evidence_ids,
+                 [n IN nodes(path) WHERE n:GraphAssertion | coalesce(n.confidence, 0.5)] AS assertion_confidences
+            RETURN CASE WHEN source:GraphEvidence THEN source.evidence_id
+                        WHEN source:GraphAssertion THEN source.assertion_id
+                        ELSE source.object_id END AS source_id,
+                   CASE WHEN source:GraphEvidence THEN 'evidence'
+                        WHEN source:GraphAssertion THEN 'assertion'
+                        ELSE 'object' END AS source_kind,
+                   CASE WHEN target:GraphEvidence THEN target.evidence_id
+                        WHEN target:GraphAssertion THEN target.assertion_id
+                        ELSE target.object_id END AS target_id,
+                   CASE WHEN target:GraphEvidence THEN 'evidence'
+                        WHEN target:GraphAssertion THEN 'assertion'
+                        ELSE 'object' END AS target_kind,
+                   assertion_ids, object_ids, evidence_ids, assertion_confidences,
+                   length(path) AS relationship_length
+            ORDER BY relationship_length ASC
+            LIMIT 500
+            """,
+            {
+                "source_object_ids": source_object_ids,
+                "source_evidence_ids": source_evidence_ids,
+                "source_assertion_ids": source_assertion_ids,
+                "target_object_ids": target_object_ids,
+                "target_evidence_ids": target_evidence_ids,
+                "target_assertion_ids": target_assertion_ids,
+                "as_of": str(as_of_time or ""),
+            },
+        )
+        paths: list[GraphPathRef] = []
+        for row in rows:
+            confidences = [float(item or 0.0) for item in row.get("assertion_confidences") or []]
+            base_confidence = min(confidences) if confidences else 0.4
+            distance_penalty = 1.0 / max(1.0, float(row.get("relationship_length") or 1) / 2.0)
+            confidence = max(0.0, min(1.0, base_confidence * distance_penalty))
+            start_ref = GraphRef(
+                graph_id=self.store.graph_id,
+                node_id=str(row.get("source_id") or ""),
+                node_kind=str(row.get("source_kind") or "object"),
+                role="relation_source",
+                as_of_time=as_of_time,
+                source="neo4j_relation_path",
+                confidence=confidence,
+                locked=True,
+            )
+            end_ref = GraphRef(
+                graph_id=self.store.graph_id,
+                node_id=str(row.get("target_id") or ""),
+                node_kind=str(row.get("target_kind") or "object"),
+                role="relation_target",
+                as_of_time=as_of_time,
+                source="neo4j_relation_path",
+                confidence=confidence,
+                locked=True,
+            )
+            paths.append(
+                GraphPathRef(
+                    path_id=new_graph_id("relation_path"),
+                    start_ref=start_ref,
+                    end_ref=end_ref,
+                    assertion_ids=[str(item) for item in row.get("assertion_ids") or [] if item],
+                    object_ids=[str(item) for item in row.get("object_ids") or [] if item],
+                    evidence_ids=[str(item) for item in row.get("evidence_ids") or [] if item],
+                    path_type="financial_relation",
+                    confidence=confidence,
+                    explanation=(
+                        f"A graph relation exists between {start_ref.node_id} and "
+                        f"{end_ref.node_id} through {len(row.get('assertion_ids') or [])} assertion(s)."
+                    ),
+                )
+            )
+        return paths
+
+    def summarize_relations(self, paths: list[GraphPathRef]) -> dict[str, Any]:
+        targets: dict[str, dict[str, Any]] = {}
+        for path in paths:
+            item = targets.setdefault(
+                path.end_ref.node_id,
+                {
+                    "target_ref": path.end_ref.to_dict(),
+                    "path_count": 0,
+                    "maximum_path_confidence": 0.0,
+                },
+            )
+            item["path_count"] += 1
+            item["maximum_path_confidence"] = max(
+                item["maximum_path_confidence"], path.confidence
+            )
+        return {
+            "target_count": len(targets),
+            "path_count": len(paths),
+            "targets": list(targets.values()),
+        }
+
     def summarize_paths(self, paths: list[GraphPathRef]) -> dict[str, Any]:
         holdings: dict[str, dict[str, Any]] = {}
         for path in paths:

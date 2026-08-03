@@ -36,6 +36,9 @@ def main() -> int:
     parser.add_argument("--parent-pid", type=int, default=0)
     args = parser.parse_args()
 
+    # Expose the task identifier to lower-level observability such as prompt dumps.
+    os.environ["STOCK_AGENT_TASK_ID"] = str(args.task_id)
+
     store = TaskStore(args.db_path)
     task = store.get(args.task_id)
     secret_raw = os.environ.pop("STOCK_TASK_SECRET_B64", "")

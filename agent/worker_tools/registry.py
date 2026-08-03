@@ -11,6 +11,7 @@ from agent.tool_runtime import (
 )
 
 from .evidence import build_evidence_tool_definitions
+from .graph_context import build_graph_context_tool_definitions
 from .internal_system import build_internal_system_tool_definitions
 
 
@@ -71,4 +72,5 @@ def build_worker_tool_registry(
     return ToolRegistry([
         *build_evidence_tool_definitions(provider),
         *build_internal_system_tool_definitions(provider),
+        *build_graph_context_tool_definitions(provider),
     ])

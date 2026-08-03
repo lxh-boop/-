@@ -260,13 +260,10 @@ def build_internal_system_tool_definitions(
         }
 
     def get_portfolio(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-        return provider.load_portfolio_snapshot(
+        return provider.read_portfolio_state(
             user_id=str(arguments.get("user_id") or context.get("user_id") or "default"),
             output_dir=_output_dir(context),
             db_path=context.get("db_path"),
-            as_of_time=str(arguments.get("as_of_time") or ""),
-            source_task_id=str(context.get("task_id") or ""),
-            source_agent_id=str(context.get("agent_role") or ""),
         )
 
     def get_account(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -312,7 +309,7 @@ def build_internal_system_tool_definitions(
                 description=description(
                     "Read authoritative structured data already produced by this application.",
                     "W02 needs one internal system fact for a declared task contract.",
-                    "External news retrieval, risk conclusions, recommendations, proposals, or writes.",
+                    "External news retrieval, graph materialization, risk conclusions, recommendations, proposals, or writes.",
                     "Only task-contract fields and runtime-bound identity values.",
                     "A normalized read-only internal data result.",
                 ),

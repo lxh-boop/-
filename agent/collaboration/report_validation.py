@@ -30,7 +30,7 @@ _LABEL_KEYS = {
 }
 _RISK_OUTPUT_TYPES = {"PortfolioRiskResult"}
 _STRATEGY_OUTPUT_TYPES = {"ReviewedProposal"}
-_IMPACT_OUTPUT_TYPES = {"ImpactAnalysisResult"}
+_IMPACT_OUTPUT_TYPES = {"EntityAnalysisResult"}
 
 _RISK_REQUEST_MARKERS = (
     "风险",
@@ -93,8 +93,9 @@ _VIEW_SCOPE_PATTERNS: tuple[tuple[str, str], ...] = (
 )
 
 _ADVICE_PATTERNS: tuple[str, ...] = (
-    r"(?:^|\n)\s*(?:#{1,6}\s*)?(?:建议|投资建议|操作建议)",
-    r"建议(?:持续|关注|考虑|增加|降低|买入|卖出|持有)",
+    r"(?:^|\n)\s*(?:#{1,6}\s*)?(?:投资建议|操作建议|调仓建议|买卖建议)",
+    r"建议(?:增加|降低|买入|卖出|持有|增仓|减仓|调仓|调整(?:仓位|持仓)|替换|移除)",
+    r"建议(?:持续)?关注(?:该股|该证券|该公司|市场风险|价格风险)",
     r"可考虑(?:买入|卖出|调整|调仓|增持|减持)",
     r"应当(?:买入|卖出|调整|调仓|增持|减持)",
     r"推荐(?:买入|卖出|持有)",
@@ -396,8 +397,10 @@ def _clean_reported_entity_label(value: Any) -> str:
 
     label = _clean_label(value)
     prefix = re.compile(
-        r"^(?:(?:待审批调整预案|待审批预案|调整预案|调仓预案|调整建议|操作建议)[:：\s]*)?"
+        r"^(?:(?:本报告(?:基于.{0,40})?|报告|结论)[:：\s，,]*)?"
+        r"(?:(?:待审批调整预案|待审批预案|调整预案|调仓预案|调整建议|操作建议)[:：\s]*)?"
         r"(?:(?:建议|可考虑|应当|推荐)(?:将)?[:：\s]*)?"
+        r"(?:(?:在.{0,30}?后)?重新发起对|聚焦于|聚焦|关于|针对|对|分析|研究|查看)?[:：\s]*"
         r"(?:维持|持有|保留|观察|增仓|减仓|增加|降低|买入|卖出|替换|移除|新增|调高|调低)?[:：\s]*"
     )
     previous = ""
@@ -543,7 +546,7 @@ def validate_report_output(answer: str, policy: ReportPolicy) -> ReportValidatio
                 issues.append(
                     ReportValidationIssue(
                         code="unsupported_causal_claim",
-                        message="报告生成了因果影响结论，但上游没有 ImpactAnalysisResult。",
+                        message="报告生成了因果影响结论，但上游没有 EntityAnalysisResult。",
                         evidence=match.group(0)[:200],
                     )
                 )

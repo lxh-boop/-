@@ -113,11 +113,15 @@ def submit_task(request: TaskSubmitRequest) -> OperationResponse:
         kwargs["session_id"] = str(request.session_id or kwargs.get("session_id") or "")
         kwargs.setdefault("output_dir", str(OUTPUT_DIR))
         kwargs.setdefault("top_k", 10)
-        settings_payload = kwargs.pop("llm_settings", None)
-        settings = llm_settings_registry.resolve(settings_payload or {})
+        # New background Agent tasks always bind the current persisted model
+        # configuration. Browser-side tokens or stale descriptors cannot switch
+        # the task back to a previously selected local model.
+        kwargs.pop("llm_settings", None)
+        settings = llm_settings_registry.resolve_current()
         if settings is not None:
             kwargs["llm_settings_descriptor"] = {
                 "profile_id": str(settings.profile_id),
+                "config_hash": str(settings.config_hash),
                 "mode": str(settings.mode),
                 "provider": str(settings.provider),
                 "base_url": str(settings.base_url),
@@ -125,6 +129,10 @@ def submit_task(request: TaskSubmitRequest) -> OperationResponse:
                 "disable_thinking": bool(settings.disable_thinking),
                 "request_timeout_seconds": int(settings.request_timeout_seconds),
                 "max_retries": int(settings.max_retries),
+                "context_window": int(settings.profile.context_window),
+                "supports_json_schema": bool(settings.profile.supports_json_schema),
+                "supports_tools": bool(settings.profile.supports_tools),
+                "endpoint_scope": str(settings.endpoint_scope),
             }
             secrets["llm_credential"] = str(getattr(settings, "credential", "") or "")
     try:

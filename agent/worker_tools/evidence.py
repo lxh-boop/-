@@ -1,21 +1,21 @@
-"""Atomic private tools used by the evidence-retrieval Worker.
+"""Atomic read-only evidence tools privately available to W01.
 
-The handlers translate registered tool inputs into calls on the stable graph
-provider facade.  They do not select Workers, plan task graphs, or expose
-provider identifiers to the coordinator.
+Collection sources are separate Tool capabilities so W01 can dynamically plan a
+single-node or multi-source Tool DAG. Finalization is a pure normalization and
+coverage-validation step; no Tool writes Neo4j or business state.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from agent.collaboration.agent_directory import EVIDENCE_RETRIEVER
+from agent.collaboration.agent_directory import EVIDENCE_COLLECTOR
 from agent.graph.contracts import GraphNodeKind, GraphRef, refs_from
 from agent.graph.provider_adapter import GraphProviderAdapter
+from agent.services.evidence_service import EvidenceService
 from agent.tool_runtime import (
     OP_READ,
-    OP_SYSTEM,
     TOOL_VISIBILITY_WORKER_PRIVATE,
     ToolDefinition,
     description,
@@ -24,8 +24,12 @@ from agent.tool_runtime import (
 )
 
 
-EVIDENCE_ANALYZE_ENTITIES_TOOL = "graph.evidence.analyze_entities"
-EVIDENCE_RETRIEVE_TOOL = "graph.evidence.retrieve"
+EVIDENCE_SEARCH_NEWS_TOOL = "evidence.search_news"
+EVIDENCE_SEARCH_RAG_TOOL = "evidence.search_rag"
+EVIDENCE_FINALIZE_COLLECTION_TOOL = "evidence.finalize_collection"
+EVIDENCE_COLLECT_EXTERNAL_TOOL = "evidence.collect_external"  # legacy compatibility
+EVIDENCE_RETRIEVE_TOOL = EVIDENCE_COLLECT_EXTERNAL_TOOL
+EVIDENCE_ANALYZE_ENTITIES_TOOL = EVIDENCE_COLLECT_EXTERNAL_TOOL
 
 
 def _object_refs(arguments: dict[str, Any]) -> list[GraphRef]:
@@ -39,140 +43,489 @@ def _object_refs(arguments: dict[str, Any]) -> list[GraphRef]:
     return refs
 
 
-def _path(
-    context: dict[str, Any],
-    key: str,
-    default: str | Path,
-) -> str | Path:
+def _path(context: dict[str, Any], key: str, default: str | Path) -> str | Path:
     return context.get(key) or default
+
+
+def _raw_data(raw: dict[str, Any]) -> dict[str, Any]:
+    return dict(raw.get("data") or {}) if isinstance(raw.get("data"), dict) else dict(raw)
+
+
+def _source_result(
+    *,
+    provider: GraphProviderAdapter,
+    refs: list[GraphRef],
+    source_name: str,
+    collector: Callable[[str], dict[str, Any]],
+) -> dict[str, Any]:
+    """Normalize one evidence source without treating a valid empty query as failure."""
+
+    results: list[dict[str, Any]] = []
+    hard_failure_count = 0
+    for ref in refs:
+        code = provider.provider_symbol(ref)
+        raw = collector(code)
+        data = _raw_data(raw)
+        records = list(data.get("records") or raw.get("records") or [])
+        sources = list(data.get("sources") or raw.get("sources") or [])
+        errors = [str(item) for item in raw.get("errors") or []]
+        status = str(raw.get("status") or "").strip().lower()
+        hard_failure = bool(errors) and status in {
+            "error",
+            "unavailable",
+            "invalid_stock_code",
+            "failed",
+        }
+        execution_success = not hard_failure
+        if hard_failure:
+            hard_failure_count += 1
+        results.append(
+            {
+                "focus_ref": ref.to_dict(),
+                "source_name": source_name,
+                "success": execution_success,
+                "business_empty": bool(execution_success and not records),
+                "status": status,
+                "message": str(raw.get("message") or ""),
+                "records": records,
+                "sources": sources,
+                "warnings": [str(item) for item in raw.get("warnings") or []],
+                "errors": errors,
+                "retrieval_diagnostics": dict(data.get("retrieval_diagnostics") or {}),
+            }
+        )
+    execution_success_count = sum(1 for item in results if item["success"])
+    return {
+        "success": execution_success_count > 0 and hard_failure_count < len(results),
+        "message": (
+            f"{source_name} queried."
+            if hard_failure_count == 0
+            else f"{source_name} partially queried."
+            if execution_success_count
+            else f"{source_name} query failed."
+        ),
+        "data": {
+            "results": results,
+            "source_name": source_name,
+            "source_collection_count": len(results),
+            "source_success_count": execution_success_count,
+            "source_failure_count": hard_failure_count,
+            "business_empty": bool(results) and all(item["business_empty"] for item in results),
+            "write_performed": False,
+            "retrieval_diagnostics": [
+                dict(item.get("retrieval_diagnostics") or {})
+                for item in results
+                if item.get("retrieval_diagnostics")
+            ],
+        },
+        "warnings": [
+            warning
+            for item in results
+            for warning in item.get("warnings") or []
+        ],
+        "errors": [
+            error
+            for item in results
+            for error in item.get("errors") or []
+        ] if execution_success_count == 0 else [],
+        "error_type": "evidence_source_query_failed" if execution_success_count == 0 else "",
+        "error_message": "All entity queries for this evidence source failed." if execution_success_count == 0 else "",
+        "failure_kind": "tool_failure" if execution_success_count == 0 else "",
+        "retryable": bool(execution_success_count == 0),
+    }
+
+
+def _envelope_data(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    data = value.get("data")
+    if isinstance(data, dict):
+        return data
+    return value
+
+
+def _record_key(row: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(
+        str(row.get(key) or "").strip()
+        for key in ("chunk_id", "news_id", "source_id", "url", "title", "section_title", "text")
+    )
+
+
+def _source_key(row: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(
+        str(row.get(key) or "").strip()
+        for key in ("source_type", "source_id", "url", "title", "source")
+    )
+
+
+def _rank_key(row: dict[str, Any]) -> tuple[float, str]:
+    try:
+        score = float(row.get("score", row.get("mapping_confidence", 0.0)) or 0.0)
+    except (TypeError, ValueError):
+        score = 0.0
+    date = str(row.get("publish_time") or row.get("trade_date") or row.get("date") or "")
+    return score, date
 
 
 def build_evidence_tool_definitions(
     provider: GraphProviderAdapter,
 ) -> list[ToolDefinition]:
-    """Bind evidence tools to one run-scoped provider dependency."""
+    """Bind atomic W01 tools to run-scoped dependencies."""
 
-    def analyze_entities(
-        arguments: dict[str, Any],
-        context: dict[str, Any],
-    ) -> dict[str, Any]:
-        return provider.analyze_entities(
-            _object_refs(arguments),
-            user_id=str(arguments.get("user_id") or context.get("user_id") or ""),
-            output_dir=_path(context, "output_dir", "outputs"),
-            db_path=context.get("db_path"),
+    service = EvidenceService()
+
+    def search_news(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        refs = _object_refs(arguments)
+        top_k = max(1, min(int(arguments.get("top_k") or 20), 100))
+        as_of_time = str(arguments.get("as_of_time") or "")
+        return _source_result(
+            provider=provider,
+            refs=refs,
+            source_name="news_and_announcements",
+            collector=lambda code: service.search_news(
+                code,
+                as_of_date=as_of_time or None,
+                db_path=context.get("db_path"),
+                limit=top_k,
+            ),
         )
 
-    def retrieve_evidence(
-        arguments: dict[str, Any],
-        context: dict[str, Any],
-    ) -> dict[str, Any]:
-        return provider.retrieve_evidence(
+    def search_rag(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        refs = _object_refs(arguments)
+        top_k = max(1, min(int(arguments.get("top_k") or 20), 100))
+        query = str(arguments.get("query") or "")
+        return _source_result(
+            provider=provider,
+            refs=refs,
+            source_name="rag_evidence",
+            collector=lambda code: service.search_rag(
+                code,
+                query=query or code,
+                top_k=top_k,
+                output_dir=_path(context, "output_dir", "outputs"),
+            ),
+        )
+
+    def finalize_collection(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        del context
+        required_refs = _object_refs({"object_refs": arguments.get("required_object_refs") or []})
+        collections = arguments.get("collections") or []
+        if not isinstance(collections, list):
+            collections = [collections]
+        source_collection_count = len(collections)
+        source_success_count = 0
+        source_failure_count = 0
+        normalized_collections: list[dict[str, Any]] = []
+        for envelope in collections:
+            # Canonical handoff is UnifiedToolResult.to_dict(). For compatibility,
+            # a raw ``results`` list is also a valid successful/empty source read.
+            if isinstance(envelope, list):
+                normalized_collections.append({
+                    "success": True,
+                    "data": {"results": envelope, "business_empty": not bool(envelope)},
+                })
+                source_success_count += 1
+                continue
+            if not isinstance(envelope, dict):
+                source_failure_count += 1
+                continue
+            normalized_collections.append(envelope)
+            data = _envelope_data(envelope)
+            hard_failure = bool(
+                not envelope.get("success")
+                and (
+                    envelope.get("error_type")
+                    or envelope.get("error_message")
+                    or envelope.get("errors")
+                )
+            )
+            if hard_failure:
+                source_failure_count += 1
+            else:
+                # Valid empty results count as a successful source query.
+                source_success_count += 1
+        collections = normalized_collections
+        grouped: dict[str, dict[str, Any]] = {
+            ref.node_id: {
+                "focus_ref": ref.to_dict(),
+                "success": False,
+                "message": "",
+                "records": [],
+                "sources": [],
+                "warnings": [],
+                "errors": [],
+                "source_names": [],
+            }
+            for ref in required_refs
+        }
+        for envelope in collections:
+            data = _envelope_data(envelope)
+            for item in data.get("results") or []:
+                if not isinstance(item, dict):
+                    continue
+                focus_ref = item.get("focus_ref") if isinstance(item.get("focus_ref"), dict) else {}
+                node_id = str(focus_ref.get("node_id") or "")
+                if node_id not in grouped:
+                    continue
+                target = grouped[node_id]
+                target["success"] = bool(target["success"] or item.get("success"))
+                target["message"] = str(item.get("message") or target["message"])
+                target["records"].extend(item.get("records") or [])
+                target["sources"].extend(item.get("sources") or [])
+                target["warnings"].extend(str(value) for value in item.get("warnings") or [])
+                target["errors"].extend(str(value) for value in item.get("errors") or [])
+                source_name = str(item.get("source_name") or data.get("source_name") or "")
+                if source_name and source_name not in target["source_names"]:
+                    target["source_names"].append(source_name)
+
+        normalized_results: list[dict[str, Any]] = []
+        all_warnings: list[str] = []
+        all_errors: list[str] = []
+        for ref in required_refs:
+            item = grouped[ref.node_id]
+            seen_records: set[tuple[str, ...]] = set()
+            deduped_records: list[dict[str, Any]] = []
+            for row in sorted(
+                [row for row in item["records"] if isinstance(row, dict)],
+                key=_rank_key,
+                reverse=True,
+            ):
+                key = _record_key(row)
+                if key in seen_records:
+                    continue
+                seen_records.add(key)
+                deduped_records.append(dict(row))
+            seen_sources: set[tuple[str, ...]] = set()
+            deduped_sources: list[dict[str, Any]] = []
+            for row in [row for row in item["sources"] if isinstance(row, dict)]:
+                key = _source_key(row)
+                if key in seen_sources:
+                    continue
+                seen_sources.add(key)
+                deduped_sources.append(dict(row))
+            warnings = list(dict.fromkeys(item["warnings"]))
+            errors = list(dict.fromkeys(item["errors"]))
+            all_warnings.extend(warnings)
+            all_errors.extend(errors)
+            normalized_results.append(
+                {
+                    "focus_ref": ref.to_dict(),
+                    "success": bool(deduped_records),
+                    "message": item["message"] or ("Evidence collected." if deduped_records else "No evidence found."),
+                    "records": deduped_records,
+                    "sources": deduped_sources,
+                    "source_names": list(item["source_names"]),
+                    "warnings": warnings,
+                    "errors": errors,
+                }
+            )
+        covered_ids = {
+            str(item.get("focus_ref", {}).get("node_id") or "")
+            for item in normalized_results
+            if item.get("records")
+        }
+        required_ids = {ref.node_id for ref in required_refs}
+        record_count = sum(len(item.get("records") or []) for item in normalized_results)
+        source_count = sum(len(item.get("sources") or []) for item in normalized_results)
+        coverage = {
+            "required_entity_count": len(required_ids),
+            "covered_entity_count": len(covered_ids),
+            "missing_entity_ref_ids": sorted(required_ids - covered_ids),
+            "coverage_satisfied": required_ids.issubset(covered_ids),
+        }
+        all_sources_failed = bool(source_collection_count) and source_success_count == 0 and source_failure_count >= source_collection_count
+        business_empty = record_count == 0 and not all_sources_failed
+        return {
+            "success": not all_sources_failed,
+            "message": (
+                "External evidence collection finalized."
+                if record_count
+                else "All selected evidence sources failed."
+                if all_sources_failed
+                else "No external evidence was found."
+            ),
+            "data": {
+                "results": normalized_results,
+                "record_count": record_count,
+                "source_count": source_count,
+                "coverage": coverage,
+                "source_collection_count": source_collection_count,
+                "source_success_count": source_success_count,
+                "source_failure_count": source_failure_count,
+                "business_empty": business_empty,
+                "warnings": list(dict.fromkeys(all_warnings)),
+                "errors": list(dict.fromkeys(all_errors)),
+                "write_performed": False,
+                "validated_evidence_collection": True,
+            },
+            "warnings": list(dict.fromkeys(all_warnings)),
+            "errors": list(dict.fromkeys(all_errors)) if all_sources_failed else [],
+            "error_type": "all_evidence_sources_failed" if all_sources_failed else "",
+            "error_message": "All selected evidence source tools failed." if all_sources_failed else "",
+            "failure_kind": "tool_failure" if all_sources_failed else "",
+            "retryable": bool(all_sources_failed),
+        }
+
+    def collect_external_legacy(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        return provider.collect_external_evidence(
             _object_refs(arguments),
             query=str(arguments.get("query") or ""),
             top_k=max(1, min(int(arguments.get("top_k") or 20), 100)),
             output_dir=_path(context, "output_dir", "outputs"),
             db_path=context.get("db_path"),
-            source_task_id=str(
-                arguments.get("source_task_id")
-                or context.get("task_id")
-                or ""
-            ),
-            source_agent_id=str(
-                arguments.get("source_agent_id")
-                or context.get("agent_role")
-                or ""
-            ),
             as_of_time=str(arguments.get("as_of_time") or ""),
         )
 
-    object_ref_property = {
-        "object_refs": {
-            "type": "array",
-            "description": "Authoritative financial-object GraphRefs.",
+    common_source_schema = schema(
+        {
+            "object_refs": {"type": "array", "description": "Authoritative financial-object GraphRefs."},
+            "query": {"type": "string"},
+            "top_k": {"type": "integer"},
+            "as_of_time": {"type": "string"},
         },
-        "user_id": {"type": "string"},
-    }
+        required=["object_refs"],
+    )
     return [
         ToolDefinition(
-            name=EVIDENCE_ANALYZE_ENTITIES_TOOL,
-            display_name="Analyze Entity Evidence",
+            name=EVIDENCE_SEARCH_NEWS_TOOL,
+            display_name="Search News and Announcements",
             description=description(
-                "Analyze evidence for authoritative financial-object GraphRefs.",
-                "An Evidence Worker must run the existing entity-analysis path.",
-                "Free-text entity resolution, portfolio impact, or business writes.",
-                "object_refs and user_id.",
-                "Per-entity analysis results and normalized evidence sources.",
+                "Read mapped news and announcement evidence for an authoritative entity set.",
+                "W01 needs recent news, announcements, governance events, or public event records.",
+                "RAG-only retrieval, interpretation, graph persistence, portfolio work, or proposals.",
+                "object_refs, optional as_of_time, and top_k.",
+                "Per-entity news and announcement records with source metadata.",
             ),
-            input_schema=schema(
-                object_ref_property,
-                required=["object_refs", "user_id"],
-            ),
+            input_schema=common_source_schema,
             output_schema=result_schema(["results"]),
-            execution_handler=analyze_entities,
-            supported_actions=["analyze_entity_evidence"],
-            supported_objects=["financial_object_graph_ref"],
-            produced_outputs=["entity_evidence_results"],
+            execution_handler=search_news,
+            supported_actions=["search_news", "search_announcements"],
+            supported_objects=["financial_object_graph_ref_set"],
+            produced_outputs=["results", "news_evidence"],
             operation_type=OP_READ,
-            allowed_agent_types=[EVIDENCE_RETRIEVER],
+            allowed_agent_types=[EVIDENCE_COLLECTOR],
             permission_scope=OP_READ,
             visibility=TOOL_VISIBILITY_WORKER_PRIVATE,
             side_effects=[],
             mutates_business_state=False,
             idempotency="read_only",
             audit_level="full",
-            tags=["worker_private", "graph", "evidence"],
+            tags=["worker_private", "evidence", "news", "atomic", "read_only"],
         ),
         ToolDefinition(
-            name=EVIDENCE_RETRIEVE_TOOL,
-            display_name="Retrieve Graph Evidence",
+            name=EVIDENCE_SEARCH_RAG_TOOL,
+            display_name="Search RAG Evidence",
             description=description(
-                "Retrieve evidence for authoritative financial-object GraphRefs.",
-                "An Evidence Worker needs news, RAG, announcement, or research evidence.",
-                "Portfolio mutation, strategy proposals, or unrestricted provider access.",
-                "object_refs, query, top_k, source task metadata, and time boundary.",
-                "Evidence results, GraphRefs, and ingestion records.",
-                "May idempotently upsert derived evidence into the financial fact graph.",
+                "Read indexed RAG evidence for an authoritative entity set and research query.",
+                "W01 needs semantically relevant indexed evidence, report chunks, or long-form context.",
+                "Direct news-only retrieval, interpretation, graph persistence, portfolio work, or proposals.",
+                "object_refs, query, top_k, and optional as_of_time.",
+                "Per-entity RAG records with retrieval scores and source metadata.",
+            ),
+            input_schema=schema(
+                common_source_schema["properties"],
+                required=["object_refs", "query"],
+            ),
+            output_schema=result_schema(["results"]),
+            execution_handler=search_rag,
+            supported_actions=["search_rag_evidence"],
+            supported_objects=["financial_object_graph_ref_set"],
+            produced_outputs=["results", "rag_evidence"],
+            operation_type=OP_READ,
+            allowed_agent_types=[EVIDENCE_COLLECTOR],
+            permission_scope=OP_READ,
+            visibility=TOOL_VISIBILITY_WORKER_PRIVATE,
+            side_effects=[],
+            mutates_business_state=False,
+            idempotency="read_only",
+            audit_level="full",
+            tags=["worker_private", "evidence", "rag", "atomic", "read_only"],
+        ),
+        ToolDefinition(
+            name=EVIDENCE_FINALIZE_COLLECTION_TOOL,
+            display_name="Finalize Evidence Collection",
+            description=description(
+                "Merge, deduplicate, rank, and validate one or more source-collection results.",
+                "W01 has completed one or more source reads and must produce its final evidence collection.",
+                "Source retrieval, evidence interpretation, graph persistence, portfolio work, or proposals.",
+                "collections and required_object_refs.",
+                "Validated per-entity evidence collection, counts, warnings, and coverage.",
             ),
             input_schema=schema(
                 {
-                    **object_ref_property,
-                    "query": {"type": "string"},
-                    "top_k": {"type": "integer"},
-                    "source_task_id": {"type": "string"},
-                    "source_agent_id": {"type": "string"},
-                    "as_of_time": {"type": "string"},
+                    "collections": {"type": "array"},
+                    "required_object_refs": {"type": "array"},
+                    "collection_goal": {"type": "string"},
                 },
-                required=[
-                    "object_refs",
-                    "query",
-                    "source_task_id",
-                    "source_agent_id",
-                ],
+                required=["collections", "required_object_refs"],
             ),
             output_schema=result_schema(
-                ["results", "evidence_refs", "ingestion_results"]
+                [
+                    "results",
+                    "record_count",
+                    "source_count",
+                    "coverage",
+                    "validated_evidence_collection",
+                ]
             ),
-            execution_handler=retrieve_evidence,
-            supported_actions=[
-                "retrieve_evidence",
-                "ingest_evidence",
-                "resolve_context",
-            ],
-            supported_objects=["financial_object_graph_ref"],
+            execution_handler=finalize_collection,
+            supported_actions=["finalize_evidence_collection"],
+            supported_objects=["evidence_source_result_set"],
             produced_outputs=[
-                "evidence_results",
-                "evidence_refs",
-                "ingestion_results",
+                "results",
+                "record_count",
+                "source_count",
+                "coverage",
+                "validated_evidence_collection",
             ],
-            operation_type=OP_SYSTEM,
-            allowed_agent_types=[EVIDENCE_RETRIEVER],
+            operation_type=OP_READ,
+            allowed_agent_types=[EVIDENCE_COLLECTOR],
             permission_scope=OP_READ,
             visibility=TOOL_VISIBILITY_WORKER_PRIVATE,
-            side_effects=["derived_evidence_graph_upsert"],
+            side_effects=[],
             mutates_business_state=False,
-            idempotency="provider_source_ref_upsert",
+            idempotency="pure_transform",
             audit_level="full",
-            tags=["worker_private", "graph", "evidence", "derived_write"],
+            tags=["worker_private", "evidence", "finalizer", "atomic", "read_only"],
+        ),
+        ToolDefinition(
+            name=EVIDENCE_COLLECT_EXTERNAL_TOOL,
+            display_name="Collect External Evidence (Legacy)",
+            description=description(
+                "Compatibility wrapper that collects external evidence in one call.",
+                "An older caller explicitly invokes the legacy canonical name.",
+                "New W01 Tool DAG planning, interpretation, graph persistence, portfolio work, or proposals.",
+                "object_refs, query, top_k, and optional time boundary.",
+                "Per-entity evidence records and sources.",
+            ),
+            input_schema=schema(
+                common_source_schema["properties"],
+                required=["object_refs", "query"],
+            ),
+            output_schema=result_schema(["results"]),
+            execution_handler=collect_external_legacy,
+            supported_actions=["legacy_collect_external_evidence"],
+            supported_objects=["financial_object_graph_ref_set"],
+            produced_outputs=["results"],
+            operation_type=OP_READ,
+            allowed_agent_types=[EVIDENCE_COLLECTOR],
+            permission_scope=OP_READ,
+            visibility=TOOL_VISIBILITY_WORKER_PRIVATE,
+            side_effects=[],
+            mutates_business_state=False,
+            idempotency="read_only",
+            audit_level="full",
+            tags=["worker_private", "evidence", "legacy", "read_only"],
         ),
     ]
+
+
+__all__ = [
+    "EVIDENCE_SEARCH_NEWS_TOOL",
+    "EVIDENCE_SEARCH_RAG_TOOL",
+    "EVIDENCE_FINALIZE_COLLECTION_TOOL",
+    "EVIDENCE_COLLECT_EXTERNAL_TOOL",
+    "EVIDENCE_RETRIEVE_TOOL",
+    "EVIDENCE_ANALYZE_ENTITIES_TOOL",
+    "build_evidence_tool_definitions",
+]

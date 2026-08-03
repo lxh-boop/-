@@ -183,6 +183,20 @@ class LLMService:
             raise LLMConfigurationError("当前 Model Profile 未配置可用凭据或模型。")
         request_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
         started = time.perf_counter()
+        prompt_dump = None
+        try:
+            from core.llm.prompt_dump import start_prompt_dump
+
+            prompt_dump = start_prompt_dump(
+                stage=stage,
+                operation=operation or "primary",
+                profile=self.profile,
+                messages=[dict(item) for item in messages],
+                temperature=float(temperature),
+                max_output_tokens=max(1, int(max_output_tokens)),
+            )
+        except Exception:
+            prompt_dump = None
         try:
             response = self.registry.adapter_for(self.profile).generate(
                 profile=self.profile,
@@ -192,6 +206,12 @@ class LLMService:
                 max_output_tokens=max(1, int(max_output_tokens)),
             )
         except Exception as exc:
+            try:
+                from core.llm.prompt_dump import finish_prompt_dump
+
+                finish_prompt_dump(prompt_dump, error=exc)
+            except Exception:
+                pass
             event_id = self._record_call(
                 stage=stage,
                 operation=operation or "primary",
@@ -206,6 +226,12 @@ class LLMService:
             raise type(exc)(
                 f"{mode_label}调用失败：{exc}。当前配置禁止自动切换模型，本次未执行任何自动回退。"
             ) from exc
+        try:
+            from core.llm.prompt_dump import finish_prompt_dump
+
+            finish_prompt_dump(prompt_dump, response=response)
+        except Exception:
+            pass
         event_id = self._record_call(
             stage=stage,
             operation=operation or "primary",
