@@ -605,12 +605,12 @@ def validate_report_output(answer: str, policy: ReportPolicy) -> ReportValidatio
     # Goal-completion validation is separate from scope validation. A report may
     # contain no fabricated fact and still fail the user by omitting the requested
     # adjustment advice or by claiming that advice was never requested.
-    if policy.adjustment_requested and not policy.risk_available:
+    if policy.adjustment_requested and policy.risk_requested and not policy.risk_available:
         issues.append(
             ReportValidationIssue(
                 code="missing_required_risk_worker_output",
-                message="持仓调整方案需要上游 PortfolioRiskResult，但当前没有可用风险结果。",
-                evidence="PortfolioRiskResult unavailable",
+                message="目标合同要求组合风险评估，但当前没有可用 PortfolioRiskResult。",
+                evidence="PortfolioRiskResult required by goal contract but unavailable",
                 repairable=False,
             )
         )

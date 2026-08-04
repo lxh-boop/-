@@ -53,6 +53,11 @@ class LLMService:
         return dict(response.usage) if response is not None else {}
 
     @property
+    def last_timing(self) -> dict[str, Any]:
+        response = self.last_response
+        return dict(response.timing) if response is not None else {}
+
+    @property
     def last_audit_event_id(self) -> str:
         return str(getattr(self._state.thread_local, "last_audit_event_id", "") or "")
 
@@ -99,6 +104,9 @@ class LLMService:
                 prompt_tokens=int((response.usage if response else {}).get("prompt_tokens", 0) or 0),
                 completion_tokens=int((response.usage if response else {}).get("completion_tokens", 0) or 0),
                 total_tokens=int((response.usage if response else {}).get("total_tokens", 0) or 0),
+                cached_prompt_tokens=int((response.usage if response else {}).get("cached_prompt_tokens", 0) or 0),
+                reasoning_tokens=int((response.usage if response else {}).get("reasoning_tokens", 0) or 0),
+                timing=dict(response.timing) if response else {},
             )
         except Exception:
             return ""
@@ -271,6 +279,9 @@ class LLMService:
         event_callback: Callable[[str, dict[str, Any]], None] | None = None,
         repair_guidance: str = "",
         repair_mode: str = "regenerate",
+        repair_context_builder: Callable[
+            [dict[str, Any] | None, dict[str, Any]], list[dict[str, Any]]
+        ] | None = None,
     ) -> dict[str, Any]:
         """Generate JSON and perform exactly one full-plan repair request.
 
@@ -280,6 +291,9 @@ class LLMService:
         binding, or validation policy. ``repair_mode="targeted"`` preserves the
         parsed candidate and asks the model to repair only the contract fields
         identified by the validator while still returning a complete JSON object.
+        ``repair_context_builder`` may replace the repeated primary prompt with a
+        caller-owned compact repair context; the invalid candidate and exact
+        validation error are still appended by this method.
         """
 
         effective_operation = operation or "primary"
@@ -327,6 +341,7 @@ class LLMService:
                 "attempt": "primary",
                 "response_chars": len(str(output or "")),
                 "usage": self.last_usage,
+                "timing": self.last_timing,
                 "audit_event_id": first_event_id,
             },
         )
@@ -399,8 +414,18 @@ class LLMService:
                     "Do not invent missing facts, entities, constraints, or dependencies.",
                 ],
             }
+            if repair_context_builder is not None:
+                base_repair_messages = [
+                    dict(item)
+                    for item in repair_context_builder(first_candidate, error_context)
+                    if isinstance(item, dict)
+                ]
+                if not base_repair_messages:
+                    base_repair_messages = [dict(item) for item in messages]
+            else:
+                base_repair_messages = [dict(item) for item in messages]
             repair_messages = [
-                *[dict(item) for item in messages],
+                *base_repair_messages,
                 {
                     "role": "user",
                     "content": json.dumps(
@@ -447,6 +472,7 @@ class LLMService:
                     "attempt": "repair",
                     "response_chars": len(str(repaired or "")),
                     "usage": self.last_usage,
+                    "timing": self.last_timing,
                     "audit_event_id": repair_event_id,
                 },
             )

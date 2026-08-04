@@ -13,6 +13,9 @@ from typing import Any
 
 from core.llm import LLMService
 
+from agent.llm_audit import activate_llm_audit_context
+from agent.console_trace import get_llm_execution_timing, get_tool_execution_timing
+
 from agent.communication import MessageType, publish_agent_message
 
 from agent.graph.impact_service import GraphImpactService
@@ -140,6 +143,16 @@ class SpecialistRuntime:
         execution_context: dict[str, Any] | None = None,
     ) -> GraphWorkerResult:
         started = time.perf_counter()
+        activate_llm_audit_context(
+            run_id=task.run_id,
+            conversation_id=task.session_id,
+            output_dir=output_dir,
+            formal_entry_used=True,
+            formal_entry_name="agent.collaboration.specialist_runtime",
+            task_id=task.task_id,
+            worker_id=task.worker_id,
+            agent_id=task.assigned_agent,
+        )
         task.status = TaskStatus.RUNNING
         resolved_inputs: dict[str, Any] = {}
         task_contract = None
@@ -368,6 +381,26 @@ class SpecialistRuntime:
                 )
 
         result.metadata.setdefault("duration_ms", round((time.perf_counter() - started) * 1000, 2))
+        result.metadata.setdefault(
+            "dependency_wait_ms",
+            round(float(task.metadata.get("dependency_wait_ms") or 0.0), 3),
+        )
+        llm_timing = get_llm_execution_timing(task.run_id, task.task_id)
+        tool_timing = get_tool_execution_timing(task.run_id, task.task_id)
+        result.metadata.setdefault("llm_execution_timing", llm_timing)
+        result.metadata.setdefault("tool_execution_timing", tool_timing)
+        result.metadata.setdefault(
+            "unattributed_worker_execution_ms",
+            round(
+                max(
+                    0.0,
+                    float(result.metadata.get("duration_ms") or 0.0)
+                    - float(llm_timing.get("provider_transport_ms_sum") or 0.0)
+                    - float(tool_timing.get("wall_duration_ms") or 0.0),
+                ),
+                3,
+            ),
+        )
         publish_agent_message(
             output_dir=output_dir,
             user_id=task.user_id,

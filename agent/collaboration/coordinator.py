@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -945,6 +946,7 @@ class AgentCollaborationCoordinator:
     ) -> tuple[dict[str, GraphWorkerResult], list[dict[str, Any]], list[dict[str, Any]]]:
         results: dict[str, GraphWorkerResult] = dict(existing_results or {})
         pending = {task.task_id: task for task in tasks}
+        dag_wait_started = time.perf_counter()
         batches: list[dict[str, Any]] = []
         timeline: list[dict[str, Any]] = []
         batch_index = 0
@@ -965,6 +967,10 @@ class AgentCollaborationCoordinator:
                     ]
                     if not blocked_by:
                         continue
+                    task.metadata.setdefault(
+                        "dependency_wait_ms",
+                        round((time.perf_counter() - dag_wait_started) * 1000.0, 3),
+                    )
                     result = GraphWorkerResult(
                         task_id=task.task_id,
                         agent_id=task.assigned_agent,
@@ -1003,6 +1009,7 @@ class AgentCollaborationCoordinator:
                         "status": result.status.value,
                         "output_type": result.output_type,
                         "duration_ms": 0.0,
+                        "dependency_wait_ms": task.metadata.get("dependency_wait_ms", 0.0),
                         "summary": result.summary[:500],
                         "warning_count": len(result.warnings),
                         "evidence_count": 0,
@@ -1039,6 +1046,10 @@ class AgentCollaborationCoordinator:
             ]
             if not ready:
                 for task in list(pending.values()):
+                    task.metadata.setdefault(
+                        "dependency_wait_ms",
+                        round((time.perf_counter() - dag_wait_started) * 1000.0, 3),
+                    )
                     result = GraphWorkerResult(
                         task_id=task.task_id,
                         agent_id=task.assigned_agent,
@@ -1060,6 +1071,12 @@ class AgentCollaborationCoordinator:
                     if self.runtime_services is not None:
                         self.runtime_services.record_result(task, result)
                 break
+            ready_at = time.perf_counter()
+            for task in ready:
+                task.metadata.setdefault(
+                    "dependency_wait_ms",
+                    round((ready_at - dag_wait_started) * 1000.0, 3),
+                )
             batch_index += 1
             batches.append({
                 "batch_index": batch_index,
@@ -1119,6 +1136,14 @@ class AgentCollaborationCoordinator:
                         "status": result.status.value,
                         "output_type": result.output_type,
                         "duration_ms": result.metadata.get("duration_ms"),
+                        "dependency_wait_ms": result.metadata.get(
+                            "dependency_wait_ms", task.metadata.get("dependency_wait_ms", 0.0)
+                        ),
+                        "llm_execution_timing": result.metadata.get("llm_execution_timing", {}),
+                        "tool_execution_timing": result.metadata.get("tool_execution_timing", {}),
+                        "unattributed_worker_execution_ms": result.metadata.get(
+                            "unattributed_worker_execution_ms", 0.0
+                        ),
                         "summary": result.summary[:500],
                         "warning_count": len(result.warnings),
                         "evidence_count": len(result.evidence_refs),

@@ -40,6 +40,7 @@ class LLMResponse:
     profile_id: str
     config_hash: str
     usage: Mapping[str, int] = field(default_factory=dict)
+    timing: Mapping[str, Any] = field(default_factory=dict)
     provider_request_id: str = ""
 
 

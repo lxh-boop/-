@@ -283,7 +283,8 @@ def _system_prompt(language: str, policy: ReportPolicy) -> str:
         "当上游是 EntityAnalysisResult 时，只能重组其中 facts、analysis、model_signals、"
         "relation_interpretations、uncertainties、conclusion 和 source claim 引用。"
         "严格输出分节结构，每个分节给出 heading、markdown 和 source_claim_ids；不要再复制一份完整 claims 列表，"
-        "也不要额外输出另一份完整报告。不得暴露内部 Worker 名称、task_id、工具、GraphRef 或数据库实现。"
+        "也不要额外输出另一份完整报告。limitations 只写正文未覆盖的限制，不得与不确定性或其他 section 重复。"
+        "不得暴露内部 Worker 名称、task_id、工具、GraphRef 或数据库实现。"
         "必须逐项评估 completion_contract，completion_report.report_source 必须为 llm。"
     )
 
@@ -494,7 +495,8 @@ def run_report_writer(
             repair_mode="targeted",
             repair_guidance=(
                 "只修复 sectioned_markdown_report.v1 的 JSON 结构、source_claim_ids、completion_report 或报告校验问题。"
-                "不得增加上游没有的事实、实体、数值、风险、建议或来源。每个 section 保持简洁并返回完整闭合 JSON。"
+                "不得增加上游没有的事实、实体、数值、风险、建议或来源。每个 section 保持简洁，"
+                "limitations 不得重复正文已表达的不确定性，并返回完整闭合 JSON。"
             ),
         )
     except Exception as exc:

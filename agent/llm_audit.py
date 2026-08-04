@@ -21,7 +21,25 @@ _CONTEXT: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
     "agent_llm_audit_context", default={}
 )
 _LOCK = threading.RLock()
-_ALLOWED_STAGES = {"planner", "goal_reviewer", "plan_reviewer", "completion", "report", "critic", "replan"}
+_ALLOWED_STAGES = {
+    "planner",
+    "goal_reviewer",
+    "plan_reviewer",
+    "completion",
+    "report",
+    "critic",
+    "replan",
+    "main_agent_single_entry",
+    "graph_entity_candidate_extraction",
+    "graph_coordinator_planner",
+    "graph_coordinator_forward_replan",
+    "worker_tool_dag_planner",
+    "worker_tool_dag_replanner",
+    "graph_entity_analysis",
+    "graph_risk_analyst",
+    "graph_strategy_guard",
+    "graph_report_writer",
+}
 
 
 def _utc_now() -> str:
@@ -37,6 +55,9 @@ def activate_llm_audit_context(
     iteration: int | None = None,
     formal_entry_used: bool = False,
     formal_entry_name: str = "",
+    task_id: str = "",
+    worker_id: str = "",
+    agent_id: str = "",
 ) -> None:
     """Bind executor-owned metadata to subsequent LLM calls in this context."""
     _CONTEXT.set(
@@ -48,6 +69,9 @@ def activate_llm_audit_context(
             "iteration": iteration,
             "formal_entry_used": bool(formal_entry_used),
             "formal_entry_name": str(formal_entry_name or ""),
+            "task_id": str(task_id or ""),
+            "worker_id": str(worker_id or ""),
+            "agent_id": str(agent_id or ""),
         }
     )
 
@@ -87,6 +111,9 @@ def record_llm_call(
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
     total_tokens: int = 0,
+    cached_prompt_tokens: int = 0,
+    reasoning_tokens: int = 0,
+    timing: dict[str, Any] | None = None,
 ) -> str:
     """Persist one actual transport attempt when invoked by the formal executor."""
     context = dict(_CONTEXT.get() or {})
@@ -104,7 +131,11 @@ def record_llm_call(
         "conversation_id": str(context.get("conversation_id") or ""),
         "case_id": str(context.get("case_id") or ""),
         "iteration": context.get("iteration"),
+        "task_id": str(context.get("task_id") or ""),
+        "worker_id": str(context.get("worker_id") or ""),
+        "agent_id": str(context.get("agent_id") or ""),
         "stage": normalized_stage,
+        "raw_stage": str(stage or "")[:120],
         "covered_stages": (
             ["goal_reviewer", "plan_reviewer"]
             if str(operation or "") == "goal_and_plan_review"
@@ -136,11 +167,39 @@ def record_llm_call(
         "prompt_tokens": max(0, int(prompt_tokens or 0)),
         "completion_tokens": max(0, int(completion_tokens or 0)),
         "total_tokens": max(0, int(total_tokens or 0)),
+        "cached_prompt_tokens": max(0, int(cached_prompt_tokens or 0)),
+        "reasoning_tokens": max(0, int(reasoning_tokens or 0)),
+        "timing": sanitize_for_trace(dict(timing or {})),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     with _LOCK:
         with path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(sanitize_for_trace(event), ensure_ascii=False, sort_keys=True) + "\n")
+    try:
+        from agent.console_trace import record_llm_timing
+
+        record_llm_timing(
+            run_id=str(context.get("run_id") or ""),
+            task_id=str(context.get("task_id") or ""),
+            worker_id=str(context.get("worker_id") or ""),
+            agent_id=str(context.get("agent_id") or ""),
+            event_id=event_id,
+            stage=str(stage or ""),
+            operation=str(operation or ""),
+            provider=str(provider or ""),
+            model=str(model or ""),
+            success=bool(success),
+            duration_ms=max(0, int(duration_ms)),
+            prompt_tokens=max(0, int(prompt_tokens or 0)),
+            completion_tokens=max(0, int(completion_tokens or 0)),
+            total_tokens=max(0, int(total_tokens or 0)),
+            cached_prompt_tokens=max(0, int(cached_prompt_tokens or 0)),
+            reasoning_tokens=max(0, int(reasoning_tokens or 0)),
+            timing=dict(timing or {}),
+            error_type=str(error_type or ""),
+        )
+    except Exception:
+        pass
     return event_id
 
 

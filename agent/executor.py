@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 from typing import Any
 
 from core.llm import LLMExecutionDependencies, LLMRuntimeSettings, LLMService, resolve_active_llm_settings
@@ -253,6 +254,7 @@ def run_agent_request(
     behind the Worker-private graph adapter.
     """
 
+    run_started = time.perf_counter()
     raw_query = str(query or "").strip()
     user_id = str(user_id or "default")
     session_id = str(session_id or f"session_{user_id}")
@@ -346,6 +348,9 @@ def run_agent_request(
             session_id=session_id,
             run_id=runtime.run_id,
             language=language,
+        )
+        failure.setdefault("orchestration", {})["run_total_duration_ms"] = round(
+            (time.perf_counter() - run_started) * 1000.0, 3
         )
         flow_event(
             "RUN_FAILED",
@@ -449,6 +454,7 @@ def run_agent_request(
     }
     orchestration = {
         "success": bool(execution.get("success")),
+        "run_total_duration_ms": round((time.perf_counter() - run_started) * 1000.0, 3),
         "answer": str(execution.get("answer") or ""),
         "task_results": task_results,
         "graph_worker_results": dict(execution.get("graph_worker_results") or {}),

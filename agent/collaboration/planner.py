@@ -5,7 +5,13 @@ import re
 from typing import Any
 
 from core.llm import LLMService
-from core.llm.prompt_compaction import catalog_for_prompt, compact_json_dumps, schema_for_prompt
+from core.llm.prompt_compaction import (
+    compact_json_dumps,
+    coordinator_result_for_replan,
+    observation_for_replan,
+    plan_schema_for_prompt,
+    planning_catalog_for_prompt,
+)
 
 from agent.console_trace import flow_event
 
@@ -267,58 +273,75 @@ PLAN_SCHEMA = object_schema(
 )
 
 PLANNER_CONTRACT_EXAMPLES = {
-    "root_task_inputs": {
-        "description": "A root task has no upstream WorkerResult dependency.",
-        "inputs": {},
-    },
+    "root_task_inputs": {"inputs": {}},
     "single_upstream_input": {
-        "description": (
-            "inputs is a mapping from a declared semantic role to a typed "
-            "WorkerResult reference."
-        ),
         "inputs": {
             "current_state": {
                 "from_task_id": "T01",
                 "expected_output_type": "PortfolioAnalysisResult",
             }
-        },
+        }
     },
     "multiple_upstream_inputs": {
-        "description": "Use an array only when the selected role accepts multiple results.",
         "inputs": {
+            "risk_constraints": {
+                "from_task_id": "T02",
+                "expected_output_type": "PortfolioRiskResult",
+            },
             "supporting_analysis": [
                 {
-                    "from_task_id": "T02",
-                    "expected_output_type": "PortfolioRiskResult",
+                    "from_task_id": "T03",
+                    "expected_output_type": "UserProfileResult",
                 },
                 {
-                    "from_task_id": "T03",
+                    "from_task_id": "T04",
                     "expected_output_type": "ModelPredictionResult",
                 },
-            ]
-        },
+            ],
+        }
     },
     "invalid_unwrapped_reference": {
-        "description": (
-            "Invalid: from_task_id and expected_output_type cannot be direct "
-            "children of inputs because the semantic role is missing."
-        ),
         "inputs": {
             "from_task_id": "T01",
             "expected_output_type": "PortfolioAnalysisResult",
-        },
+        }
     },
-    "input_contract_ownership": {
-        "llm_owned_fields": [
-            "upstream_information_slots",
-            "available_context_slots",
-        ],
-        "code_owned_fields_to_omit": [
-            "direct_arg_names",
-            "runtime_bound_args",
-        ],
-    },
+    "input_contract": {},
 }
+
+
+def _repair_capability_catalog(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep exact structural contracts required to repair a candidate plan."""
+
+    worker_rows: list[dict[str, Any]] = []
+    for worker in cards:
+        task_rows: list[dict[str, Any]] = []
+        for task in worker.get("task_contracts") or []:
+            task_rows.append(
+                {
+                    key: task.get(key)
+                    for key in (
+                        "task_type",
+                        "args_schema",
+                        "semantic_inputs_schema",
+                        "output_type",
+                        "consumes_information_slots",
+                        "produces_information_slots",
+                        "required_context_slots",
+                        "allowed_request_modes",
+                        "access_mode",
+                    )
+                }
+            )
+        worker_rows.append(
+            {
+                "worker_id": worker.get("worker_id"),
+                "agent_id": worker.get("agent_id"),
+                "task_contracts": task_rows,
+            }
+        )
+    return worker_rows
+
 
 
 class CoordinatorPlanner:
@@ -783,7 +806,26 @@ class CoordinatorPlanner:
                 f"unsupported_agent_request_mode:{mode}"
             )
 
-        cards = catalog_for_prompt(self.directory.planning_catalog())
+        cards = planning_catalog_for_prompt(
+            self.directory.planning_catalog(), request_mode=mode
+        )
+        prompt_plan_schema = plan_schema_for_prompt(PLAN_SCHEMA)
+        flow_event(
+            "LLM_PROMPT_COMPACTION_APPLIED",
+            {
+                "version": "v18.4",
+                "stage": "graph_coordinator_planner",
+                "request_mode": mode,
+                "worker_count": len(cards),
+                "task_contract_count": sum(
+                    len(item.get("task_contracts") or []) for item in cards
+                ),
+                "catalog_chars": len(compact_json_dumps(cards)),
+                "schema_chars": len(compact_json_dumps(prompt_plan_schema)),
+                "llm_decision_owner": "main_agent",
+            },
+            run_id=run_id,
+        )
         reply_language = "en" if language == "en" else "zh"
         runtime_values = self._authoritative_runtime_values(
             focus_refs=focus_refs,
@@ -829,10 +871,14 @@ class CoordinatorPlanner:
             "不要根据 Worker 名称猜测能力；必须阅读每个 task_contract 的 consumes_information_slots、"
             "produces_information_slots、required_context_slots、coverage_semantics、freshness_semantics、"
             "authority_level、args_schema、semantic_inputs_schema、正反例、完成标准和 access_mode。"
+            "worker_capability_catalog 已由程序做无损规划视图压缩：args_schema 使用 required、fields、"
+            "runtime_bound_args 表示原参数约束；semantic_inputs_schema 使用 required_roles 和 roles，"
+            "每个 role 明确 allowed_output_types、required、cardinality、min_results、max_results。"
+            "目录中只省略当前 request_mode 或 READ 边界下必然不合法的能力，MainAgent仍须在全部合法能力中自主选择。"
             "规划采用目标约束的正向扩展，不使用反向递归。第一步生成 goal_contract：忠实保留用户最终目标，"
             "列出 desired_output_types、required_information_slots、completion_criteria 和 constraints。access_mode 由程序固定为 READ，MainAgent 不得把分析、风险、建议、待审批 Proposal 或报告视为 WRITE。"
-            "第二步初始化 planning_state.initial_available_information_slots；该值必须等于程序提供的"
-            "authoritative_initial_information_slots，不得自行添加尚未获得的事实。"
+            "第二步基于 authoritative_initial_information_slots 规划；initial、final 和 unmet 三个信息槽位字段"
+            "由程序在校验前生成，LLM只输出 planning_state.stop_reason。"
             "第三步从当前虚拟信息状态向前规划。每一轮只考虑 required_context_slots 已满足、直接参数可提供、"
             "必需 semantic inputs 已有生产者的 task_contract；从可执行候选中选择能满足尚未完成目标槽位，"
             "或能解锁目标必需后续能力的最小任务。选择后把该任务 expected_output.information_slots 加入虚拟状态，"
@@ -841,9 +887,7 @@ class CoordinatorPlanner:
             "图影响分析都不是持仓建议的默认必选项，只有用户目标或已选下游合同明确需要时才能加入。"
             "一个任务必须满足至少一项：直接覆盖 goal_contract.required_information_slots；"
             "或其输出被某个已规划下游任务明确消费；或生成 FinalReport。"
-            "所有目标已覆盖后立即停止。planning_state.final_planned_information_slots 不是本轮新增槽位列表，"
-            "而必须严格等于 authoritative_initial_information_slots 与每个已规划任务 expected_output.information_slots 的去重并集；"
-            "即 final = initial ∪ outputs(T1) ∪ ... ∪ outputs(Tn)。同时填写空 unmet_information_slots 和明确 stop_reason。"
+            "所有目标已覆盖后立即停止并填写明确 stop_reason；final 和 unmet 信息槽位由程序根据任务输出计算。"
             "goal_summary 和 completion_criteria 不得声称会使用模型信号、外部证据、图关系或其他可选材料，"
             "除非 required_information_slots 明确需要它且当前计划确实选择了生产该槽位的任务。"
             "连续一轮不能新增目标槽位或解锁能力时停止并让适当能力返回 need_context。"
@@ -899,6 +943,37 @@ class CoordinatorPlanner:
                 ),
             )
 
+        repair_catalog = _repair_capability_catalog(cards)
+
+        def build_repair_context(
+            candidate: dict[str, Any] | None,
+            error_context: dict[str, Any],
+        ) -> list[dict[str, Any]]:
+            del candidate, error_context
+            return [
+                {
+                    "role": "system",
+                    "content": (
+                        "你只修复一个已生成的 MainAgent Worker DAG。必须返回完整 JSON，"
+                        "保留合法任务和用户目标，只修改验证错误字段及必要依赖。"
+                        "repair_capability_catalog 提供全部合法结构合同；不得使用固定 Worker 链路。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": compact_json_dumps(
+                        {
+                            "request_mode": mode,
+                            "user_request": str(query or ""),
+                            "authoritative_initial_information_slots": initial_information_slots,
+                            "repair_capability_catalog": repair_catalog,
+                            "worker_dag_output_schema": prompt_plan_schema,
+                            "planner_contract_examples": PLANNER_CONTRACT_EXAMPLES,
+                        }
+                    ),
+                },
+            ]
+
         semantic_payload = self.llm_service.generate_json(
             stage="graph_coordinator_planner",
             messages=[
@@ -914,7 +989,7 @@ class CoordinatorPlanner:
                             "available_context_refs": [ref.to_dict() for ref in context_refs],
                             "worker_capability_catalog": cards,
                             "authoritative_initial_information_slots": initial_information_slots,
-                            "worker_dag_output_schema": schema_for_prompt(PLAN_SCHEMA),
+                            "worker_dag_output_schema": prompt_plan_schema,
                             "planner_contract_examples": PLANNER_CONTRACT_EXAMPLES,
                             "authoritative_runtime_values": {
                                 "user_id": str(user_id or "default"),
@@ -946,6 +1021,7 @@ class CoordinatorPlanner:
                 "无直接目标贡献且未被下游消费的任务必须删除。报告任务应引用终端专业结果，删除已经被终端结果消费的传递性原始输入。最终必须包含 FinalReport，并使"
                 "final_planned_information_slots 精确等于初始槽位与全部任务输出槽位的并集。"
             ),
+            repair_context_builder=build_repair_context,
         )
         prepared_payload, binding_audit = self._prepare_payload(
             semantic_payload,
@@ -1188,7 +1264,26 @@ class CoordinatorPlanner:
         """
 
         mode = str(request_mode or "analysis").strip().lower()
-        cards = catalog_for_prompt(self.directory.planning_catalog())
+        cards = planning_catalog_for_prompt(
+            self.directory.planning_catalog(), request_mode=mode
+        )
+        prompt_plan_schema = plan_schema_for_prompt(PLAN_SCHEMA)
+        flow_event(
+            "LLM_PROMPT_COMPACTION_APPLIED",
+            {
+                "version": "v18.4",
+                "stage": "graph_coordinator_forward_replan",
+                "request_mode": mode,
+                "worker_count": len(cards),
+                "task_contract_count": sum(
+                    len(item.get("task_contracts") or []) for item in cards
+                ),
+                "catalog_chars": len(compact_json_dumps(cards)),
+                "schema_chars": len(compact_json_dumps(prompt_plan_schema)),
+                "llm_decision_owner": "main_agent",
+            },
+            run_id=run_id,
+        )
         reply_language = "en" if language == "en" else "zh"
         runtime_values = self._authoritative_runtime_values(
             focus_refs=focus_refs,
@@ -1223,6 +1318,9 @@ class CoordinatorPlanner:
         reusable_ids = self._reusable_task_ids(current_tasks, current_results)
         task_by_id = {task.task_id: task for task in current_tasks}
         frozen_rows = [self._task_plan_row(task_by_id[task_id]) for task_id in reusable_ids]
+        frozen_prompt_rows = [
+            {**row, "input_contract": {}} for row in frozen_rows
+        ]
         frozen_signatures = {
             str(row["task_id"]): self._frozen_task_signature(row)
             for row in frozen_rows
@@ -1293,6 +1391,39 @@ class CoordinatorPlanner:
                 level="ERROR" if "failed" in event else "INFO",
             )
 
+        repair_catalog = _repair_capability_catalog(cards)
+
+        def build_replan_repair_context(
+            candidate: dict[str, Any] | None,
+            error_context: dict[str, Any],
+        ) -> list[dict[str, Any]]:
+            del candidate, error_context
+            return [
+                {
+                    "role": "system",
+                    "content": (
+                        "你只修复一个 Forward Replan active plan。保留 goal_contract 和冻结任务，"
+                        "只修复验证错误字段并返回完整 JSON。不得新增固定 Worker 链路。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": compact_json_dumps(
+                        {
+                            "request_mode": mode,
+                            "user_request": query,
+                            "goal_contract": goal_contract,
+                            "authoritative_initial_information_slots": initial_information_slots,
+                            "frozen_reusable_tasks": frozen_prompt_rows,
+                            "previous_task_ids": sorted(all_previous_ids),
+                            "repair_capability_catalog": repair_catalog,
+                            "worker_dag_output_schema": prompt_plan_schema,
+                            "planner_contract_examples": PLANNER_CONTRACT_EXAMPLES,
+                        }
+                    ),
+                },
+            ]
+
         payload = self.llm_service.generate_json(
             stage="graph_coordinator_forward_replan",
             messages=[
@@ -1305,10 +1436,9 @@ class CoordinatorPlanner:
                         "observations 中缺失信息或重新生成最终报告的最小任务。返回完整 active plan："
                         "所有 frozen_reusable_tasks 必须保留且不可修改；失败、部分完成和被替代任务不要保留；"
                         "新任务 ID 不得复用 previous_task_ids。新任务仍须生成完整 TaskExpectation。"
-                        "GoalContract、初始信息槽位和副作用边界不可改变。planning_state.initial_available_information_slots"
-                        " 必须仍然严格等于 authoritative_initial_information_slots，绝不能替换成或混入 current_available_information_slots；"
-                        "current_available_information_slots 只用于判断当前哪些能力可执行。final_planned_information_slots 必须等于"
-                        " authoritative_initial_information_slots 与完整 active plan 中全部任务输出槽位的并集。最终必须包含新的 FinalReport 生产者。"
+                        "GoalContract、初始信息槽位和副作用边界不可改变。current_available_information_slots 只用于判断"
+                        "当前哪些能力可执行；planning_state 的 initial、final、unmet 字段由程序生成，LLM只输出 stop_reason。"
+                        "最终必须包含新的 FinalReport 生产者。"
                         "严格输出 worker_dag_output_schema JSON。"
                     ),
                 },
@@ -1332,15 +1462,19 @@ class CoordinatorPlanner:
                                     ],
                                 }
                             ),
-                            "frozen_reusable_tasks": frozen_rows,
+                            "frozen_reusable_tasks": frozen_prompt_rows,
                             "reusable_results": {
-                                task_id: current_results[task_id].safe_for_coordinator()
+                                task_id: coordinator_result_for_replan(
+                                    current_results[task_id].safe_for_coordinator()
+                                )
                                 for task_id in reusable_ids
                             },
-                            "observations": observations,
+                            "observations": [
+                                observation_for_replan(item) for item in observations
+                            ],
                             "previous_task_ids": sorted(all_previous_ids),
                             "worker_capability_catalog": cards,
-                            "worker_dag_output_schema": schema_for_prompt(PLAN_SCHEMA),
+                            "worker_dag_output_schema": prompt_plan_schema,
                             "planner_contract_examples": PLANNER_CONTRACT_EXAMPLES,
                             "authoritative_runtime_values": {
                                 "user_id": str(user_id or "default"),
@@ -1364,6 +1498,7 @@ class CoordinatorPlanner:
                 "省略 input_contract.direct_arg_names 与 runtime_bound_args，由程序生成。"
                 "新任务使用唯一 task_id，并重新生成可达的 FinalReport。报告格式失败时保持终端专业输入不变，禁止增加其传递性原始上游。"
             ),
+            repair_context_builder=build_replan_repair_context,
         )
         prepared, binding_audit = self._prepare_payload(
             payload,

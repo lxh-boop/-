@@ -25,6 +25,7 @@ from agent.console_trace import (
 from agent.context.context_builder import ContextManager
 from agent.context.context_sanitizer import ContextSanitizer
 from agent.react.integration import record_tool_observation
+from agent.llm_audit import activate_llm_audit_context
 from agent.runtime_reliability import (
     CircuitBreakerRegistry,
     RuntimeBudget,
@@ -92,6 +93,21 @@ class ToolExecutor:
         run_id = str(context.get("run_id") or "")
         task_id = str(context.get("task_id") or "")
         if run_id:
+            activate_llm_audit_context(
+                run_id=run_id,
+                conversation_id=str(
+                    context.get("conversation_id")
+                    or context.get("session_id")
+                    or ""
+                ),
+                output_dir=context.get("output_dir"),
+                formal_entry_used=True,
+                formal_entry_name="agent.tool_runtime.executor",
+                task_id=task_id,
+                worker_id=str(context.get("agent_role") or agent_type or ""),
+                agent_id=str(context.get("agent_role") or agent_type or ""),
+            )
+        if run_id:
             flow_event(
                 "TOOL_EXECUTION_STARTED",
                 {
@@ -117,7 +133,7 @@ class ToolExecutor:
             task_id=str((context or {}).get("task_id") or ""),
         )
         definition = self.registry.get(requested_name)
-        started_at = datetime.now().isoformat(timespec="seconds")
+        started_at = datetime.now().isoformat(timespec="milliseconds")
         started = time.perf_counter()
         if definition is None:
             return self._failure(
@@ -347,7 +363,7 @@ class ToolExecutor:
                     result.setdefault("warnings", []).append(
                         f"artifact_save_failed:{type(exc).__name__}"
                     )
-            finished_at = datetime.now().isoformat(timespec="seconds")
+            finished_at = datetime.now().isoformat(timespec="milliseconds")
             metadata = {
                 "canonical_tool_name": canonical_name,
                 "runtime_reliability": runtime_metadata.to_dict(),
@@ -589,7 +605,7 @@ class ToolExecutor:
         tool_call_id: str = "",
         argument_keys: list[str] | None = None,
     ) -> UnifiedToolResult:
-        finished_at = datetime.now().isoformat(timespec="seconds")
+        finished_at = datetime.now().isoformat(timespec="milliseconds")
         trace_event(
             "tool.execute.blocked_or_failed",
             {

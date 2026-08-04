@@ -21,6 +21,7 @@ _RUN_FILES: dict[str, Path] = {}
 _RUN_SEQUENCE: dict[str, int] = {}
 _RUN_FINALIZED: set[str] = set()
 _RUN_TOOL_EXECUTIONS: dict[str, list[dict[str, Any]]] = {}
+_RUN_LLM_EXECUTIONS: dict[str, list[dict[str, Any]]] = {}
 
 _SECRET_KEY_PATTERN = re.compile(
     r"(?:api[_-]?key|token|secret|password|passwd|credential|"
@@ -95,6 +96,7 @@ _STAGE_LABELS = {
     "WORKER_DAG_REGISTERED": "Worker DAG 已登记",
     "WORKER_EXECUTION_STARTED": "Worker DAG 执行开始",
     "WORKER_EXECUTION_COMPLETED": "Worker DAG 执行完成",
+    "LLM_TIMING_BREAKDOWN": "LLM 分阶段耗时",
     "TOOL_EXECUTION_STARTED": "工具执行开始",
     "TOOL_EXECUTION_SUCCEEDED": "工具执行成功",
     "TOOL_EXECUTION_FAILED": "工具执行失败",
@@ -640,6 +642,121 @@ def record_tool_execution(
     )
 
 
+def record_llm_timing(
+    *,
+    run_id: str,
+    task_id: str = "",
+    worker_id: str = "",
+    agent_id: str = "",
+    event_id: str,
+    stage: str,
+    operation: str,
+    provider: str,
+    model: str,
+    success: bool,
+    duration_ms: float,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    total_tokens: int = 0,
+    cached_prompt_tokens: int = 0,
+    reasoning_tokens: int = 0,
+    timing: dict[str, Any] | None = None,
+    error_type: str = "",
+) -> str:
+    """Save one LLM transport breakdown without prompts or responses."""
+
+    canonical_run_id = str(run_id or "").strip()
+    if not canonical_run_id:
+        return ""
+    observed = dict(timing or {})
+    record = {
+        "event_id": str(event_id or ""),
+        "task_id": str(task_id or ""),
+        "worker_id": str(worker_id or ""),
+        "agent_id": str(agent_id or ""),
+        "stage": str(stage or ""),
+        "operation": str(operation or ""),
+        "provider": str(provider or ""),
+        "model": str(model or ""),
+        "success": bool(success),
+        "duration_ms": float(duration_ms or 0.0),
+        "prompt_tokens": int(prompt_tokens or 0),
+        "completion_tokens": int(completion_tokens or 0),
+        "total_tokens": int(total_tokens or 0),
+        "cached_prompt_tokens": int(cached_prompt_tokens or 0),
+        "reasoning_tokens": int(reasoning_tokens or 0),
+        "measurement_mode": str(observed.get("measurement_mode") or "unknown"),
+        "client_setup_ms": observed.get("client_setup_ms"),
+        "queue_network_ms": observed.get("queue_network_ms"),
+        "input_prefill_ms": observed.get("input_prefill_ms"),
+        "thinking_output_ms": observed.get("thinking_output_ms"),
+        "request_to_first_token_ms": observed.get("request_to_first_token_ms"),
+        "provider_transport_total_ms": observed.get("provider_transport_total_ms"),
+        "unattributed_provider_ms": observed.get("unattributed_provider_ms"),
+        "first_delta_kind": str(observed.get("first_delta_kind") or ""),
+        "reasoning_chars": int(observed.get("reasoning_chars") or 0),
+        "content_chars": int(observed.get("content_chars") or 0),
+        "timing_note": str(observed.get("timing_note") or ""),
+        "error_type": str(error_type or ""),
+    }
+    with _LOCK:
+        _RUN_LLM_EXECUTIONS.setdefault(canonical_run_id, []).append(record)
+    return ""
+
+
+def get_llm_execution_timing(run_id: str, task_id: str = "") -> dict[str, Any]:
+    """Return cumulative transport timing for a run or one Worker task."""
+
+    rows = [
+        dict(item)
+        for item in _RUN_LLM_EXECUTIONS.get(str(run_id or ""), [])
+        if isinstance(item, dict)
+        and (not task_id or str(item.get("task_id") or "") == str(task_id))
+    ]
+    return {
+        "call_count": len(rows),
+        "duration_ms_sum": round(sum(float(item.get("duration_ms") or 0.0) for item in rows), 3),
+        "provider_transport_ms_sum": round(sum(float(item.get("provider_transport_total_ms") or 0.0) for item in rows), 3),
+        "queue_network_ms_sum": round(sum(float(item.get("queue_network_ms") or 0.0) for item in rows), 3),
+        "input_prefill_ms_sum": round(sum(float(item.get("input_prefill_ms") or 0.0) for item in rows), 3),
+        "thinking_output_ms_sum": round(sum(float(item.get("thinking_output_ms") or 0.0) for item in rows), 3),
+        "prompt_tokens": sum(int(item.get("prompt_tokens") or 0) for item in rows),
+        "completion_tokens": sum(int(item.get("completion_tokens") or 0) for item in rows),
+        "total_tokens": sum(int(item.get("total_tokens") or 0) for item in rows),
+        "items": rows,
+    }
+
+
+def get_tool_execution_timing(run_id: str, task_id: str = "") -> dict[str, Any]:
+    """Return cumulative and wall-clock Tool timing for a run or Worker task."""
+
+    rows = [
+        dict(item)
+        for item in _RUN_TOOL_EXECUTIONS.get(str(run_id or ""), [])
+        if isinstance(item, dict)
+        and (not task_id or str(item.get("task_id") or "") == str(task_id))
+    ]
+    duration_sum = sum(float(item.get("duration_ms") or 0.0) for item in rows)
+    starts: list[datetime] = []
+    finishes: list[datetime] = []
+    for item in rows:
+        try:
+            starts.append(datetime.fromisoformat(str(item.get("started_at") or "")))
+            finishes.append(datetime.fromisoformat(str(item.get("finished_at") or "")))
+        except (TypeError, ValueError):
+            continue
+    wall_ms = 0.0
+    if starts and finishes:
+        wall_ms = max(0.0, (max(finishes) - min(starts)).total_seconds() * 1000.0)
+    return {
+        "call_count": len(rows),
+        "duration_ms_sum": round(duration_sum, 3),
+        "wall_duration_ms": round(wall_ms, 3),
+        "parallelism_savings_ms": round(max(0.0, duration_sum - wall_ms), 3),
+        "items": rows,
+    }
+
+
 def trace_event(
     stage: str,
     payload: Any = None,
@@ -837,6 +954,11 @@ def finalize_flow_markdown(
                     for item in _RUN_TOOL_EXECUTIONS.get(canonical_run_id, [])
                     if isinstance(item, dict)
                 ]
+            llm_executions = [
+                dict(item)
+                for item in _RUN_LLM_EXECUTIONS.get(canonical_run_id, [])
+                if isinstance(item, dict)
+            ]
 
             lines: list[str] = [
                 marker,
@@ -853,6 +975,7 @@ def finalize_flow_markdown(
                 f"| Runtime 状态 | `{_markdown_inline(runtime_status)}` |",
                 f"| 执行状态 | `{_markdown_inline(execution_status)}` |",
                 f"| 是否成功 | `{'true' if success else 'false'}` |",
+                f"| 端到端总耗时(ms) | `{payload.get('run_total_duration_ms', 0)}` |",
                 f"| Worker 计划数 | `{len(planned_tasks)}` |",
                 f"| Worker 结果数 | `{len(result_items)}` |",
                 f"| 完成数 | `{graph_results.get('completed_count', 0)}` |",
@@ -860,6 +983,7 @@ def finalize_flow_markdown(
                 f"| 等待上下文数 | `{graph_results.get('waiting_context_count', 0)}` |",
                 f"| 内部运行计数 | `{payload.get('internal_tool_call_count', 0)}` |",
                 f"| 已记录 Tool 调用数 | `{len(tool_executions)}` |",
+                f"| 已记录 LLM 调用数 | `{len(llm_executions)}` |",
                 f"| 完成时间 | `{datetime.now().isoformat(timespec='milliseconds')}` |",
                 "",
             ]
@@ -871,6 +995,72 @@ def finalize_flow_markdown(
                     *_markdown_json(llm_runtime),
                     "",
                 ])
+
+            lines.extend([
+                "## LLM 分阶段耗时",
+                "",
+                "测量边界：排队/网络为请求提交至流式响应头；输入预填充为响应头至首个 Provider Delta；模型思考与输出为首个 Delta 至流结束。若 Provider 不支持流式边界，将标记为 aggregate_only，不伪造拆分数据。",
+                "",
+            ])
+            if llm_executions:
+                lines.extend([
+                    "| Stage | Task ID | Operation | 排队/网络(ms) | 输入预填充(ms) | 思考与输出(ms) | Provider总耗时(ms) | 输入Token | 输出Token | 测量模式 |",
+                    "|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+                ])
+                for item in llm_executions:
+                    lines.append(
+                        "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |".format(
+                            _markdown_inline(item.get("stage")),
+                            _markdown_inline(item.get("task_id") or "-"),
+                            _markdown_inline(item.get("operation")),
+                            _markdown_inline(item.get("queue_network_ms")),
+                            _markdown_inline(item.get("input_prefill_ms")),
+                            _markdown_inline(item.get("thinking_output_ms")),
+                            _markdown_inline(item.get("provider_transport_total_ms")),
+                            _markdown_inline(item.get("prompt_tokens")),
+                            _markdown_inline(item.get("completion_tokens")),
+                            _markdown_inline(item.get("measurement_mode")),
+                        )
+                    )
+                lines.extend(["", "### LLM 耗时详情（已脱敏）", "", *_markdown_json(llm_executions), ""])
+            else:
+                lines.extend(["本次运行没有保存到 LLM 分阶段耗时。", ""])
+
+            # Worker dependency wait is outside Worker execution duration; LLM
+            # and Tool timings are components inside Worker execution duration.
+            if timeline:
+                tool_by_task: dict[str, float] = {}
+                llm_by_task: dict[str, float] = {}
+                for item in tool_executions:
+                    key = str(item.get("task_id") or "")
+                    tool_by_task[key] = tool_by_task.get(key, 0.0) + float(item.get("duration_ms") or 0.0)
+                for item in llm_executions:
+                    key = str(item.get("task_id") or "")
+                    llm_by_task[key] = llm_by_task.get(key, 0.0) + float(item.get("provider_transport_total_ms") or item.get("duration_ms") or 0.0)
+                lines.extend([
+                    "## Worker 依赖等待与执行耗时",
+                    "",
+                    "| Task ID | Worker | 依赖等待(ms) | Worker执行(ms) | 内含LLM(ms) | 内含Tool累计(ms) | 未归类执行(ms) |",
+                    "|---|---|---:|---:|---:|---:|---:|",
+                ])
+                for item in timeline:
+                    task_key = str(item.get("task_id") or "")
+                    worker_ms = float(item.get("duration_ms") or 0.0)
+                    llm_ms = float(llm_by_task.get(task_key, 0.0))
+                    tool_ms = float(tool_by_task.get(task_key, 0.0))
+                    unclassified = max(0.0, worker_ms - llm_ms - tool_ms)
+                    lines.append(
+                        "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |".format(
+                            _markdown_inline(task_key),
+                            _markdown_inline(item.get("agent_id")),
+                            _markdown_inline(item.get("dependency_wait_ms")),
+                            _markdown_inline(round(worker_ms, 3)),
+                            _markdown_inline(round(llm_ms, 3)),
+                            _markdown_inline(round(tool_ms, 3)),
+                            _markdown_inline(round(unclassified, 3)),
+                        )
+                    )
+                lines.append("")
 
             lines.extend([
                 "## MainAgent 规划信息",
@@ -1081,6 +1271,7 @@ def finalize_flow_markdown(
 
             _RUN_FINALIZED.add(canonical_run_id)
             _RUN_TOOL_EXECUTIONS.pop(canonical_run_id, None)
+            _RUN_LLM_EXECUTIONS.pop(canonical_run_id, None)
             return str(path)
     except Exception:
         return ""
