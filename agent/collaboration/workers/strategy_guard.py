@@ -1,8 +1,10 @@
-"""Execute the proposal-only Strategy Guard Worker.
+"""Run-local read-only Proposal Worker.
 
-The Worker selects one allowed proposal capability using the run-scoped LLM and
-may create a pending approval artifact. It never grants approval, commits a
-strategy, activates a binding, or changes current positions.
+W05 is an LLM Worker that transforms authoritative upstream WorkerResults into a
+structured ReviewedProposal. Producing advice or a proposal is READ: no proposal
+row, order, portfolio, strategy, profile, or other persistent business state is
+written here. Persisting or executing a proposal belongs to the separate WRITE
+confirmation protocol.
 """
 
 from __future__ import annotations
@@ -13,9 +15,55 @@ from typing import Any
 
 from core.llm import LLMService
 
+from ..completion import validate_completion_report
 from ..models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus
+from ..worker_contracts import (
+    array_schema,
+    completion_report_schema,
+    object_schema,
+    string_schema,
+    validate_schema,
+)
 from .common import dependency_results as dependency_result_items
 from .common import safe_public_value
+
+
+def _proposal_output_schema() -> dict[str, Any]:
+    return object_schema(
+        {
+            "action": string_schema(enum=["proposal_ready", "need_context", "blocked"]),
+            "proposal": {"type": "object", "additionalProperties": True},
+            "source_task_ids": array_schema(string_schema(min_length=1)),
+            "limitations": array_schema({"type": "string"}),
+            "reason": {"type": "string"},
+            "missing_items": array_schema(
+                object_schema(
+                    {
+                        "key": string_schema(min_length=1),
+                        "description": string_schema(min_length=1),
+                        "expected_format": {"type": "string"},
+                    },
+                    required=["key", "description", "expected_format"],
+                    additional_properties=False,
+                )
+            ),
+            "requires_approval": {"type": "boolean"},
+            "execution_allowed": {"type": "boolean"},
+            "completion_report": completion_report_schema(),
+        },
+        required=[
+            "action",
+            "proposal",
+            "source_task_ids",
+            "limitations",
+            "reason",
+            "missing_items",
+            "requires_approval",
+            "execution_allowed",
+            "completion_report",
+        ],
+        additional_properties=False,
+    )
 
 
 def run_strategy_guard(
@@ -30,104 +78,101 @@ def run_strategy_guard(
     language: str,
     execution_context: dict[str, Any] | None,
 ) -> GraphWorkerResult:
-    from agent.tool_engine import (
-        AGENT_MAIN,
-        OP_PROPOSAL,
-        execute_tool_legacy_dict,
-        get_tool_registry_v2,
-    )
+    # These parameters remain in the stable Worker facade but are intentionally
+    # unused: a READ proposal must not invoke the legacy persistent proposal tool.
+    del output_dir, db_path, default_top_k, execution_context
 
-    registry = get_tool_registry_v2()
-    catalog: list[dict[str, Any]] = []
-    for definition in registry.list(agent_type=AGENT_MAIN, operation_type=OP_PROPOSAL):
-        if str(getattr(definition, "operation_type", "")).lower() != str(OP_PROPOSAL).lower():
-            continue
-        catalog.append(
-            {
-                "name": str(definition.name),
-                "description": str(definition.description),
-                "input_schema": dict(definition.input_schema or {}),
-                "produced_outputs": list(definition.produced_outputs or []),
-                "requires_approval": bool(definition.requires_approval),
-            }
-        )
-    if not catalog:
-        return GraphWorkerResult(
-            task_id=task.task_id,
-            agent_id=task.assigned_agent,
-            status=ResultStatus.FAILED,
-            output_type="ReviewedProposal",
-            data=None,
-            error={
-                "code": "proposal_capability_catalog_empty",
-                "message": "没有可用的 Proposal 能力。",
-                "component": "strategy_guard",
-                "retryable": False,
-            },
-            focus_refs=task.focus_refs,
-            summary="没有可用的 Proposal 能力，未进行任何写入。",
-            warnings=["proposal_capability_catalog_empty"],
-        )
-    allowed = {item["name"] for item in catalog}
+    selected_ids = list(dict.fromkeys(task.dependency_task_ids or dependency_results.keys()))
+    selected = {
+        task_id: payload
+        for task_id, payload in dependency_results.items()
+        if not selected_ids or task_id in set(selected_ids)
+    }
+    safe_dependencies = safe_public_value(dependency_result_items(selected))
+    allowed_source_ids = set(selected)
 
     def validate(payload: dict[str, Any]) -> None:
-        action = str(payload.get("action") or "").lower()
-        if action not in {"execute_proposal", "need_context", "blocked"}:
-            raise RuntimeError("invalid_strategy_guard_action")
-        if action == "execute_proposal" and str(payload.get("capability") or "") not in allowed:
-            raise RuntimeError("proposal_capability_not_allowed")
+        validate_schema(payload, _proposal_output_schema())
+        action = str(payload.get("action") or "")
+        source_ids = [str(item) for item in payload.get("source_task_ids") or []]
+        unknown = sorted(set(source_ids) - allowed_source_ids)
+        if unknown:
+            raise RuntimeError("proposal_unknown_source_task_ids:" + ",".join(unknown))
+        if action == "proposal_ready":
+            if not bool(payload.get("requires_approval")):
+                raise RuntimeError("proposal_requires_approval_must_be_true")
+            if bool(payload.get("execution_allowed")):
+                raise RuntimeError("proposal_execution_allowed_must_be_false")
+            if not isinstance(payload.get("proposal"), dict) or not payload.get("proposal"):
+                raise RuntimeError("proposal_payload_required")
+        validate_completion_report(
+            dict(payload.get("completion_report") or {}),
+            dict(task.completion_contract or {}),
+            path="$.completion_report",
+        )
 
-    decision = llm_service.generate_json(
+    payload = llm_service.generate_json(
         stage="graph_strategy_guard",
         messages=[
             {
                 "role": "system",
                 "content": (
-                    "你是 Strategy Guard 的私有 Proposal 规划器。主 Agent 看不到这些私有能力。"
-                    "任务中必须存在明确 change_intent；只能选择一个 proposal 能力生成待审批预案。对于当前持仓调整方案，只能依据 dependency_results 中的组合、风险、模型排名等权威结果形成参数；"
-                    "不得自行补充证券实体、风险事实或模型信号；禁止 Commit，禁止表示已经执行。"
-                    "Agent 公共实体引用均为 GraphRef，不得要求主 Agent 提供 stock_code。"
-                    "严格输出 JSON：{\"action\":\"execute_proposal|need_context|blocked\","
-                    "\"capability\":\"\",\"parameters\":{},\"reason\":\"\",\"missing_items\":[]}。"
+                    "你是 W05 Strategy Guard，是只读的 LLM Worker。你的任务是把用户明确的变更目标和"
+                    "上游权威 WorkerResult 转换为当前 Run 内的 ReviewedProposal，或明确返回 need_context/blocked。"
+                    "分析、建议和待审批 Proposal 都属于 READ；不得调用写工具，不得保存 Proposal，不得修改账户、"
+                    "持仓、策略、画像或配置，不得声称已经执行。只使用 structured_upstream_results 中的事实，"
+                    "不得补造证券、持仓、风险、模型信号或约束。proposal_ready 时 requires_approval 必须为 true，"
+                    "execution_allowed 必须为 false。逐项对照 completion_contract 返回 completion_report，"
+                    "report_source 必须为 llm。规则只校验结构和引用，业务方案由你依据结构化输入完成。"
+                    "严格输出 proposal_output_schema 对应的 JSON，不要 Markdown。"
                 ),
             },
             {
                 "role": "user",
                 "content": json.dumps(
                     {
+                        "user_request": str(current_user_request or ""),
                         "task": task.safe_for_coordinator(),
                         "worker_args": safe_public_value(task.args),
-                        "user_request": current_user_request,
-                        "dependency_results": safe_public_value(
-                            dependency_result_items(dependency_results)
-                        ),
-                        "available_proposal_capabilities": catalog,
-                        "reply_language": language,
+                        "structured_upstream_results": safe_dependencies,
+                        "allowed_source_task_ids": sorted(allowed_source_ids),
+                        "completion_contract": dict(task.completion_contract or {}),
+                        "proposal_persistence_policy": {
+                            "access_mode": "read",
+                            "scope": "current_run_only",
+                            "persistent_write_performed": False,
+                            "execution_allowed": False,
+                        },
+                        "reply_language": "en" if language == "en" else "zh",
+                        "proposal_output_schema": _proposal_output_schema(),
                     },
                     ensure_ascii=False,
                     default=str,
                 ),
             },
         ],
-        max_output_tokens=2200,
+        max_output_tokens=3200,
         validator=validate,
         operation=task.task_type,
+        repair_mode="targeted",
+        repair_guidance=(
+            "只修复 JSON Schema、source_task_ids、requires_approval/execution_allowed 和 completion_report。"
+            "不得新增上游没有的业务事实，不得转成写操作。"
+        ),
     )
-    action = str(decision.get("action") or "").lower()
+
+    action = str(payload.get("action") or "")
+    completion = dict(payload.get("completion_report") or {})
     if action == "need_context":
         missing = [
             MissingContextItem(
                 key=str(item.get("key") or "proposal_context"),
-                description=str(item.get("description") or "生成预案所需上下文"),
-                expected_format=str(item.get("expected_format") or "明确目标或数值"),
-                reason=str(decision.get("reason") or "无法安全生成 Proposal。"),
-                searched_sources=[
-                    "task",
-                    "dependency_results",
-                    "private_proposal_planner",
-                ],
+                description=str(item.get("description") or "生成方案所需上下文"),
+                expected_format=str(item.get("expected_format") or "结构化业务参数"),
+                reason=str(payload.get("reason") or "当前上游信息不足。"),
+                searched_sources=["task", "structured_upstream_results", "session_context"],
             )
-            for item in decision.get("missing_items") or []
+            for item in payload.get("missing_items") or []
             if isinstance(item, dict)
         ]
         return GraphWorkerResult(
@@ -138,8 +183,10 @@ def run_strategy_guard(
             data=None,
             error=None,
             focus_refs=task.focus_refs,
-            summary="生成预案前需要补充信息。",
+            summary=str(payload.get("reason") or "生成方案前需要补充信息。"),
             missing_items=missing,
+            limitations=[str(item) for item in payload.get("limitations") or []],
+            completion=completion,
         )
     if action == "blocked":
         return GraphWorkerResult(
@@ -150,88 +197,53 @@ def run_strategy_guard(
             data=None,
             error={
                 "code": "proposal_blocked",
-                "message": str(decision.get("reason") or "当前请求不能安全形成预案。"),
+                "message": str(payload.get("reason") or "当前输入不能形成安全的待审批方案。"),
                 "component": "strategy_guard",
                 "retryable": False,
             },
             focus_refs=task.focus_refs,
-            summary=str(decision.get("reason") or "当前请求不能安全形成预案。"),
+            summary=str(payload.get("reason") or "当前输入不能形成安全的待审批方案。"),
+            warnings=[str(item) for item in payload.get("limitations") or []],
+            completion=completion,
         )
 
-    params = dict(decision.get("parameters") or {})
-    params.pop("account_id", None)
-    params["user_id"] = task.user_id
-    params.setdefault("change_intent", str(task.args.get("change_intent") or ""))
-    raw = execute_tool_legacy_dict(
-        str(decision.get("capability") or ""),
-        params,
-        context={
-            **dict(execution_context or {}),
-            "output_dir": output_dir,
-            "db_path": db_path,
-            "default_top_k": default_top_k,
-            "user_id": task.user_id,
-            "session_id": task.session_id,
-            "conversation_id": task.session_id,
-            "run_id": task.run_id,
-            "task_id": task.task_id,
-            "agent_role": task.assigned_agent,
-            "dependency_results": dependency_results,
-            "graph_refs": [
-                ref.to_dict() for ref in task.focus_refs + task.context_refs
-            ],
-            "llm_runtime_settings": llm_service.settings,
-            "llm_profile_id": llm_service.profile_id,
-            "llm_config_hash": llm_service.config_hash,
-        },
-        agent_type=AGENT_MAIN,
-        approval_granted=False,
-    )
-    success = bool(raw.get("success"))
-    data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
-    plan_id = str(data.get("plan_id") or raw.get("plan_id") or "")
-    proposal_id = str(data.get("proposal_id") or raw.get("proposal_id") or "")
+    proposal_id = f"run:{task.run_id}:proposal:{task.task_id}"
+    proposal = safe_public_value(payload.get("proposal") or {})
     return GraphWorkerResult(
         task_id=task.task_id,
         agent_id=task.assigned_agent,
-        status=ResultStatus.PROPOSAL_READY if success else ResultStatus.FAILED,
+        status=ResultStatus.PROPOSAL_READY,
         output_type="ReviewedProposal",
-        data=(
-            {
-                "proposal_id": proposal_id,
-                "plan_id": plan_id,
-                "proposal": safe_public_value(data),
-                "requires_approval": bool(success),
-                "execution_allowed": False,
-            }
-            if success
-            else None
-        ),
-        error=(
-            None
-            if success
-            else {
-                "code": str(raw.get("error_type") or "proposal_generation_failed"),
-                "message": str(raw.get("message") or "预案生成失败。"),
-                "component": str(decision.get("capability") or "strategy_guard"),
-                "retryable": True,
-            }
-        ),
+        data={
+            "proposal_id": proposal_id,
+            "plan_id": "",
+            "proposal": proposal,
+            "source_task_ids": [str(item) for item in payload.get("source_task_ids") or []],
+            "limitations": [str(item) for item in payload.get("limitations") or []],
+            "requires_approval": True,
+            "execution_allowed": False,
+            "access_mode": "read",
+            "scope": "current_run_only",
+            "persistent_write_performed": False,
+        },
+        error=None,
         focus_refs=task.focus_refs,
-        summary=str(raw.get("message") or ("已生成待审批预案。" if success else "预案生成失败。")),
+        summary=str(payload.get("reason") or "已生成当前 Run 内的待审批方案，尚未保存或执行。"),
         findings=[
             {
-                "kind": "proposal",
-                "plan_id": plan_id,
+                "kind": "run_local_proposal",
                 "proposal_id": proposal_id,
-                "data": safe_public_value(data),
+                "source_task_ids": [str(item) for item in payload.get("source_task_ids") or []],
             }
         ],
-        confidence=1.0 if success else 0.0,
-        warnings=[str(item) for item in raw.get("warnings") or []],
+        confidence=0.9,
+        warnings=[str(item) for item in payload.get("limitations") or []],
         metadata={
-            "plan_id": plan_id,
             "proposal_id": proposal_id,
-            "requires_approval": success,
+            "requires_approval": True,
+            "execution_allowed": False,
+            "access_mode": "read",
+            "persistent_write_performed": False,
         },
+        completion=completion,
     )

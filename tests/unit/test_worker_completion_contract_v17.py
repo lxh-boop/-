@@ -67,14 +67,40 @@ def _dependencies() -> dict[str, dict]:
                 "results": [],
                 "record_count": 0,
                 "source_count": 0,
+                "deduplication": {
+                    "raw_record_count": 0,
+                    "canonical_record_count": 0,
+                    "duplicate_record_count": 0,
+                },
                 "coverage": {"coverage_satisfied": True},
                 "business_empty": True,
                 "write_performed": False,
             },
             "summary": "证据查询完成，业务结果为空。",
             "confidence": 1.0,
-        }
+        },
+        "T00": {
+            "contract_version": "graph_worker_result.v1",
+            "task_id": "T00",
+            "agent_id": "PORTFOLIO_ANALYST",
+            "status": "completed",
+            "output_type": "ModelPredictionResult",
+            "payload": {
+                "security_ref": _ref().to_dict(),
+                "found": True,
+                "record": {"score": 0.71, "predicted_return": 0.02},
+                "data_date": "2026-08-01",
+                "rank": 12,
+                "is_topk": False,
+                "total_count": 300,
+                "source_id": "model:test",
+                "reason": "test internal signal",
+            },
+            "summary": "系统内部模型事实已返回。",
+            "confidence": 1.0,
+        },
     }
+
 
 
 class _Provider:
@@ -104,26 +130,35 @@ class _EntityCompletionLLM:
                 "criterion_id": item["criterion_id"],
                 "satisfied": bool(self.completed),
                 "reason": "结构化上游结果支持该判断。" if self.completed else "未形成有效实体分析。",
-                "source_refs": ["T01"] if self.completed else [],
+                "source_refs": ["T01", "T00"] if self.completed else [],
             }
             for item in contract["criteria"]
         ]
         payload = {
             "entity_refs": [_ref().to_dict()],
-            "facts": ([{"statement": "证据查询为空。", "source_task_ids": ["T01"]}] if self.completed else []),
-            "analysis": ([{"statement": "当前只能确认指定范围内未检索到证据。", "source_task_ids": ["T01"]}] if self.completed else []),
-            "model_signals": [],
+            "facts": ([{"claim_id": "F01", "statement": "证据查询为空。", "source_task_ids": ["T01"]}] if self.completed else []),
+            "analysis": ([{"claim_id": "A01", "statement": "当前只能确认指定范围内未检索到证据。", "source_task_ids": ["T01"]}] if self.completed else []),
+            "model_signals": ([{
+                "claim_id": "M01",
+                "statement": "系统内部模型评分为0.71。",
+                "source_task_ids": ["T00"],
+                "direction": "up",
+                "horizon": "next_5_trading_days",
+                "strength": "moderate",
+            }] if self.completed else []),
             "relation_interpretations": [],
             "uncertainties": [
                 {
+                    "claim_id": "U01",
                     "statement": "缺少足够证据，不能形成进一步分析。",
-                    "source_task_ids": ["T01"],
+                    "source_task_ids": ["T01", "T00"],
                 }
             ],
             "conclusion": "已完成空结果分析。" if self.completed else "未完成实体分析。",
-            "source_task_ids": ["T01"],
+            "source_task_ids": ["T01", "T00"],
             "completion_report": {
                 "schema_version": COMPLETION_REPORT_VERSION,
+                "report_source": "llm",
                 "execution_status": "succeeded",
                 "contract_status": "valid",
                 "business_status": "empty" if self.completed else "insufficient",
@@ -167,9 +202,12 @@ def test_required_result_fields_are_compiled_from_registered_schema() -> None:
         "data.entity_refs",
         "data.facts",
         "data.analysis",
+        "data.model_signals",
+        "data.relation_interpretations",
         "data.uncertainties",
         "data.conclusion",
         "data.source_task_ids",
+        "data.input_diagnostics",
     ]
     assert contract["required_information_slots"] == [
         "entity_analysis",
@@ -182,6 +220,7 @@ def test_program_routes_validated_completion_report_without_business_inference()
     contract = AgentDirectory().completion_contract_for_task(task)
     report = {
         "schema_version": COMPLETION_REPORT_VERSION,
+        "report_source": "llm",
         "execution_status": "succeeded",
         "contract_status": "valid",
         "business_status": "insufficient",

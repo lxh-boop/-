@@ -32,6 +32,14 @@ _PATH_KEY_PATTERN = re.compile(
     r"absolute[_-]?path|stack[_-]?trace|traceback|raw[_-]?payload)",
     flags=re.IGNORECASE,
 )
+_SAFE_TOKEN_METRIC_KEYS = {
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "reasoning_tokens",
+    "cached_prompt_tokens",
+    "max_output_tokens",
+}
 _WINDOWS_PATH_PATTERN = re.compile(
     r"(?i)(?:[A-Z]:\\(?:[^\\\r\n]+\\)*[^\\\r\n]*)"
 )
@@ -187,6 +195,9 @@ def sanitize_for_trace(value: Any, *, depth: int = 0) -> Any:
                 break
 
             key = str(raw_key)
+            if key.lower() in _SAFE_TOKEN_METRIC_KEYS and isinstance(item, (int, float)):
+                result[key] = item
+                continue
             if _SECRET_KEY_PATTERN.search(key):
                 result[key] = "[redacted secret]"
                 continue

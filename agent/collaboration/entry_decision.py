@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Any
 
 from core.llm import LLMService
+from core.llm.prompt_compaction import compact_json_dumps
 
 
 class RequestMode(str, Enum):
@@ -16,6 +17,29 @@ class RequestMode(str, Enum):
     UNSUPPORTED = "unsupported"
 
 
+class EntityScope(str, Enum):
+    EXPLICIT_ENTITIES = "explicit_entities"
+    CONVERSATION_FOCUS = "conversation_focus"
+    PORTFOLIO = "portfolio"
+    ACCOUNT = "account"
+    GLOBAL = "global"
+    NONE = "none"
+
+
+@dataclass(frozen=True)
+class ContextBinding:
+    entity_scope: EntityScope = EntityScope.NONE
+    inherit_previous_focus: bool = False
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "entity_scope": self.entity_scope.value,
+            "inherit_previous_focus": bool(self.inherit_previous_focus),
+            "reason": str(self.reason or ""),
+        }
+
+
 @dataclass(frozen=True)
 class EntryDecision:
     mode: RequestMode
@@ -23,6 +47,7 @@ class EntryDecision:
     reply_language: str = ""
     source: str = "main_coordinator_llm"
     confidence: float = 0.0
+    context_binding: ContextBinding = ContextBinding()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -31,6 +56,7 @@ class EntryDecision:
             "reply_language": self.reply_language,
             "source": self.source,
             "confidence": self.confidence,
+            "context_binding": self.context_binding.to_dict(),
         }
 
 
@@ -89,6 +115,14 @@ def _validate_decision(payload: dict[str, Any]) -> None:
     language = str(payload.get("reply_language") or "").strip().lower()
     if language not in {"", "zh", "en"}:
         raise EntryDecisionError(f"invalid_entry_language:{language}")
+    binding = payload.get("context_binding")
+    if not isinstance(binding, dict):
+        raise EntryDecisionError("missing_context_binding")
+    scope = str(binding.get("entity_scope") or "").strip().lower()
+    if scope not in {item.value for item in EntityScope}:
+        raise EntryDecisionError(f"invalid_entity_scope:{scope}")
+    if not isinstance(binding.get("inherit_previous_focus"), bool):
+        raise EntryDecisionError("invalid_inherit_previous_focus")
 
 
 
@@ -139,8 +173,14 @@ class MainEntryDecisionPlanner:
             "应判为 proposal；‘分析我的持仓有什么风险’只要求风险结论，才属于 analysis。"
             "仅说‘确认’但上下文中没有待审批计划不能判为 confirm。"
             "必须忠实保留用户目标，不得把具体方案请求弱化为普通分析，也不得把查看请求扩大为 proposal。"
+            "同时输出 context_binding，描述当前任务应绑定的实体范围。entity_scope 只能是："
+            "explicit_entities（当前请求明确对象）、conversation_focus（需要延续上轮对象）、portfolio（完整组合）、"
+            "account（账户）、global（全局市场或系统）、none（无实体范围）。"
+            "inherit_previous_focus 由语义决定：只有当前目标确实延续上一轮对象时为 true；"
+            "账户、完整组合、全局或无对象任务不得继承上一轮单一证券。不要用关键词规则解释，按用户最终目标判断。"
             '严格输出 JSON：{"mode":"...","reason":"...",'
-            '"reply_language":"zh|en|","confidence":0.0}。'
+            '"reply_language":"zh|en|","confidence":0.0,'
+            '"context_binding":{"entity_scope":"...","inherit_previous_focus":false,"reason":"..."}}。'
         )
         payload = self.llm_service.generate_json(
             stage="main_agent_single_entry",
@@ -148,7 +188,7 @@ class MainEntryDecisionPlanner:
                 {"role": "system", "content": system},
                 {
                     "role": "user",
-                    "content": __import__("json").dumps(
+                    "content": compact_json_dumps(
                         {
                             "user_request": str(query or ""),
                             "session_memory_summary": str(memory_summary or "")[:6000],
@@ -158,7 +198,6 @@ class MainEntryDecisionPlanner:
                             },
                             "current_reply_language": language,
                         },
-                        ensure_ascii=False,
                     ),
                 },
             ],
@@ -174,10 +213,17 @@ class MainEntryDecisionPlanner:
         except (TypeError, ValueError):
             confidence = 0.0
 
+        raw_binding = dict(payload.get("context_binding") or {})
+        context_binding = ContextBinding(
+            entity_scope=EntityScope(str(raw_binding.get("entity_scope") or EntityScope.NONE.value)),
+            inherit_previous_focus=bool(raw_binding.get("inherit_previous_focus")),
+            reason=str(raw_binding.get("reason") or "")[:500],
+        )
         return EntryDecision(
             mode=mode,
             reason=reason,
             reply_language=str(payload.get("reply_language") or "").strip().lower(),
             source=source,
             confidence=confidence,
+            context_binding=context_binding,
         )

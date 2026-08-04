@@ -204,6 +204,31 @@ def _semantic_inputs_schema(
     }
 
 
+class AccessMode(str, Enum):
+    """Business-state access boundary used by planning and execution.
+
+    READ includes queries, analysis, recommendations, proposals and reports as
+    long as no persistent business state is changed. WRITE is reserved for
+    operations that mutate persistent account, position, strategy, profile or
+    other business state. Runtime logs, traces, caches and run artifacts do not
+    change this business access mode.
+    """
+
+    READ = "read"
+    WRITE = "write"
+
+    @classmethod
+    def from_value(cls, value: Any) -> "AccessMode":
+        if isinstance(value, cls):
+            return value
+        text = str(value or "").strip().lower()
+        if text in {"", cls.READ.value}:
+            return cls.READ
+        if text == cls.WRITE.value:
+            return cls.WRITE
+        raise ValueError(f"invalid_access_mode:{text}")
+
+
 class TaskStatus(str, Enum):
     CREATED = "created"
     READY = "ready"
@@ -267,7 +292,9 @@ class WorkerTaskContract:
     user_goal_examples: list[str] = field(default_factory=list)
     negative_goal_examples: list[str] = field(default_factory=list)
     completion_criteria: list[str] = field(default_factory=list)
-    completion_report_required: bool = False
+    completion_report_required: bool = True
+    completion_report_source: str = "runtime"
+    access_mode: AccessMode | str = AccessMode.READ
     planning_notes: list[str] = field(default_factory=list)
     # Forward-planning semantics exposed to MainAgent.  These fields describe
     # what information a task can consume and produce independently of Worker
@@ -318,6 +345,8 @@ class WorkerTaskContract:
             "user_goal_examples": list(self.user_goal_examples),
             "negative_goal_examples": list(self.negative_goal_examples),
             "completion_criteria": list(self.completion_criteria),
+            "completion_report_source": str(self.completion_report_source or "runtime"),
+            "access_mode": AccessMode.from_value(self.access_mode).value,
             "planning_notes": list(self.planning_notes),
             "consumes_information_slots": list(self.consumes_information_slots),
             "produces_information_slots": list(self.produces_information_slots),
@@ -326,7 +355,6 @@ class WorkerTaskContract:
             "freshness_semantics": _plain(self.freshness_semantics),
             "authority_level": str(self.authority_level or ""),
             "allowed_request_modes": list(self.allowed_request_modes),
-            "side_effect_policy": _plain(self.side_effect_policy),
             "required_upstream_output_groups": _plain(
                 self.required_upstream_output_groups
             ),
@@ -362,6 +390,7 @@ class AgentCapabilityCard:
     missing_context_policy: str = "return_to_main_agent"
     supports_parallel: bool = True
     can_generate_proposal: bool = False
+    access_mode: AccessMode | str = AccessMode.READ
     private_tool_ids: list[str] = field(default_factory=list, repr=False)
     private_worker_prompt: str = field(default="", repr=False)
 
@@ -383,6 +412,7 @@ class AgentCapabilityCard:
             authoritative_arg_bindings=self.authoritative_arg_bindings,
             selection_requirements=self.selection_requirements,
             required_upstream_output_groups=self.required_upstream_output_groups,
+            access_mode=self.access_mode,
             private_tool_ids=self.private_tool_ids,
         )
 
@@ -449,6 +479,7 @@ class AgentCapabilityCard:
             "missing_context_policy": self.missing_context_policy,
             "supports_parallel": self.supports_parallel,
             "can_generate_proposal": self.can_generate_proposal,
+            "access_mode": AccessMode.from_value(self.access_mode).value,
         }
 
 

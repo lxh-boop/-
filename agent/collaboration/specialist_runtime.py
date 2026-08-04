@@ -26,7 +26,7 @@ from agent.tool_dag import (
 )
 from agent.worker_tools import WorkerToolDirectory, build_worker_tool_registry
 
-from .completion import flow_decision, non_success_completion_report
+from .completion import flow_decision, non_success_completion_report, runtime_completion_report
 from .agent_directory import (
     AgentDirectory,
     EVIDENCE_COLLECTOR,
@@ -39,7 +39,7 @@ from .agent_directory import (
     STRATEGY_GUARD,
     SYSTEM_DIAGNOSTIC,
 )
-from .models import GraphAgentTask, GraphWorkerResult, ResultStatus, TaskStatus
+from .models import AccessMode, GraphAgentTask, GraphWorkerResult, ResultStatus, TaskStatus
 from .worker_contracts import WorkerContractViolation
 from .workers import (
     run_diagnostic,
@@ -55,6 +55,31 @@ from .workers import (
 from .workers.common import dependency_results as _dependency_results
 from .workers.common import refs_from_dependencies as _refs_from_dependencies
 from .workers.common import safe_public_value as _safe
+
+
+def _contract_violation_from_chain(exc: BaseException) -> WorkerContractViolation | None:
+    """Return a Worker contract violation wrapped by the LLM repair boundary.
+
+    ``LLMService.generate_json`` performs the Worker's single targeted repair and
+    raises ``LLMJSONError`` from the second validation exception when repair still
+    fails.  Keeping the original violation classification prevents a local output
+    repair failure from being misrouted as a MainAgent Worker-selection failure.
+    """
+
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop(0)
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        if isinstance(current, WorkerContractViolation):
+            return current
+        for linked in (getattr(current, "__cause__", None), getattr(current, "__context__", None)):
+            if isinstance(linked, BaseException):
+                pending.append(linked)
+    return None
 
 
 class SpecialistRuntime:
@@ -128,10 +153,21 @@ class SpecialistRuntime:
         except KeyError:
             card = None
 
-        if task_contract is not None and task_contract.completion_report_required:
+        if task_contract is not None:
             task.completion_contract = self.directory.completion_contract_for_task(task)
 
         try:
+            if task_contract is not None:
+                task_access = AccessMode.from_value(task_contract.access_mode)
+                goal_access = AccessMode.from_value(
+                    dict(task.metadata.get("goal_contract") or {}).get("access_mode")
+                )
+                if task_access == AccessMode.WRITE and goal_access != AccessMode.WRITE:
+                    raise WorkerContractViolation(
+                        "write_worker_not_authorized",
+                        "$.completion_contract.access_mode",
+                        task.worker_id or task.assigned_agent,
+                    )
             if task_contract is not None and task.metadata.get("structured_worker_contract"):
                 self.directory.validate_task_contract(task)
                 resolved_inputs = self.directory.resolve_task_inputs(task, dependency_results)
@@ -147,7 +183,9 @@ class SpecialistRuntime:
             elif task.assigned_agent == GRAPH_RELATION_RETRIEVER:
                 result = self._run_graph_impact(task, dependency_results, resolved_inputs)
             elif task.assigned_agent == RISK_ANALYST:
-                result = self._run_risk(task, dependency_results, resolved_inputs, output_dir, db_path)
+                result = self._run_risk(
+                    task, dependency_results, resolved_inputs, output_dir, db_path, language
+                )
             elif task.assigned_agent == STRATEGY_GUARD:
                 result = self._run_strategy_guard(
                     task,
@@ -180,7 +218,31 @@ class SpecialistRuntime:
                     warnings=["unknown_worker_agent"],
                 )
         except Exception as exc:
-            error_code = "worker_contract_violation" if isinstance(exc, WorkerContractViolation) else "worker_execution_failed"
+            contract_violation = _contract_violation_from_chain(exc)
+            violation_code = str(getattr(contract_violation, "code", "") or "")
+            output_contract_failure = bool(
+                contract_violation is not None
+                and violation_code in {
+                    "report_output_validation_failed",
+                    "completion_report_version_mismatch",
+                    "completion_output_type_mismatch",
+                    "completion_report_unknown_information_slot",
+                    "completion_report_slot_overlap",
+                    "completion_report_slot_partition_incomplete",
+                    "completion_report_criteria_mismatch",
+                    "completed_report_requires_completed_status",
+                    "completed_report_cannot_have_missing_slots",
+                    "completed_report_requires_all_criteria",
+                    "incomplete_report_cannot_use_completed_status",
+                }
+            )
+            error_code = (
+                "worker_output_contract_failure"
+                if output_contract_failure
+                else "worker_contract_violation"
+                if contract_violation is not None
+                else "worker_execution_failed"
+            )
             result = GraphWorkerResult(
                 task_id=task.task_id,
                 agent_id=task.assigned_agent,
@@ -191,7 +253,7 @@ class SpecialistRuntime:
                     "code": error_code,
                     "message": str(exc),
                     "component": task.assigned_agent,
-                    "retryable": not isinstance(exc, WorkerContractViolation),
+                    "retryable": contract_violation is None,
                 },
                 focus_refs=task.focus_refs,
                 summary=(
@@ -207,12 +269,14 @@ class SpecialistRuntime:
                         execution_status="failed",
                         reason=str(exc),
                         failure_kind=(
-                            "parameter_contract_failure"
-                            if isinstance(exc, WorkerContractViolation)
+                            "worker_output_contract_failure"
+                            if output_contract_failure
+                            else "parameter_contract_failure"
+                            if contract_violation is not None
                             else "worker_execution_failure"
                         ),
                     )
-                    if task_contract is not None and task_contract.completion_report_required
+                    if task_contract is not None
                     else {}
                 ),
             )
@@ -225,28 +289,36 @@ class SpecialistRuntime:
         result.metadata.setdefault("completion_contract", dict(task.completion_contract or {}))
 
         if task_contract is not None:
-            if task_contract.completion_report_required and not result.completion and result.status in {
-                ResultStatus.FAILED, ResultStatus.BLOCKED, ResultStatus.NEED_CONTEXT, ResultStatus.NOT_EXECUTED
-            }:
-                result.completion = non_success_completion_report(
-                    task,
-                    execution_status=(
-                        "need_context" if result.status == ResultStatus.NEED_CONTEXT
-                        else "blocked" if result.status == ResultStatus.BLOCKED
-                        else "failed"
-                    ),
-                    reason=result.summary or str((result.error or {}).get("message") or "Worker did not complete."),
-                    failure_kind=(
-                        "context_missing" if result.status == ResultStatus.NEED_CONTEXT
-                        else "upstream_worker_failed" if result.status == ResultStatus.BLOCKED
-                        else "worker_execution_failure"
-                    ),
-                )
+            if not result.completion:
+                if str(task_contract.completion_report_source or "runtime") == "runtime":
+                    result.completion = runtime_completion_report(
+                        task,
+                        task_contract,
+                        result_status=result.status,
+                        output_type=result.output_type,
+                        data=result.data,
+                        error=result.error,
+                    )
+                else:
+                    result.completion = non_success_completion_report(
+                        task,
+                        execution_status=(
+                            "need_context" if result.status == ResultStatus.NEED_CONTEXT
+                            else "blocked" if result.status == ResultStatus.BLOCKED
+                            else "failed"
+                        ),
+                        reason=result.summary or str((result.error or {}).get("message") or "Worker did not complete."),
+                        failure_kind=(
+                            "context_missing" if result.status == ResultStatus.NEED_CONTEXT
+                            else "upstream_worker_failed" if result.status == ResultStatus.BLOCKED
+                            else "completion_report_missing"
+                        ),
+                    )
             try:
                 # Program rules validate shape and route flow. They do not infer
                 # business completion from summary text, list length, or values.
                 self.directory.validate_result(result, task_type=task.task_type)
-                if task_contract.completion_report_required:
+                if result.completion:
                     decision = flow_decision(
                         result.status,
                         result.completion,
@@ -270,7 +342,7 @@ class SpecialistRuntime:
                     output_type=task.expected_output_type,
                     data=None,
                     error={
-                        "code": "worker_output_contract_violation",
+                        "code": "worker_output_contract_failure",
                         "message": str(exc),
                         "component": task.assigned_agent,
                         "retryable": False,
@@ -290,7 +362,7 @@ class SpecialistRuntime:
                             reason=str(exc),
                             failure_kind="worker_output_contract_failure",
                         )
-                        if task_contract.completion_report_required
+                        if task_contract is not None
                         else {}
                     ),
                 )
@@ -416,14 +488,20 @@ class SpecialistRuntime:
         resolved_inputs: dict[str, Any],
         output_dir: str | Path,
         db_path: str | Path | None,
+        language: str,
     ) -> GraphWorkerResult:
+        card = self.directory.get(task.worker_id or task.assigned_agent)
         return run_risk(
-            self.provider,
+            self.llm_service,
+            self.worker_tool_dag_runtime,
             task,
             dependency_results,
             output_dir,
             db_path,
             resolved_inputs=resolved_inputs,
+            worker_prompt=card.private_worker_prompt,
+            allowed_tool_names=card.private_tools_for(task.task_type),
+            language=language,
         )
 
     def _run_strategy_guard(

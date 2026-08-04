@@ -154,6 +154,7 @@ def run_evidence(
             "results",
             "record_count",
             "source_count",
+            "deduplication",
             "coverage",
         ],
         completion_criteria=[
@@ -173,6 +174,7 @@ def run_evidence(
     record_count = int(raw.get("record_count") or 0)
     source_count = int(raw.get("source_count") or 0)
     coverage = safe_public_value(raw.get("coverage") or {})
+    deduplication = safe_public_value(raw.get("deduplication") or {})
     business_empty = bool(raw.get("business_empty", record_count == 0))
     coverage_satisfied = bool(coverage.get("coverage_satisfied", True))
     payload = {
@@ -184,6 +186,7 @@ def run_evidence(
         "results": results,
         "record_count": record_count,
         "source_count": source_count,
+        "deduplication": deduplication,
         "coverage": coverage,
         "business_empty": business_empty,
         "write_performed": False,
@@ -291,6 +294,12 @@ def run_evidence(
                 "source_count": source_count,
                 "business_empty": business_empty,
                 "coverage_satisfied": coverage_satisfied,
+                "raw_record_count": int(deduplication.get("raw_record_count") or record_count),
+                "canonical_record_count": int(deduplication.get("canonical_record_count") or record_count),
+                "duplicate_record_count": int(deduplication.get("duplicate_record_count") or 0),
+                "duplicate_group_count": int(deduplication.get("duplicate_group_count") or 0),
+                "cross_source_duplicate_group_count": int(deduplication.get("cross_source_duplicate_group_count") or 0),
+                "identity_fields": list(deduplication.get("identity_fields") or []),
             }
         ],
         confidence=0.9 if success and record_count else 0.6 if success else 0.0,
@@ -303,6 +312,7 @@ def run_evidence(
             "tool_dag_replan_count": int(dag_result.replan_count),
             "derived_graph_write": False,
             "database_write": False,
+            "deduplication_logged": True,
         },
     )
 

@@ -13,6 +13,7 @@ from agent.tool_runtime import (
 from .evidence import build_evidence_tool_definitions
 from .graph_context import build_graph_context_tool_definitions
 from .internal_system import build_internal_system_tool_definitions
+from .risk import build_risk_tool_definitions
 
 
 @dataclass(frozen=True)
@@ -73,4 +74,5 @@ def build_worker_tool_registry(
         *build_evidence_tool_definitions(provider),
         *build_internal_system_tool_definitions(provider),
         *build_graph_context_tool_definitions(provider),
+        *build_risk_tool_definitions(),
     ])

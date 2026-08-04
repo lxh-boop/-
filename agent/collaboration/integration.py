@@ -16,6 +16,13 @@ from .runtime_services import CollaborationRuntimeServices
 from .session_memory import SessionMemoryStore
 
 
+RUNTIME_BUILD = "V18.1"
+ACCESS_MODEL_VERSION = "read-write.v1"
+COMPLETION_CONTRACT_VERSION = "worker-completion-contract.v1"
+COMPLETION_REPORT_VERSION = "worker-completion-report.v1"
+EVIDENCE_ANALYSIS_REPORT_VERSION = "evidence-analysis-report.v1"
+
+
 class UnifiedGraphAgentRequest:
     """The sole public Agent entry after the Neo4j hard cut."""
 
@@ -150,6 +157,11 @@ def execute_unified_agent_request(
             "worker_count": len(
                 getattr(getattr(coordinator, "directory", None), "safe_catalog", lambda: [])()
             ),
+            "runtime_build": RUNTIME_BUILD,
+            "access_model_version": ACCESS_MODEL_VERSION,
+            "completion_contract_version": COMPLETION_CONTRACT_VERSION,
+            "completion_report_version": COMPLETION_REPORT_VERSION,
+            "evidence_analysis_report_version": EVIDENCE_ANALYSIS_REPORT_VERSION,
         },
         run_id=effective_run_id,
     )
@@ -176,6 +188,13 @@ def execute_unified_agent_request(
             run_id=effective_run_id,
         )
     runtime = result.setdefault("graph_runtime", {})
+    runtime.update({
+        "runtime_build": RUNTIME_BUILD,
+        "access_model_version": ACCESS_MODEL_VERSION,
+        "completion_contract_version": COMPLETION_CONTRACT_VERSION,
+        "completion_report_version": COMPLETION_REPORT_VERSION,
+        "evidence_analysis_report_version": EVIDENCE_ANALYSIS_REPORT_VERSION,
+    })
     runtime["llm_binding"] = binding.public_dict()
     runtime["llm_binding"]["single_service_identity"] = True
     return result

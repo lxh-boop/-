@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import inspect
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 from core.llm import LLMService
+from core.llm.prompt_compaction import compact_json_dumps
 
 from agent.console_trace import flow_event, trace_exception
 
@@ -179,8 +181,13 @@ class AgentCollaborationCoordinator:
         item = self.memory.get(session_id, "active_graph_refs")
         return refs_from(item.value if item is not None else [])
 
-    def _extract_mentions(self, query: str, language: str) -> list[dict[str, Any]]:
-        hard = self.identity.extract_candidate_mentions(query)
+    def _extract_mentions(
+        self,
+        query: str,
+        language: str,
+        context_binding: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        lexical_candidates = self.identity.extract_candidate_mentions(query)
 
         def validate(payload: dict[str, Any]) -> None:
             mentions = payload.get("mentions")
@@ -202,24 +209,34 @@ class AgentCollaborationCoordinator:
                 {
                     "role": "system",
                     "content": (
-                        "只从用户当前请求中提取用户明确指向的现实对象、新闻/公告/研报、事件或组合目标候选。"
-                        "不要从常识补充对象，不要生成代码，不要决定最终实体 ID。"
-                        "当前请求中未明确出现对象时返回空数组。"
+                        "只从用户当前请求中提取用户明确指向、且需要进入金融图解析的现实金融对象、新闻/公告/研报或事件。"
+                        "context_binding 是 MainAgent 对当前业务范围的语义判断；portfolio、account、global、none 是业务范围，"
+                        "不能把‘我的持仓’、‘当前账户’等范围词误当成单只证券实体。只有请求中明确出现具体证券、公司、行业、事件或已命名组合对象时才输出 mention。"
+                        "lexical_candidates 只是字符串候选，不是权威结论；你必须根据用户目标决定是否保留。"
+                        "不要从常识补充对象，不要生成代码，不要决定最终实体 ID。当前请求中没有需要 GraphRef 解析的明确对象时返回空数组。"
                         "角色只能是 focus、comparison、cause、impact_target、context、event。"
                         "严格输出 JSON：{\"mentions\":[{\"text\":\"\",\"role\":\"focus\"}]}。"
                     ),
                 },
-                {"role": "user", "content": json.dumps({"request": query, "language": language}, ensure_ascii=False)},
+                {
+                    "role": "user",
+                    "content": compact_json_dumps({
+                        "request": query,
+                        "language": language,
+                        "context_binding": dict(context_binding or {}),
+                        "lexical_candidates": list(lexical_candidates or []),
+                    }),
+                },
             ],
             max_output_tokens=900,
             validator=validate,
             operation="extract_graph_entity_candidates",
         )
-        result = [dict(item) for item in payload.get("mentions") or [] if isinstance(item, dict)]
-        for text in hard:
-            if not any(str(item.get("text") or "") == text for item in result):
-                result.append({"text": text, "role": "focus"})
-        return result[:20]
+        return [
+            dict(item)
+            for item in payload.get("mentions") or []
+            if isinstance(item, dict)
+        ][:20]
 
     def _resolve_request_refs(
         self,
@@ -229,8 +246,18 @@ class AgentCollaborationCoordinator:
         context_refs: list[GraphRef],
         as_of_time: str,
         language: str,
+        context_binding: dict[str, Any] | None = None,
     ) -> tuple[list[GraphRef], list[MissingContextItem], dict[str, Any]]:
-        mentions = self._extract_mentions(query, language)
+        extractor = self._extract_mentions
+        try:
+            parameter_count = len(inspect.signature(extractor).parameters)
+        except (TypeError, ValueError):
+            parameter_count = 3
+        mentions = (
+            extractor(query, language, context_binding)
+            if parameter_count >= 3
+            else extractor(query, language)
+        )
         explicit_resolved: list[GraphRef] = []
         missing: list[MissingContextItem] = []
         audit: list[dict[str, Any]] = []
@@ -264,16 +291,29 @@ class AgentCollaborationCoordinator:
             else:
                 explicit_resolved.extend(resolution.refs)
 
-        # Current explicit user mentions override inherited focus. Context-provided
-        # evidence/snapshot refs remain available but do not replace locked focus.
+        # Current explicit user mentions always win. Whether previous focus is
+        # inherited is a structured MainAgent semantic decision, not a keyword
+        # rule. Account, portfolio, global and entity-free requests therefore do
+        # not accidentally retain a prior single-security focus.
+        binding = dict(context_binding or {})
+        inherit_previous = bool(binding.get("inherit_previous_focus"))
         if explicit_resolved:
             focus = explicit_resolved
         elif context_refs:
-            focus = [ref for ref in context_refs if ref.role in {"focus", "cause", "impact_target", "comparison", "event"}]
+            focus = [
+                ref for ref in context_refs
+                if ref.role in {"focus", "cause", "impact_target", "comparison", "event"}
+            ]
             focus = focus or context_refs
-        else:
+        elif inherit_previous:
             focus = inherited_refs
-        return _dedupe_refs(focus), missing, {"mentions": mentions, "items": audit}
+        else:
+            focus = []
+        return _dedupe_refs(focus), missing, {
+            "mentions": mentions,
+            "items": audit,
+            "context_binding": binding,
+        }
 
     def execute(
         self,
@@ -318,6 +358,7 @@ class AgentCollaborationCoordinator:
                 "reason": decision.reason,
                 "source": decision.source,
                 "confidence": decision.confidence,
+                "context_binding": decision.context_binding.to_dict(),
             },
             run_id=run_id,
         )
@@ -344,6 +385,7 @@ class AgentCollaborationCoordinator:
                 "context_ref_count": len(context_refs),
                 "inherited_ref_count": len(inherited_refs),
                 "as_of_time": explicit_as_of,
+                "context_binding": decision.context_binding.to_dict(),
             },
             run_id=run_id,
         )
@@ -353,6 +395,7 @@ class AgentCollaborationCoordinator:
             context_refs=context_refs,
             as_of_time=explicit_as_of,
             language=language,
+            context_binding=decision.context_binding.to_dict(),
         )
         flow_event(
             "GRAPH_REF_RESOLUTION_COMPLETED",
@@ -520,7 +563,15 @@ class AgentCollaborationCoordinator:
                 for item in observations
             )
             replan_candidates = [
-                item for item in observations if item.get("replan_recommended")
+                item
+                for item in observations
+                if item.get("replan_recommended")
+                and item.get("failure_kind") not in {
+                    "worker_output_contract_failure",
+                    "worker_output_contract_violation",
+                    "completion_report_invalid",
+                    "completion_report_missing",
+                }
             ]
             if blocking_context or not replan_candidates:
                 break
@@ -807,33 +858,18 @@ class AgentCollaborationCoordinator:
             reusable = bool(decision.reusable)
             freeze_reason = decision.freeze_reason
         else:
-            # Legacy non-strict Workers retain their declared status. Strict
-            # Workers cannot be credited without a valid structured report.
-            strict = bool(task.completion_contract.get("completion_report_required"))
             produced = set()
             missing = set(expected_slots)
-            if not strict and result.status in {ResultStatus.COMPLETED, ResultStatus.PROPOSAL_READY}:
-                produced = set(expected_slots)
-                missing = set()
-                semantic_satisfied = contract_valid
-                failure_kind = "none"
-                retryable = False
-                repairable = False
-                should_freeze = result.output_type != "FinalReport"
-                reusable = should_freeze
-                freeze_reason = "legacy_non_llm_worker_declared_completed"
-            else:
-                semantic_satisfied = False
-                failure_kind = (
-                    "completion_report_invalid" if completion_error
-                    else "completion_report_missing" if strict
-                    else "worker_result_incomplete"
-                )
-                retryable = bool((result.error or {}).get("retryable"))
-                repairable = result.status not in {ResultStatus.NEED_CONTEXT}
-                should_freeze = False
-                reusable = False
-                freeze_reason = "structured_completion_required"
+            semantic_satisfied = False
+            failure_kind = (
+                "completion_report_invalid" if completion_error
+                else "completion_report_missing"
+            )
+            retryable = bool((result.error or {}).get("retryable"))
+            repairable = result.status not in {ResultStatus.NEED_CONTEXT}
+            should_freeze = False
+            reusable = False
+            freeze_reason = "structured_completion_required"
 
         error = dict(result.error or {})
         if completion_error and not error:
@@ -888,13 +924,12 @@ class AgentCollaborationCoordinator:
         if result is None:
             return False
         completion = dict(result.completion or {})
-        if completion:
-            return bool(
-                completion.get("expected_task_completed")
-                and completion.get("completion_status") == "completed"
-                and result.status in {ResultStatus.COMPLETED, ResultStatus.PROPOSAL_READY}
-            )
-        return result.status in {ResultStatus.COMPLETED, ResultStatus.PROPOSAL_READY}
+        return bool(
+            completion
+            and completion.get("expected_task_completed")
+            and completion.get("completion_status") == "completed"
+            and result.status in {ResultStatus.COMPLETED, ResultStatus.PROPOSAL_READY}
+        )
 
     def _run_dag(
         self,

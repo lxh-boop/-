@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from core.llm import LLMService
+from core.llm.prompt_compaction import compact_json_dumps, schema_for_prompt
 
 from ..completion import validate_completion_report
 from ..models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus
@@ -22,14 +23,39 @@ _CLAIM_LIST_FIELDS = (
     "uncertainties",
 )
 
+_INTERNAL_OUTPUT_TYPES = {
+    "ModelPredictionResult",
+    "RankingResult",
+    "ModelMetricsResult",
+    "BacktestSummaryResult",
+    "SelectedStrategyResult",
+}
+_MAX_EVIDENCE_RECORDS_PER_ENTITY = 20
 
-def _claim_schema() -> dict[str, Any]:
+
+def _claim_schema(*, kind: str = "generic") -> dict[str, Any]:
+    properties: dict[str, Any] = {
+        "claim_id": string_schema(min_length=1),
+        "statement": string_schema(min_length=1),
+        "source_task_ids": array_schema({"type": "string"}),
+    }
+    required = ["claim_id", "statement", "source_task_ids"]
+    if kind == "model_signal":
+        properties.update({
+            "direction": string_schema(enum=["up", "down", "flat", "mixed", "unknown"]),
+            "horizon": string_schema(min_length=1),
+            "strength": string_schema(enum=["slight", "moderate", "strong", "unknown"]),
+        })
+        required.extend(["direction", "horizon", "strength"])
+    elif kind == "relation":
+        properties.update({
+            "relation_type": string_schema(min_length=1),
+            "causality": string_schema(enum=["established", "not_established", "unknown"]),
+        })
+        required.extend(["relation_type", "causality"])
     return object_schema(
-        {
-            "statement": string_schema(min_length=1),
-            "source_task_ids": array_schema({"type": "string"}),
-        },
-        required=["statement", "source_task_ids"],
+        properties,
+        required=required,
         additional_properties=False,
     )
 
@@ -41,8 +67,8 @@ def _entity_analysis_llm_schema() -> dict[str, Any]:
             "entity_refs": array_schema(object_schema({}, additional_properties=True)),
             "facts": array_schema(claim),
             "analysis": array_schema(claim),
-            "model_signals": array_schema(claim),
-            "relation_interpretations": array_schema(claim),
+            "model_signals": array_schema(_claim_schema(kind="model_signal")),
+            "relation_interpretations": array_schema(_claim_schema(kind="relation")),
             "uncertainties": array_schema(claim),
             "conclusion": {"type": "string"},
             "source_task_ids": array_schema({"type": "string"}),
@@ -131,7 +157,7 @@ def _compact_evidence_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 "source_names": [str(value) for value in item.get("source_names") or []][:10],
                 "records": [
                     _compact_record(row)
-                    for row in list(item.get("records") or [])[:12]
+                    for row in list(item.get("records") or [])[:_MAX_EVIDENCE_RECORDS_PER_ENTITY]
                     if isinstance(row, dict)
                 ],
                 "sources": [
@@ -150,6 +176,7 @@ def _compact_evidence_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "results": results,
         "record_count": int(payload.get("record_count") or 0),
         "source_count": int(payload.get("source_count") or 0),
+        "deduplication": safe_public_value(payload.get("deduplication") or {}),
         "coverage": safe_public_value(payload.get("coverage") or {}),
         "business_empty": bool(payload.get("business_empty", False)),
     }
@@ -228,6 +255,54 @@ def _authoritative_entity_catalog(
     return rows
 
 
+def _analysis_input_diagnostics(
+    safe_items: list[dict[str, Any]],
+    evidence_items: list[dict[str, Any]],
+    internal_items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    raw_record_count = 0
+    canonical_record_count = 0
+    duplicate_record_count = 0
+    forwarded_record_count = 0
+    for item in evidence_items:
+        payload = item.get("payload", item.get("data"))
+        if not isinstance(payload, dict):
+            continue
+        dedup = dict(payload.get("deduplication") or {})
+        raw_record_count += int(dedup.get("raw_record_count") or payload.get("record_count") or 0)
+        canonical = int(dedup.get("canonical_record_count") or payload.get("record_count") or 0)
+        canonical_record_count += canonical
+        duplicate_record_count += int(dedup.get("duplicate_record_count") or 0)
+        for result in payload.get("results") or []:
+            if isinstance(result, dict):
+                forwarded_record_count += min(
+                    len([row for row in result.get("records") or [] if isinstance(row, dict)]),
+                    _MAX_EVIDENCE_RECORDS_PER_ENTITY,
+                )
+    encoded = json.dumps(safe_items, ensure_ascii=False, default=str)
+    internal_types = sorted({str(item.get("output_type") or "") for item in internal_items})
+    return {
+        "evidence_task_ids": [
+            str(item.get("from_task_id") or item.get("task_id") or "")
+            for item in evidence_items
+        ],
+        "internal_task_ids": [
+            str(item.get("from_task_id") or item.get("task_id") or "")
+            for item in internal_items
+        ],
+        "internal_output_types": internal_types,
+        "internal_result_count": len(internal_items),
+        "raw_evidence_record_count": raw_record_count,
+        "canonical_evidence_record_count": canonical_record_count,
+        "duplicate_evidence_record_count": duplicate_record_count,
+        "evidence_records_forwarded_to_llm": forwarded_record_count,
+        "evidence_records_omitted_from_llm": max(0, canonical_record_count - forwarded_record_count),
+        "upstream_result_count": len(safe_items),
+        "llm_input_chars": len(encoded),
+        "evidence_record_limit_per_entity": _MAX_EVIDENCE_RECORDS_PER_ENTITY,
+    }
+
+
 def run_entity_analysis(
     llm_service: LLMService,
     task: GraphAgentTask,
@@ -245,6 +320,11 @@ def run_entity_analysis(
         for item in items
         if str(item.get("output_type") or "") == "EvidenceCollectionResult"
     ]
+    internal_items = [
+        item
+        for item in items
+        if str(item.get("output_type") or "") in _INTERNAL_OUTPUT_TYPES
+    ]
     if not evidence_items:
         return GraphWorkerResult(
             task_id=task.task_id,
@@ -260,6 +340,25 @@ def run_entity_analysis(
                     key="evidence",
                     description="需要 W01 产生的 EvidenceCollectionResult。",
                     expected_format="一个或多个 EvidenceCollectionResult WorkerResult",
+                    searched_sources=["declared upstream inputs", "dependency_results"],
+                )
+            ],
+        )
+
+    if not internal_items:
+        return GraphWorkerResult(
+            task_id=task.task_id,
+            agent_id=task.assigned_agent,
+            status=ResultStatus.NEED_CONTEXT,
+            output_type="EntityAnalysisResult",
+            data=None,
+            error=None,
+            focus_refs=task.focus_refs,
+            summary="金融实体分析缺少系统内部模型或结构化事实。",
+            missing_items=[
+                MissingContextItem(
+                    key="model_facts",
+                    description="需要 W02 等只读 Worker 产生的系统内部模型或结构化事实结果。",
                     searched_sources=["declared upstream inputs", "dependency_results"],
                 )
             ],
@@ -287,6 +386,17 @@ def run_entity_analysis(
         for item in safe_items
         if str(item.get("task_id") or "")
     }
+    evidence_source_task_ids = {
+        str(item.get("from_task_id") or item.get("task_id") or "")
+        for item in evidence_items
+        if str(item.get("from_task_id") or item.get("task_id") or "")
+    }
+    internal_source_task_ids = {
+        str(item.get("from_task_id") or item.get("task_id") or "")
+        for item in internal_items
+        if str(item.get("from_task_id") or item.get("task_id") or "")
+    }
+    input_diagnostics = _analysis_input_diagnostics(safe_items, evidence_items, internal_items)
 
     output_schema = _entity_analysis_llm_schema()
 
@@ -300,6 +410,7 @@ def run_entity_analysis(
             not isinstance(item, dict) for item in payload.get("entity_refs") or []
         ):
             raise RuntimeError("entity_analysis_entity_refs_must_be_object_array")
+        seen_claim_ids: set[str] = set()
         for field in _CLAIM_LIST_FIELDS:
             values = payload.get(field)
             if not isinstance(values, list):
@@ -309,6 +420,12 @@ def run_entity_analysis(
                     raise RuntimeError(
                         f"entity_analysis_{field}_item_must_be_object:{index}"
                     )
+                claim_id = str(item.get("claim_id") or "").strip()
+                if not claim_id:
+                    raise RuntimeError(f"entity_analysis_{field}_claim_id_required:{index}")
+                if claim_id in seen_claim_ids:
+                    raise RuntimeError(f"entity_analysis_duplicate_claim_id:{claim_id}")
+                seen_claim_ids.add(claim_id)
                 if not _claim_text(item):
                     raise RuntimeError(
                         f"entity_analysis_{field}_statement_required:{index}"
@@ -334,6 +451,15 @@ def run_entity_analysis(
                 "entity_analysis_unknown_overall_source_task_ids:"
                 + ",".join(unknown_overall)
             )
+        if not set(source_task_ids).intersection(evidence_source_task_ids):
+            raise RuntimeError("entity_analysis_missing_evidence_source_task_id")
+        if not set(source_task_ids).intersection(internal_source_task_ids):
+            raise RuntimeError("entity_analysis_missing_internal_source_task_id")
+        for index, row in enumerate(payload.get("model_signals") or []):
+            if not set(_claim_source_ids(row)).intersection(internal_source_task_ids):
+                raise RuntimeError(
+                    f"entity_analysis_model_signal_requires_internal_source:{index}"
+                )
         if not isinstance(payload.get("conclusion"), str):
             raise RuntimeError("entity_analysis_conclusion_must_be_string")
         validate_completion_report(
@@ -344,29 +470,38 @@ def run_entity_analysis(
 
     system = (
         "你是金融实体分析 Worker。只能使用输入中的上游结构化结果，不能自行检索新闻、查询数据库、"
-        "解析新实体或补造证券名称、行业、数值和事件。EvidenceCollectionResult 提供外部证据，"
-        "ModelPredictionResult 等结果只提供模型或内部事实，GraphRelationResult 只证明关系路径存在。"
-        "你负责解释这些材料对金融实体本身的含义，区分事实、分析、模型信号、关系解释和不确定性。"
+        "解析新实体或补造证券名称、行业、数值和事件。EvidenceCollectionResult 已由 W01 按稳定 ID 合并去重，"
+        "只能分析其中 canonical records，不得把 direct_news 与 RAG 的同 ID 记录重复计数。"
+        "ModelPredictionResult、RankingResult 等结果提供系统内部模型或结构化事实，必须实际参与分析；"
+        "内部结果为空或 found=false 时，要把缺失作为不确定性，而不是忽略该上游。GraphRelationResult 只证明关系路径存在。"
+        "你负责解释外部证据与系统内部数据对金融实体本身的含义，区分事实、分析、模型信号、关系解释和不确定性。"
         "关系存在不等于因果影响，不得生成组合风险结论、调仓建议、Proposal 或执行声明。"
-        "facts、analysis、model_signals、relation_interpretations、uncertainties 的每个元素必须是对象，"
-        "格式为 {\"statement\":\"...\",\"source_task_ids\":[\"真实上游task_id\"]}；"
-        "uncertainties 可以使用空 source_task_ids，但其他声明必须引用真实上游任务。"
+        "facts、analysis、model_signals、relation_interpretations、uncertainties 的每个元素必须有唯一 claim_id、statement 和 source_task_ids。"
+        "model_signals 还必须输出 direction(up/down/flat/mixed/unknown)、horizon 和 strength；"
+        "relation_interpretations 还必须输出 relation_type 与 causality(established/not_established/unknown)。"
+        "uncertainties 可以使用空 source_task_ids，但涉及内部数据缺失的不确定性应引用对应内部任务。"
+        "source_task_ids 必须同时包含至少一个外部证据任务和至少一个系统内部数据任务；"
+        "model_signals 中每条信号必须引用真实的系统内部数据任务。"
         "你还必须严格对照 completion_contract 输出 completion_report。规则不替你判断业务是否完成；"
         "只有你基于上游结构化结果确认全部 criteria 满足、全部 required_information_slots 已产生时，"
         "才能设置 expected_task_completed=true。若没有形成实体分析，只能产生 uncertainty，必须设置为 false。"
-        "不得输出 should_freeze、reusable 或 replan 决策，这些只由程序流程规则计算。"
+        "completion_report.report_source 必须为 llm。不得输出 should_freeze、reusable 或 replan 决策，这些只由程序流程规则计算。"
+        "每个 statement 只表达一个结论，不复制整段证据原文，不在多个数组中重复同一结论。"
         "严格按照 entity_analysis_output_schema 输出 JSON，不要 Markdown。"
     )
     if language == "en":
         system = (
             "You are the financial-entity analysis Worker. Use only supplied structured upstream results. "
             "Do not retrieve data, query databases, resolve new entities, invent labels, or create portfolio advice. "
+            "The EvidenceCollectionResult contains ID-deduplicated canonical records; do not count direct-news and RAG duplicates twice. "
+            "System-internal model or structured fact results must materially participate in the analysis; represent an empty internal result as uncertainty. "
             "Separate facts, analysis, model signals, relation interpretation, and uncertainty. A graph relation is "
             "not proof of causal impact. Every item in facts, analysis, model_signals, relation_interpretations, and "
-            "uncertainties must be an object shaped as {\"statement\":\"...\",\"source_task_ids\":[\"real upstream task id\"]}. "
+            "uncertainties must contain a unique claim_id, statement, and source_task_ids. Model signals also require "
+            "direction, horizon, and strength; relation interpretations require relation_type and causality. "
             "Only uncertainty items may have an empty source_task_ids array. Evaluate every completion_contract criterion "
             "inside completion_report. Set expected_task_completed=true only when all criteria and required information slots "
-            "are satisfied. Do not output freeze/reuse/replan decisions. Return only JSON matching entity_analysis_output_schema."
+            "are satisfied. completion_report.report_source must be llm. Do not output freeze/reuse/replan decisions. Return only JSON matching entity_analysis_output_schema."
         )
 
     analysis = llm_service.generate_json(
@@ -375,20 +510,21 @@ def run_entity_analysis(
             {"role": "system", "content": system},
             {
                 "role": "user",
-                "content": json.dumps(
+                "content": compact_json_dumps(
                     {
                         "analysis_goal": str(task.args.get("analysis_goal") or task.objective),
                         "comparison_mode": task.task_type == "compare_financial_entities",
                         "allowed_source_task_ids": sorted(known_source_task_ids),
+                        "evidence_source_task_ids": sorted(evidence_source_task_ids),
+                        "internal_source_task_ids": sorted(internal_source_task_ids),
+                        "analysis_input_diagnostics": input_diagnostics,
                         "authoritative_entity_refs": _authoritative_entity_refs(task, evidence_items),
                         "authoritative_entity_catalog": _authoritative_entity_catalog(task, evidence_items),
                         "upstream_results": safe_items,
                         "completion_contract": task.completion_contract,
-                        "entity_analysis_output_schema": output_schema,
+                        "entity_analysis_output_schema": schema_for_prompt(output_schema),
                         "reply_language": language,
                     },
-                    ensure_ascii=False,
-                    default=str,
                 ),
             },
         ],
@@ -416,6 +552,7 @@ def run_entity_analysis(
         "uncertainties": safe_public_value(analysis.get("uncertainties") or []),
         "conclusion": str(analysis.get("conclusion") or ""),
         "source_task_ids": sorted(known_source_task_ids),
+        "input_diagnostics": safe_public_value(input_diagnostics),
     }
     return GraphWorkerResult(
         task_id=task.task_id,
@@ -438,11 +575,20 @@ def run_entity_analysis(
         ),
         findings=[
             {
-                "kind": "entity_analysis",
+                "kind": "entity_analysis_input_diagnostics",
+                **safe_public_value(input_diagnostics),
+            },
+            {
+                "kind": "entity_analysis_output_diagnostics",
                 "fact_count": len(payload["facts"]),
                 "analysis_count": len(payload["analysis"]),
+                "model_signal_count": len(payload["model_signals"]),
+                "relation_interpretation_count": len(payload["relation_interpretations"]),
                 "uncertainty_count": len(payload["uncertainties"]),
-            }
+                "source_task_count": len(payload["source_task_ids"]),
+                "used_internal_source": bool(set(payload["source_task_ids"]).intersection(internal_source_task_ids)),
+                "used_evidence_source": bool(set(payload["source_task_ids"]).intersection(evidence_source_task_ids)),
+            },
         ],
         confidence=0.85 if bool(completion.get("expected_task_completed")) else 0.4,
         completion=completion,
@@ -450,6 +596,7 @@ def run_entity_analysis(
             "database_write": False,
             "source_task_ids": payload["source_task_ids"],
             "compacted_upstream_payload": True,
+            "analysis_input_diagnostics_logged": True,
         },
     )
 

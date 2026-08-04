@@ -71,6 +71,8 @@ class LLMService:
         success: bool,
         response: LLMResponse | None = None,
         error: Exception | None = None,
+        prompt_chars: int = 0,
+        max_output_tokens: int = 0,
     ) -> str:
         try:
             from agent.llm_audit import record_llm_call
@@ -92,6 +94,11 @@ class LLMService:
                 profile_id=self.profile_id,
                 config_hash=self.config_hash,
                 endpoint_scope=self.profile.endpoint_scope,
+                prompt_chars=prompt_chars,
+                max_output_tokens=max_output_tokens,
+                prompt_tokens=int((response.usage if response else {}).get("prompt_tokens", 0) or 0),
+                completion_tokens=int((response.usage if response else {}).get("completion_tokens", 0) or 0),
+                total_tokens=int((response.usage if response else {}).get("total_tokens", 0) or 0),
             )
         except Exception:
             return ""
@@ -183,6 +190,11 @@ class LLMService:
             raise LLMConfigurationError("当前 Model Profile 未配置可用凭据或模型。")
         request_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
         started = time.perf_counter()
+        prompt_chars = sum(
+            len(str(item.get("content") or ""))
+            for item in messages
+            if isinstance(item, dict)
+        )
         prompt_dump = None
         try:
             from core.llm.prompt_dump import start_prompt_dump
@@ -220,6 +232,8 @@ class LLMService:
                 started=started,
                 success=False,
                 error=exc,
+                prompt_chars=prompt_chars,
+                max_output_tokens=max_output_tokens,
             )
             self._set_response(None, event_id)
             mode_label = "本地 Ollama" if self.profile.deployment_mode == "local" else "远程 API"
@@ -240,6 +254,8 @@ class LLMService:
             started=started,
             success=True,
             response=response,
+            prompt_chars=prompt_chars,
+            max_output_tokens=max_output_tokens,
         )
         self._set_response(response, event_id)
         return response.content
@@ -283,6 +299,13 @@ class LLMService:
                 "stage": stage,
                 "operation": effective_operation,
                 "attempt": "primary",
+                "prompt_chars": sum(
+                    len(str(item.get("content") or ""))
+                    for item in messages
+                    if isinstance(item, dict)
+                ),
+                "message_count": len(messages),
+                "max_output_tokens": max_output_tokens,
             },
         )
         output = self.generate_text(
@@ -303,6 +326,7 @@ class LLMService:
                 "operation": effective_operation,
                 "attempt": "primary",
                 "response_chars": len(str(output or "")),
+                "usage": self.last_usage,
                 "audit_event_id": first_event_id,
             },
         )
@@ -397,6 +421,12 @@ class LLMService:
                     "previous_error_type": type(first_exc).__name__,
                     "previous_error_message": str(first_exc)[:2000],
                     "error_context": error_context,
+                    "prompt_chars": sum(
+                        len(str(item.get("content") or ""))
+                        for item in repair_messages
+                        if isinstance(item, dict)
+                    ),
+                    "max_output_tokens": max_output_tokens,
                 },
             )
             repaired = self.generate_text(
@@ -416,6 +446,7 @@ class LLMService:
                     "stage": stage,
                     "attempt": "repair",
                     "response_chars": len(str(repaired or "")),
+                    "usage": self.last_usage,
                     "audit_event_id": repair_event_id,
                 },
             )

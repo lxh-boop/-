@@ -95,6 +95,7 @@ def completion_report_schema() -> dict[str, Any]:
     return object_schema(
         {
             "schema_version": {"type": "string", "enum": ["worker-completion-report.v1"]},
+            "report_source": {"type": "string", "enum": ["llm", "runtime", "system"]},
             "execution_status": {
                 "type": "string",
                 "enum": ["succeeded", "failed", "blocked", "need_context"],
@@ -121,6 +122,7 @@ def completion_report_schema() -> dict[str, Any]:
         },
         required=[
             "schema_version",
+            "report_source",
             "execution_status",
             "contract_status",
             "business_status",

@@ -332,7 +332,21 @@ def is_portfolio_adjustment_request(objective: str) -> bool:
     return bool(in_portfolio_scope and requests_adjustment)
 
 
-def build_report_policy(objective: str, safe_results: list[dict[str, Any]]) -> ReportPolicy:
+def build_report_policy(
+    objective: str,
+    safe_results: list[dict[str, Any]],
+    *,
+    request_mode: str = "",
+    goal_contract: dict[str, Any] | None = None,
+    authority_results: list[dict[str, Any]] | None = None,
+) -> ReportPolicy:
+    """Compile report scope from structured planning state when available.
+
+    The compatibility fallback still supports older direct callers. Production
+    W06 passes request_mode and goal_contract, so task scope is not inferred from
+    free-form keyword matching.
+    """
+
     text = " ".join(str(objective or "").split())
     available_results = [item for item in safe_results if _result_available(item)]
     output_types = tuple(
@@ -344,14 +358,50 @@ def build_report_policy(objective: str, safe_results: list[dict[str, Any]]) -> R
             }
         )
     )
-    risk_requested = any(marker in text for marker in _RISK_REQUEST_MARKERS)
-    adjustment_requested = is_portfolio_adjustment_request(text)
-    advice_requested = adjustment_requested or any(marker in text for marker in _ADVICE_REQUEST_MARKERS)
-    analysis_requested = any(marker in text for marker in _ANALYSIS_REQUEST_MARKERS)
-    view_requested = any(marker in text for marker in _VIEW_REQUEST_MARKERS)
+    mode = str(request_mode or "").strip().lower()
+    goal = dict(goal_contract or {})
+    required_slots = {
+        str(item) for item in goal.get("required_information_slots") or [] if str(item)
+    }
+    desired_types = {
+        str(item) for item in goal.get("desired_output_types") or [] if str(item)
+    }
+    structured_scope = bool(mode or goal)
+    if structured_scope:
+        risk_requested = bool(
+            "portfolio_risk_assessment" in required_slots
+            or "portfolio_risk_constraints" in required_slots
+            or "PortfolioRiskResult" in desired_types
+        )
+        advice_requested = bool(mode == "proposal" or "ReviewedProposal" in desired_types)
+        adjustment_requested = bool(advice_requested and "reviewed_proposal" in required_slots)
+        state_only_slots = {
+            "account_financial_state",
+            "current_portfolio_state",
+            "portfolio_positions",
+            "authoritative_holding_entities",
+            "user_facing_report",
+            "goal_completion_summary",
+        }
+        view_only = bool(
+            mode == "analysis"
+            and required_slots
+            and required_slots.issubset(state_only_slots)
+            and not risk_requested
+            and not advice_requested
+        )
+    else:
+        # Legacy compatibility only. New Agent execution passes structured scope.
+        risk_requested = any(marker in text for marker in _RISK_REQUEST_MARKERS)
+        adjustment_requested = is_portfolio_adjustment_request(text)
+        advice_requested = adjustment_requested or any(marker in text for marker in _ADVICE_REQUEST_MARKERS)
+        analysis_requested = any(marker in text for marker in _ANALYSIS_REQUEST_MARKERS)
+        view_requested = any(marker in text for marker in _VIEW_REQUEST_MARKERS)
+        view_only = bool(view_requested and not risk_requested and not advice_requested and not analysis_requested)
+    entity_source = authority_results if authority_results is not None else available_results
     return ReportPolicy(
         objective=text,
-        view_only=bool(view_requested and not risk_requested and not advice_requested and not analysis_requested),
+        view_only=view_only,
         risk_requested=risk_requested,
         advice_requested=advice_requested,
         adjustment_requested=adjustment_requested,
@@ -359,7 +409,7 @@ def build_report_policy(objective: str, safe_results: list[dict[str, Any]]) -> R
         strategy_available=bool(set(output_types) & _STRATEGY_OUTPUT_TYPES),
         impact_available=bool(set(output_types) & _IMPACT_OUTPUT_TYPES),
         output_types=output_types,
-        entities=_collect_entities(available_results),
+        entities=_collect_entities(entity_source),
     )
 
 

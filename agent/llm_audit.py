@@ -82,6 +82,11 @@ def record_llm_call(
     profile_id: str = "",
     config_hash: str = "",
     endpoint_scope: str = "remote",
+    prompt_chars: int = 0,
+    max_output_tokens: int = 0,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    total_tokens: int = 0,
 ) -> str:
     """Persist one actual transport attempt when invoked by the formal executor."""
     context = dict(_CONTEXT.get() or {})
@@ -126,6 +131,11 @@ def record_llm_call(
         "formal_entry_used": bool(context.get("formal_entry_used")),
         "formal_entry_name": str(context.get("formal_entry_name") or ""),
         "operation": str(operation or "")[:80] or None,
+        "prompt_chars": max(0, int(prompt_chars or 0)),
+        "max_output_tokens": max(0, int(max_output_tokens or 0)),
+        "prompt_tokens": max(0, int(prompt_tokens or 0)),
+        "completion_tokens": max(0, int(completion_tokens or 0)),
+        "total_tokens": max(0, int(total_tokens or 0)),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     with _LOCK:

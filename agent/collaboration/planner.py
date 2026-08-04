@@ -5,11 +5,12 @@ import re
 from typing import Any
 
 from core.llm import LLMService
+from core.llm.prompt_compaction import catalog_for_prompt, compact_json_dumps, schema_for_prompt
 
 from agent.console_trace import flow_event
 
 from .agent_directory import AgentDirectory
-from .models import GraphAgentTask, GraphWorkerResult, ResultStatus, TaskStatus
+from .models import AccessMode, GraphAgentTask, GraphWorkerResult, ResultStatus, TaskStatus
 from .worker_contracts import (
     WorkerContractViolation,
     array_schema,
@@ -83,18 +84,15 @@ GOAL_CONTRACT_SCHEMA = object_schema(
             string_schema(min_length=1), min_items=1, max_items=16
         ),
         "constraints": array_schema({"type": "string"}, max_items=20),
-        "side_effect_policy": object_schema(
-            {
-                "allow_derived_writes": {"type": "boolean"},
-                "allow_proposal": {"type": "boolean"},
-                "allow_commit": {"type": "boolean"},
-            },
-            required=[
-                "allow_derived_writes",
-                "allow_proposal",
-                "allow_commit",
-            ],
-        ),
+        "access_mode": {
+            "type": "string",
+            "enum": [AccessMode.READ.value, AccessMode.WRITE.value],
+            "readOnly": True,
+            "description": (
+                "Code-owned business-state access boundary. Analysis, risk, advice, "
+                "proposal and reporting are READ unless a persistent business state is mutated."
+            ),
+        },
     },
     required=[
         "goal_summary",
@@ -102,7 +100,7 @@ GOAL_CONTRACT_SCHEMA = object_schema(
         "required_information_slots",
         "completion_criteria",
         "constraints",
-        "side_effect_policy",
+        "access_mode",
     ],
 )
 
@@ -412,6 +410,7 @@ class CoordinatorPlanner:
         *,
         runtime_values: dict[str, Any],
         authoritative_initial_information_slots: set[str] | None = None,
+        request_mode: str = "",
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Bind code-owned args and isolate upstream WorkerResult references.
 
@@ -567,6 +566,12 @@ class CoordinatorPlanner:
                 })
 
         goal_contract = dict(payload.get("goal_contract") or {})
+        mode = str(request_mode or "").strip().lower()
+        # MainAgent may express the semantic request mode, but the business-state
+        # access boundary is compiled by the runtime. Analysis and run-local
+        # proposals are READ. Persistent mutation requires the separate WRITE flow.
+        if mode in {"analysis", "proposal"}:
+            goal_contract["access_mode"] = AccessMode.READ.value
         planning_state = dict(payload.get("planning_state") or {})
         if initial_slots:
             all_output_slots = {
@@ -778,7 +783,7 @@ class CoordinatorPlanner:
                 f"unsupported_agent_request_mode:{mode}"
             )
 
-        cards = self.directory.planning_catalog()
+        cards = catalog_for_prompt(self.directory.planning_catalog())
         reply_language = "en" if language == "en" else "zh"
         runtime_values = self._authoritative_runtime_values(
             focus_refs=focus_refs,
@@ -804,6 +809,7 @@ class CoordinatorPlanner:
                     payload,
                     runtime_values=runtime_values,
                     authoritative_initial_information_slots=set(initial_information_slots),
+                    request_mode=mode,
                 )
                 self._validate_payload(
                     prepared_payload,
@@ -822,9 +828,9 @@ class CoordinatorPlanner:
             "GraphRef、会话摘要和 worker_capability_catalog 规划，禁止使用预设业务链路或固定 Worker 顺序。"
             "不要根据 Worker 名称猜测能力；必须阅读每个 task_contract 的 consumes_information_slots、"
             "produces_information_slots、required_context_slots、coverage_semantics、freshness_semantics、"
-            "authority_level、args_schema、semantic_inputs_schema、正反例、完成标准和副作用策略。"
+            "authority_level、args_schema、semantic_inputs_schema、正反例、完成标准和 access_mode。"
             "规划采用目标约束的正向扩展，不使用反向递归。第一步生成 goal_contract：忠实保留用户最终目标，"
-            "列出 desired_output_types、required_information_slots、completion_criteria、constraints 和副作用边界。"
+            "列出 desired_output_types、required_information_slots、completion_criteria 和 constraints。access_mode 由程序固定为 READ，MainAgent 不得把分析、风险、建议、待审批 Proposal 或报告视为 WRITE。"
             "第二步初始化 planning_state.initial_available_information_slots；该值必须等于程序提供的"
             "authoritative_initial_information_slots，不得自行添加尚未获得的事实。"
             "第三步从当前虚拟信息状态向前规划。每一轮只考虑 required_context_slots 已满足、直接参数可提供、"
@@ -858,9 +864,14 @@ class CoordinatorPlanner:
             "inputs 必须是 semantic role 到 WorkerResult 引用的映射。根任务写 inputs={}；有依赖时，"
             "role 的值必须是 {from_task_id, expected_output_type} 或该对象数组，绝不能把 from_task_id 和"
             "expected_output_type 直接放在 inputs 顶层。dependency_task_ids 由程序从 inputs 生成，MainAgent不得输出或发明。"
-            "analysis 模式不允许 Proposal 或 Commit；proposal 模式允许形成待审批 Proposal 但不允许 Commit。"
-            "报告 Worker 只汇总已有专业结果，不能替代事实查询、研究、风险分析或 Proposal 生成。"
+            "analysis 模式不生成 Proposal；proposal 模式允许形成仅存在于当前 Run 的待审批 Proposal。两者都属于 READ，禁止选择任何 access_mode=write 的 Worker。"
+            "报告 Worker 只汇总已有终端专业结果，不能替代事实查询、研究、风险分析或 Proposal 生成。"
+            "若某个上游结果已经被另一个已选专业结果消费并形成更高层结构化结论，报告任务只引用该终端结果，"
+            "不得再次引用传递性的原始结果；实体分析报告应引用 EntityAnalysisResult，而不是同时引用其 EvidenceCollectionResult。"
+            "summarize_results 只用于用户明确要求压缩已有结果，不能用于绕过 write_report 的输入合同。"
             "objective 和 purpose 只写业务子目标，不得包含 Tool、函数、API、数据库或实现细节。"
+            "在不缺少任何必填字段和语义的前提下，所有自然语言字段只写完成该字段所需的一条简洁句子；"
+            "不要在 goal_summary、objective、purpose、why_selected、completion_criteria 和 constraints 之间重复同一句话或同义内容。"
             "最终严格输出符合 worker_dag_output_schema 的 JSON，不要 Markdown，不要解释。"
         )
         event_names = {
@@ -894,7 +905,7 @@ class CoordinatorPlanner:
                 {"role": "system", "content": system},
                 {
                     "role": "user",
-                    "content": json.dumps(
+                    "content": compact_json_dumps(
                         {
                             "request_mode": mode,
                             "user_request": str(query or ""),
@@ -903,7 +914,7 @@ class CoordinatorPlanner:
                             "available_context_refs": [ref.to_dict() for ref in context_refs],
                             "worker_capability_catalog": cards,
                             "authoritative_initial_information_slots": initial_information_slots,
-                            "worker_dag_output_schema": PLAN_SCHEMA,
+                            "worker_dag_output_schema": schema_for_prompt(PLAN_SCHEMA),
                             "planner_contract_examples": PLANNER_CONTRACT_EXAMPLES,
                             "authoritative_runtime_values": {
                                 "user_id": str(user_id or "default"),
@@ -914,7 +925,6 @@ class CoordinatorPlanner:
                                 ),
                             },
                         },
-                        ensure_ascii=False,
                     ),
                 },
             ],
@@ -933,7 +943,7 @@ class CoordinatorPlanner:
                 "input_contract 输出空对象 {}，四个字段都由程序生成。"
                 "不得新增用户未提供、GraphRef 未解析或上游结果未产生的证券、公告、画像、风险事实和限制。"
                 "每个 expected_output.information_slots 必须是能力卡 produces_information_slots 的子集；"
-                "无直接目标贡献且未被下游消费的任务必须删除。最终必须包含 FinalReport，并使"
+                "无直接目标贡献且未被下游消费的任务必须删除。报告任务应引用终端专业结果，删除已经被终端结果消费的传递性原始输入。最终必须包含 FinalReport，并使"
                 "final_planned_information_slots 精确等于初始槽位与全部任务输出槽位的并集。"
             ),
         )
@@ -941,6 +951,7 @@ class CoordinatorPlanner:
             semantic_payload,
             runtime_values=runtime_values,
             authoritative_initial_information_slots=set(initial_information_slots),
+            request_mode=mode,
         )
         flow_event(
             "WORKER_PLAN_AUTHORITATIVE_ARGS_BOUND",
@@ -1177,7 +1188,7 @@ class CoordinatorPlanner:
         """
 
         mode = str(request_mode or "analysis").strip().lower()
-        cards = self.directory.planning_catalog()
+        cards = catalog_for_prompt(self.directory.planning_catalog())
         reply_language = "en" if language == "en" else "zh"
         runtime_values = self._authoritative_runtime_values(
             focus_refs=focus_refs,
@@ -1224,6 +1235,7 @@ class CoordinatorPlanner:
                     payload,
                     runtime_values=runtime_values,
                     authoritative_initial_information_slots=set(initial_information_slots),
+                    request_mode=mode,
                 )
                 if dict(prepared_payload.get("goal_contract") or {}) != goal_contract:
                     raise WorkerContractViolation(
@@ -1302,7 +1314,7 @@ class CoordinatorPlanner:
                 },
                 {
                     "role": "user",
-                    "content": json.dumps(
+                    "content": compact_json_dumps(
                         {
                             "request_mode": mode,
                             "user_request": query,
@@ -1328,7 +1340,7 @@ class CoordinatorPlanner:
                             "observations": observations,
                             "previous_task_ids": sorted(all_previous_ids),
                             "worker_capability_catalog": cards,
-                            "worker_dag_output_schema": PLAN_SCHEMA,
+                            "worker_dag_output_schema": schema_for_prompt(PLAN_SCHEMA),
                             "planner_contract_examples": PLANNER_CONTRACT_EXAMPLES,
                             "authoritative_runtime_values": {
                                 "user_id": str(user_id or "default"),
@@ -1336,7 +1348,6 @@ class CoordinatorPlanner:
                                 "as_of_time": str(as_of_time or ""),
                             },
                         },
-                        ensure_ascii=False,
                     ),
                 },
             ],
@@ -1351,13 +1362,14 @@ class CoordinatorPlanner:
                 "只修复错误字段并从 current_available_information_slots 正向选择补齐缺失槽位的能力。"
                 "inputs 必须使用 semantic role 包裹 typed WorkerResult reference；根任务 inputs={}。"
                 "省略 input_contract.direct_arg_names 与 runtime_bound_args，由程序生成。"
-                "新任务使用唯一 task_id，并重新生成可达的 FinalReport。"
+                "新任务使用唯一 task_id，并重新生成可达的 FinalReport。报告格式失败时保持终端专业输入不变，禁止增加其传递性原始上游。"
             ),
         )
         prepared, binding_audit = self._prepare_payload(
             payload,
             runtime_values=runtime_values,
             authoritative_initial_information_slots=set(initial_information_slots),
+            request_mode=mode,
         )
         compiled = self._compile_payload(prepared)
         tasks: list[GraphAgentTask] = []
@@ -1447,10 +1459,24 @@ class CoordinatorPlanner:
             for item in goal_contract.get("desired_output_types") or []
             if str(item or "").strip()
         }
-        side_effect_policy = dict(goal_contract.get("side_effect_policy") or {})
-        allow_derived_writes = bool(side_effect_policy.get("allow_derived_writes"))
-        allow_proposal = bool(side_effect_policy.get("allow_proposal"))
-        allow_commit = bool(side_effect_policy.get("allow_commit"))
+        goal_access_mode = str(
+            goal_contract.get("access_mode") or AccessMode.READ.value
+        ).strip().lower()
+        if goal_access_mode not in {item.value for item in AccessMode}:
+            raise WorkerContractViolation(
+                "invalid_goal_access_mode",
+                "$.goal_contract.access_mode",
+                goal_access_mode,
+            )
+        # The public MainAgent planner only creates read-only analysis or
+        # run-local proposal plans. Persistent writes use the explicit WRITE
+        # confirmation and execution protocol.
+        if request_mode in {"analysis", "proposal"} and goal_access_mode != AccessMode.READ.value:
+            raise WorkerContractViolation(
+                "main_planner_goal_must_be_read",
+                "$.goal_contract.access_mode",
+                goal_access_mode,
+            )
         required_information_slots = {
             str(item).strip()
             for item in goal_contract.get("required_information_slots") or []
@@ -1483,22 +1509,6 @@ class CoordinatorPlanner:
                 "goal_contract_missing_final_report",
                 "$.goal_contract.desired_output_types",
                 "FinalReport",
-            )
-        if request_mode == "analysis" and allow_proposal:
-            raise WorkerContractViolation(
-                "analysis_goal_cannot_allow_proposal",
-                "$.goal_contract.side_effect_policy.allow_proposal",
-            )
-        if request_mode == "proposal" and not allow_proposal:
-            raise WorkerContractViolation(
-                "proposal_goal_must_allow_proposal",
-                "$.goal_contract.side_effect_policy.allow_proposal",
-            )
-        if allow_commit:
-            raise WorkerContractViolation(
-                "planner_mode_cannot_allow_commit",
-                "$.goal_contract.side_effect_policy.allow_commit",
-                "Commit requires the separate confirmation and revalidation protocol.",
             )
 
         rows = payload["tasks"]
@@ -1649,37 +1659,33 @@ class CoordinatorPlanner:
                 )
             output_type_by_task[task_id] = output_type
 
-            contract_effect = str(
-                dict(contract.side_effect_policy or {}).get("kind") or ""
-            ).lower()
-            card_effects = " ".join(str(item).lower() for item in card.side_effects)
-            # Task-specific side-effect policy is authoritative. Card-level
-            # effects remain only as a compatibility fallback for legacy cards.
-            effect_text = contract_effect or card_effects
-            if "proposal" in effect_text or card.can_generate_proposal:
+            task_access_mode = AccessMode.from_value(
+                getattr(contract, "access_mode", AccessMode.READ.value)
+                or AccessMode.READ.value
+            ).value
+            if task_access_mode not in {item.value for item in AccessMode}:
+                raise WorkerContractViolation(
+                    "invalid_worker_access_mode",
+                    f"$.tasks[{index}].worker_id",
+                    task_access_mode,
+                )
+            if task_access_mode == AccessMode.WRITE.value and goal_access_mode != AccessMode.WRITE.value:
+                raise WorkerContractViolation(
+                    "write_worker_not_allowed_by_goal",
+                    f"$.tasks[{index}].worker_id",
+                    card.worker_id,
+                )
+            # Proposal is a semantic product, not a persistent write. It remains
+            # available only when MainAgent classified the request as proposal.
+            if card.can_generate_proposal:
                 proposal_capability_selected = True
                 proposal_output_types.add(output_type)
-                if not allow_proposal or request_mode != "proposal":
+                if request_mode != "proposal":
                     raise WorkerContractViolation(
-                        "proposal_capability_not_allowed_by_goal",
+                        "proposal_capability_not_allowed_in_request_mode",
                         f"$.tasks[{index}].worker_id",
                         card.worker_id,
                     )
-            if any(
-                marker in effect_text
-                for marker in ("commit", "execute_trade", "business_state_write")
-            ) and not allow_commit:
-                raise WorkerContractViolation(
-                    "state_commit_not_allowed_by_goal",
-                    f"$.tasks[{index}].worker_id",
-                    effect_text,
-                )
-            if "derived_" in effect_text and not allow_derived_writes:
-                raise WorkerContractViolation(
-                    "derived_write_not_allowed_by_goal",
-                    f"$.tasks[{index}].worker_id",
-                    effect_text,
-                )
             if output_type == "FinalReport":
                 report_task_ids.append(task_id)
 

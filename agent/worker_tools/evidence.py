@@ -10,6 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
+import hashlib
+
 from agent.collaboration.agent_directory import EVIDENCE_COLLECTOR
 from agent.graph.contracts import GraphNodeKind, GraphRef, refs_from
 from agent.graph.provider_adapter import GraphProviderAdapter
@@ -144,18 +146,88 @@ def _envelope_data(value: Any) -> dict[str, Any]:
     return value
 
 
-def _record_key(row: dict[str, Any]) -> tuple[str, ...]:
-    return tuple(
+_IDENTITY_FIELDS = ("news_id", "source_id", "graph_evidence_key")
+
+
+def _identity_values(row: dict[str, Any]) -> list[str]:
+    """Return stable evidence ids shared by direct-news and RAG records.
+
+    A RAG chunk may expose the same underlying news id through ``news_id`` while
+    the direct-news record exposes it through ``source_id``.  Deduplication is
+    therefore based on the values, not on the field names.
+    """
+
+    values: list[str] = []
+    for key in _IDENTITY_FIELDS:
+        value = str(row.get(key) or "").strip()
+        if value and value not in values:
+            values.append(value)
+    return values
+
+
+def _fallback_record_id(row: dict[str, Any], *, sequence: int) -> str:
+    """Create an audit-only id for records that have no stable source id.
+
+    The fallback deliberately includes ``sequence`` so id-less records are not
+    silently merged by text similarity.  The user-requested deduplication rule
+    is identity based, not semantic similarity based.
+    """
+
+    raw = "|".join(
         str(row.get(key) or "").strip()
-        for key in ("chunk_id", "news_id", "source_id", "url", "title", "section_title", "text")
+        for key in ("url", "title", "section_title", "publish_time", "trade_date")
     )
+    digest = hashlib.sha256(f"{sequence}|{raw}".encode("utf-8")).hexdigest()[:20]
+    return f"unidentified:{digest}"
 
 
 def _source_key(row: dict[str, Any]) -> tuple[str, ...]:
+    ids = _identity_values(row)
+    if ids:
+        return ("identity", *sorted(ids))
     return tuple(
         str(row.get(key) or "").strip()
-        for key in ("source_type", "source_id", "url", "title", "source")
+        for key in ("source_type", "url", "title", "source")
     )
+
+
+def _content_length(row: dict[str, Any]) -> int:
+    return max(
+        [
+            len(str(row.get(key) or ""))
+            for key in ("text", "content", "chunk_text", "summary")
+        ]
+        or [0]
+    )
+
+
+def _merge_record(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    """Merge duplicate records without losing provenance or the richest text."""
+
+    merged = dict(base)
+    if _content_length(incoming) > _content_length(merged):
+        for key in ("text", "content", "chunk_text", "summary", "content_level"):
+            if incoming.get(key) not in (None, "", [], {}):
+                merged[key] = incoming.get(key)
+    for key, value in incoming.items():
+        if key.startswith("_"):
+            continue
+        if merged.get(key) in (None, "", [], {}) and value not in (None, "", [], {}):
+            merged[key] = value
+    try:
+        merged_score = float(merged.get("score", merged.get("mapping_confidence", 0.0)) or 0.0)
+    except (TypeError, ValueError):
+        merged_score = 0.0
+    try:
+        incoming_score = float(incoming.get("score", incoming.get("mapping_confidence", 0.0)) or 0.0)
+    except (TypeError, ValueError):
+        incoming_score = 0.0
+    if incoming_score > merged_score:
+        if incoming.get("score") not in (None, ""):
+            merged["score"] = incoming.get("score")
+        elif incoming.get("mapping_confidence") not in (None, ""):
+            merged["mapping_confidence"] = incoming.get("mapping_confidence")
+    return merged
 
 
 def _rank_key(row: dict[str, Any]) -> tuple[float, str]:
@@ -165,6 +237,106 @@ def _rank_key(row: dict[str, Any]) -> tuple[float, str]:
         score = 0.0
     date = str(row.get("publish_time") or row.get("trade_date") or row.get("date") or "")
     return score, date
+
+
+def _deduplicate_records(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Collapse records that share any stable evidence id.
+
+    This is intentionally identity-only normalization.  It does not infer that
+    two different ids describe the same event and therefore does not encode
+    business or semantic judgment in program rules.
+    """
+
+    normalized = [dict(row) for row in rows if isinstance(row, dict)]
+    parent = list(range(len(normalized)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    id_owner: dict[str, int] = {}
+    identified_record_count = 0
+    for index, row in enumerate(normalized):
+        ids = _identity_values(row)
+        if ids:
+            identified_record_count += 1
+        for identity in ids:
+            owner = id_owner.get(identity)
+            if owner is None:
+                id_owner[identity] = index
+            else:
+                union(owner, index)
+
+    groups: dict[int, list[dict[str, Any]]] = {}
+    for index, row in enumerate(normalized):
+        groups.setdefault(find(index), []).append(row)
+
+    canonical_records: list[dict[str, Any]] = []
+    duplicate_groups: list[dict[str, Any]] = []
+    source_record_counts: dict[str, int] = {}
+    for row in normalized:
+        source_name = str(row.get("_retrieved_by") or "unknown")
+        source_record_counts[source_name] = source_record_counts.get(source_name, 0) + 1
+
+    for group_rows in groups.values():
+        ranked = sorted(
+            group_rows,
+            key=lambda row: (_rank_key(row), _content_length(row)),
+            reverse=True,
+        )
+        merged = dict(ranked[0])
+        all_ids: list[str] = []
+        retrieved_by: list[str] = []
+        for row in ranked:
+            merged = _merge_record(merged, row)
+            for identity in _identity_values(row):
+                if identity not in all_ids:
+                    all_ids.append(identity)
+            source_name = str(row.get("_retrieved_by") or "").strip()
+            if source_name and source_name not in retrieved_by:
+                retrieved_by.append(source_name)
+        merged.pop("_retrieved_by", None)
+        canonical_id = all_ids[0] if all_ids else _fallback_record_id(merged, sequence=len(canonical_records))
+        merged["canonical_id"] = canonical_id
+        merged["source_ids"] = all_ids
+        merged["retrieved_by"] = retrieved_by
+        merged["merged_record_count"] = len(group_rows)
+        canonical_records.append(merged)
+        if len(group_rows) > 1:
+            duplicate_groups.append({
+                "canonical_id": canonical_id,
+                "source_ids": all_ids,
+                "retrieved_by": retrieved_by,
+                "merged_record_count": len(group_rows),
+            })
+
+    canonical_records.sort(key=_rank_key, reverse=True)
+    raw_record_count = len(normalized)
+    canonical_record_count = len(canonical_records)
+    diagnostics = {
+        "policy": "shared_identity_value",
+        "identity_fields": list(_IDENTITY_FIELDS),
+        "raw_record_count": raw_record_count,
+        "identified_record_count": identified_record_count,
+        "unidentified_record_count": raw_record_count - identified_record_count,
+        "canonical_record_count": canonical_record_count,
+        "duplicate_record_count": raw_record_count - canonical_record_count,
+        "duplicate_group_count": len(duplicate_groups),
+        "cross_source_duplicate_group_count": sum(
+            1 for item in duplicate_groups if len(item.get("retrieved_by") or []) > 1
+        ),
+        "source_record_counts": source_record_counts,
+        "duplicate_groups": duplicate_groups[:20],
+    }
+    return canonical_records, diagnostics
 
 
 def build_evidence_tool_definitions(
@@ -270,31 +442,43 @@ def build_evidence_tool_definitions(
                 target = grouped[node_id]
                 target["success"] = bool(target["success"] or item.get("success"))
                 target["message"] = str(item.get("message") or target["message"])
-                target["records"].extend(item.get("records") or [])
-                target["sources"].extend(item.get("sources") or [])
+                source_name = str(item.get("source_name") or data.get("source_name") or "")
+                for row in item.get("records") or []:
+                    if isinstance(row, dict):
+                        enriched = dict(row)
+                        enriched["_retrieved_by"] = source_name or "unknown"
+                        target["records"].append(enriched)
+                for row in item.get("sources") or []:
+                    if isinstance(row, dict):
+                        enriched = dict(row)
+                        enriched["_retrieved_by"] = source_name or "unknown"
+                        target["sources"].append(enriched)
                 target["warnings"].extend(str(value) for value in item.get("warnings") or [])
                 target["errors"].extend(str(value) for value in item.get("errors") or [])
-                source_name = str(item.get("source_name") or data.get("source_name") or "")
                 if source_name and source_name not in target["source_names"]:
                     target["source_names"].append(source_name)
 
         normalized_results: list[dict[str, Any]] = []
         all_warnings: list[str] = []
         all_errors: list[str] = []
+        aggregate_deduplication = {
+            "policy": "shared_identity_value",
+            "identity_fields": list(_IDENTITY_FIELDS),
+            "raw_record_count": 0,
+            "identified_record_count": 0,
+            "unidentified_record_count": 0,
+            "canonical_record_count": 0,
+            "duplicate_record_count": 0,
+            "duplicate_group_count": 0,
+            "cross_source_duplicate_group_count": 0,
+            "source_record_counts": {},
+            "duplicate_groups": [],
+        }
         for ref in required_refs:
             item = grouped[ref.node_id]
-            seen_records: set[tuple[str, ...]] = set()
-            deduped_records: list[dict[str, Any]] = []
-            for row in sorted(
-                [row for row in item["records"] if isinstance(row, dict)],
-                key=_rank_key,
-                reverse=True,
-            ):
-                key = _record_key(row)
-                if key in seen_records:
-                    continue
-                seen_records.add(key)
-                deduped_records.append(dict(row))
+            deduped_records, deduplication = _deduplicate_records(
+                [row for row in item["records"] if isinstance(row, dict)]
+            )
             seen_sources: set[tuple[str, ...]] = set()
             deduped_sources: list[dict[str, Any]] = []
             for row in [row for row in item["sources"] if isinstance(row, dict)]:
@@ -302,11 +486,26 @@ def build_evidence_tool_definitions(
                 if key in seen_sources:
                     continue
                 seen_sources.add(key)
-                deduped_sources.append(dict(row))
+                cleaned = dict(row)
+                cleaned.pop("_retrieved_by", None)
+                deduped_sources.append(cleaned)
             warnings = list(dict.fromkeys(item["warnings"]))
             errors = list(dict.fromkeys(item["errors"]))
             all_warnings.extend(warnings)
             all_errors.extend(errors)
+            for key in (
+                "raw_record_count", "identified_record_count", "unidentified_record_count",
+                "canonical_record_count", "duplicate_record_count", "duplicate_group_count",
+                "cross_source_duplicate_group_count",
+            ):
+                aggregate_deduplication[key] += int(deduplication.get(key) or 0)
+            for source_name, count in dict(deduplication.get("source_record_counts") or {}).items():
+                source_counts = aggregate_deduplication["source_record_counts"]
+                source_counts[source_name] = int(source_counts.get(source_name) or 0) + int(count or 0)
+            aggregate_deduplication["duplicate_groups"].extend(
+                list(deduplication.get("duplicate_groups") or [])[:20]
+            )
+            aggregate_deduplication["duplicate_groups"] = aggregate_deduplication["duplicate_groups"][:20]
             normalized_results.append(
                 {
                     "focus_ref": ref.to_dict(),
@@ -315,6 +514,7 @@ def build_evidence_tool_definitions(
                     "records": deduped_records,
                     "sources": deduped_sources,
                     "source_names": list(item["source_names"]),
+                    "deduplication": deduplication,
                     "warnings": warnings,
                     "errors": errors,
                 }
@@ -348,6 +548,7 @@ def build_evidence_tool_definitions(
                 "results": normalized_results,
                 "record_count": record_count,
                 "source_count": source_count,
+                "deduplication": aggregate_deduplication,
                 "coverage": coverage,
                 "source_collection_count": source_collection_count,
                 "source_success_count": source_success_count,
@@ -464,6 +665,7 @@ def build_evidence_tool_definitions(
                     "results",
                     "record_count",
                     "source_count",
+                    "deduplication",
                     "coverage",
                     "validated_evidence_collection",
                 ]
@@ -475,6 +677,7 @@ def build_evidence_tool_definitions(
                 "results",
                 "record_count",
                 "source_count",
+                "deduplication",
                 "coverage",
                 "validated_evidence_collection",
             ],

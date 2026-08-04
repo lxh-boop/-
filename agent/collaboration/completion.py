@@ -120,7 +120,9 @@ def compile_completion_contract(
             "blocked": "pause_and_replan",
             "need_context": "pause_and_request_context",
         },
-        "completion_report_required": bool(task_contract.completion_report_required),
+        "completion_report_required": True,
+        "completion_report_source": str(task_contract.completion_report_source or "runtime"),
+        "access_mode": getattr(task_contract.access_mode, "value", str(task_contract.access_mode or "read")),
     }
 
 
@@ -231,6 +233,7 @@ def non_success_completion_report(
     required_slots = [str(item) for item in contract.get("required_information_slots") or []]
     return {
         "schema_version": COMPLETION_REPORT_VERSION,
+        "report_source": "runtime",
         "execution_status": str(execution_status),
         "contract_status": "not_evaluated",
         "business_status": "unknown",
@@ -266,6 +269,7 @@ def build_completion_report(
     criterion_results: list[dict[str, Any]],
     limitations: list[str] | None = None,
     failure_kind: str = "none",
+    report_source: str = "runtime",
 ) -> dict[str, Any]:
     contract = dict(task.completion_contract or {})
     required_slots = [str(item) for item in contract.get("required_information_slots") or []]
@@ -273,6 +277,7 @@ def build_completion_report(
     missing = [item for item in required_slots if item not in set(produced)]
     report = {
         "schema_version": COMPLETION_REPORT_VERSION,
+        "report_source": str(report_source or "runtime"),
         "execution_status": str(execution_status),
         "contract_status": str(contract_status),
         "business_status": str(business_status),
@@ -287,6 +292,69 @@ def build_completion_report(
     }
     validate_completion_report(report, contract)
     return report
+
+
+
+def runtime_completion_report(
+    task: GraphAgentTask,
+    task_contract: WorkerTaskContract,
+    *,
+    result_status: ResultStatus,
+    output_type: str,
+    data: dict[str, Any] | None,
+    error: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build a completion report for a deterministic/tool Worker.
+
+    The runtime does not interpret free-form financial text. It reports the
+    structured status returned by the Worker adapter, validates the registered
+    output shape elsewhere, and maps the task's declared information slots.
+    """
+
+    success = result_status in {ResultStatus.COMPLETED, ResultStatus.PROPOSAL_READY}
+    business_empty = bool(
+        isinstance(data, dict)
+        and (
+            data.get("business_empty") is True
+            or data.get("found") is False
+            or data.get("status") in {"empty", "business_empty"}
+        )
+    )
+    contract = dict(task.completion_contract or compile_completion_contract(task, task_contract))
+    task.completion_contract = contract
+    produced = list(contract.get("required_information_slots") or []) if success else []
+    criteria = [
+        {
+            "criterion_id": str(item.get("criterion_id") or ""),
+            "satisfied": bool(success),
+            "reason": (
+                "Registered output schema and deterministic Worker result were validated."
+                if success
+                else str((error or {}).get("message") or "Deterministic Worker did not complete.")
+            )[:1000],
+            "source_refs": [f"worker_result:{task.task_id}"] if success else [],
+        }
+        for item in contract.get("criteria") or []
+        if isinstance(item, dict)
+    ]
+    return build_completion_report(
+        task,
+        execution_status=(
+            "succeeded" if success else
+            "need_context" if result_status == ResultStatus.NEED_CONTEXT else
+            "blocked" if result_status == ResultStatus.BLOCKED else
+            "failed"
+        ),
+        contract_status="valid" if success else "not_evaluated",
+        business_status="empty" if business_empty else ("sufficient" if success else "unknown"),
+        completion_status="completed" if success else "not_completed",
+        expected_task_completed=success,
+        produced_information_slots=produced,
+        criterion_results=criteria,
+        limitations=[] if success else [str((error or {}).get("message") or "Worker did not complete.")],
+        failure_kind="none" if success else str((error or {}).get("code") or "worker_execution_failure"),
+        report_source="runtime",
+    )
 
 
 def flow_decision(
@@ -350,5 +418,6 @@ __all__ = [
     "flow_decision",
     "non_success_completion_report",
     "required_result_fields",
+    "runtime_completion_report",
     "validate_completion_report",
 ]

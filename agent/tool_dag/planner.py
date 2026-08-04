@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from core.llm import LLMService
+from core.llm.prompt_compaction import catalog_for_prompt, compact_json_dumps, schema_for_prompt
 
 from agent.console_trace import flow_event
 from agent.worker_tools import WorkerToolDirectory
@@ -77,7 +78,7 @@ class WorkerToolDagPlanner:
         allowed = set(allowed_tool_names)
         private_catalog = [
             item
-            for item in self.directory.private_catalog(worker_role)
+            for item in catalog_for_prompt(self.directory.private_catalog(worker_role))
             if str(item.get("tool_id") or "") in allowed
         ]
         fixed_goal_contract = {
@@ -129,6 +130,7 @@ class WorkerToolDagPlanner:
             "同一个参数只能存在于 args 或 inputs 一处。final_output_task_ids 必须指向真正完成 Worker 目标的末端任务。"
             "所有任务必须位于 final_output_task_ids 的依赖闭包中，不能生成无用节点。Validator 只接受或拒绝，不会替你补任务。"
             "不要输出 goal_contract，也不要输出 expected_output_keys；目标合同和工具必需输出字段均由程序根据注册 Schema 编译。"
+            "每个 objective 只写一句必要说明，不复制工具 description、Worker 目标或参数 Schema。"
             "严格输出 tool_dag_output_schema 对应 JSON，不要 Markdown。"
         )
         payload = self.llm_service.generate_json(
@@ -137,7 +139,7 @@ class WorkerToolDagPlanner:
                 {"role": "system", "content": system + "\nWorker private boundary:\n" + str(worker_prompt or "")},
                 {
                     "role": "user",
-                    "content": json.dumps(
+                    "content": compact_json_dumps(
                         {
                             "worker_task_id": worker_task_id,
                             "worker_role": worker_role,
@@ -147,9 +149,8 @@ class WorkerToolDagPlanner:
                             "available_context": _safe_planning_value(available_context),
                             "fixed_goal_contract": fixed_goal_contract,
                             "private_tool_catalog": private_catalog,
-                            "tool_dag_output_schema": TOOL_DAG_OUTPUT_SCHEMA,
+                            "tool_dag_output_schema": schema_for_prompt(TOOL_DAG_OUTPUT_SCHEMA),
                         },
-                        ensure_ascii=False,
                     ),
                 },
             ],
@@ -201,7 +202,7 @@ class WorkerToolDagPlanner:
         allowed = set(allowed_tool_names)
         private_catalog = [
             item
-            for item in self.directory.private_catalog(previous_plan.worker_role)
+            for item in catalog_for_prompt(self.directory.private_catalog(previous_plan.worker_role))
             if str(item.get("tool_id") or "") in allowed
         ]
 
@@ -244,7 +245,7 @@ class WorkerToolDagPlanner:
                 },
                 {
                     "role": "user",
-                    "content": json.dumps(
+                    "content": compact_json_dumps(
                         {
                             "fixed_goal_contract": previous_plan.goal_contract,
                             "available_context_keys": sorted(available_keys),
@@ -266,10 +267,8 @@ class WorkerToolDagPlanner:
                             "node_execution_records": node_records,
                             "previous_task_ids": sorted(previous_ids),
                             "private_tool_catalog": private_catalog,
-                            "tool_dag_output_schema": TOOL_DAG_OUTPUT_SCHEMA,
+                            "tool_dag_output_schema": schema_for_prompt(TOOL_DAG_OUTPUT_SCHEMA),
                         },
-                        ensure_ascii=False,
-                        default=str,
                     ),
                 },
             ],

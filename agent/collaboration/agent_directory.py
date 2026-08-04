@@ -5,6 +5,7 @@ from typing import Any
 
 from .completion import compile_completion_contract, validate_completion_report
 from .models import (
+    AccessMode,
     AgentCapabilityCard,
     GraphAgentTask,
     GraphWorkerResult,
@@ -150,7 +151,7 @@ _FORWARD_TASK_SEMANTICS: dict[tuple[str, str], dict[str, Any]] = {
         "authority_level": "financial_graph_relation_retrieval",
     },
     (W09, "analyze_financial_entities"): {
-        "consumes_information_slots": ["entity_external_evidence", "optional_entity_model_signals", "optional_financial_relation_paths"],
+        "consumes_information_slots": ["entity_external_evidence", "entity_model_signals", "optional_financial_relation_paths"],
         "produces_information_slots": ["entity_analysis", "entity_analysis_uncertainty"],
         "required_context_slots": [],
         "coverage_semantics": {"scope": "provided_entity_set", "claims_require_upstream_support": True},
@@ -158,7 +159,7 @@ _FORWARD_TASK_SEMANTICS: dict[tuple[str, str], dict[str, Any]] = {
         "authority_level": "specialist_entity_analysis",
     },
     (W09, "compare_financial_entities"): {
-        "consumes_information_slots": ["entity_external_evidence", "optional_entity_model_signals", "optional_financial_relation_paths"],
+        "consumes_information_slots": ["entity_external_evidence", "entity_model_signals", "optional_financial_relation_paths"],
         "produces_information_slots": ["comparative_entity_analysis", "entity_analysis_uncertainty"],
         "required_context_slots": [],
         "coverage_semantics": {"scope": "provided_entity_set", "minimum_entities": 2, "claims_require_upstream_support": True},
@@ -319,9 +320,13 @@ def _evidence_collection_result_schema() -> dict[str, Any]:
                 "results": array_schema(_free_object()),
                 "record_count": {"type": "integer"},
                 "source_count": {"type": "integer"},
+                "deduplication": _free_object(),
                 "write_performed": {"type": "boolean"},
             },
-            required=["entity_refs", "collection_goal", "results", "record_count", "source_count", "write_performed"],
+            required=[
+                "entity_refs", "collection_goal", "results", "record_count",
+                "source_count", "deduplication", "write_performed",
+            ],
             additional_properties=True,
         ),
         completion_required=True,
@@ -393,8 +398,13 @@ def _entity_analysis_result_schema() -> dict[str, Any]:
                 "uncertainties": array_schema(_free_object()),
                 "conclusion": {"type": "string"},
                 "source_task_ids": array_schema({"type": "string"}),
+                "input_diagnostics": _free_object(),
             },
-            required=["entity_refs", "facts", "analysis", "uncertainties", "conclusion", "source_task_ids"],
+            required=[
+                "entity_refs", "facts", "analysis", "model_signals",
+                "relation_interpretations", "uncertainties", "conclusion",
+                "source_task_ids", "input_diagnostics",
+            ],
             additional_properties=True,
         ),
         completion_required=True,
@@ -554,7 +564,7 @@ class AgentDirectory:
                 agent_id=EVIDENCE_COLLECTOR,
                 role=EVIDENCE_COLLECTOR,
                 description=(
-                    "负责查找一个或多个已确认金融实体的外部证据，并对证据进行整理、去重、排序和来源核验。"
+                    "负责查找一个或多个已确认金融实体的外部证据，并按 news_id、source_id、graph_evidence_key 等稳定 ID 合并重复记录、排序和核验来源。"
                     "实体集合可以只包含一个元素。W01 不分析证据含义，不写数据库。"
                 ),
                 responsibility=(
@@ -596,13 +606,15 @@ class AgentDirectory:
                             "给我一个调仓方案",
                         ],
                         completion_criteria=[
-                            "按实体返回证据记录、来源、时间范围和明确限制。",
+                            "按实体返回 ID 去重后的 canonical 证据记录、来源、时间范围和明确限制。",
+                            "输出 raw_record_count、canonical_record_count、duplicate_record_count、duplicate_group_count 和跨来源重复组数量，供日志验收。",
                             "未检索到证据时返回业务结果为空，不得补造。",
                             "不得写入 Neo4j 或其他数据库。",
                         ],
                         completion_report_required=True,
                         planning_notes=[
                             "单实体与多实体使用同一个能力；单实体只是 entity_ref_ids 只有一个元素。",
+                            "新闻直查和 RAG 可并行召回；finalize_collection 必须按稳定 ID 合并为 canonical records，不能把两路数量直接相加作为最终记录数。",
                             "W01 内部工具不会暴露给 MainAgent。",
                         ],
                         allowed_request_modes=["analysis", "proposal"],
@@ -726,6 +738,7 @@ class AgentDirectory:
                         authoritative_arg_bindings={"focus_ref_ids": "focus_ref_ids"},
                         selection_requirements=[
                             "用户明确询问某只已解析证券的模型预测、评分、排名或 TopK 状态时选择。",
+                            "下游 W09 需要对已解析证券进行实体分析或比较时，也应选择本任务提供系统内部模型事实。",
                             "用户需要全市场排名候选时应选择 query_latest_ranking。",
                         ],
                         user_goal_examples=[
@@ -743,6 +756,7 @@ class AgentDirectory:
                         planning_notes=[
                             "focus_ref_ids 由运行时绑定；不要把组合快照 GraphRef 当作证券 GraphRef。",
                             "该任务只产出证券级 ModelPredictionResult。",
+                            "作为 W09 上游时，即使 found=false 也必须返回权威空结果和数据日期，供 W09 形成不确定性，不能省略该任务。",
                         ],
                         allowed_request_modes=["analysis", "proposal"],
                         side_effect_policy={"kind": "read_only", "commits_state": False},
@@ -1051,7 +1065,13 @@ class AgentDirectory:
                         allowed_request_modes=["analysis", "proposal"],
                         side_effect_policy={"kind": "derived_database_write", "trading_state_write": False},
                         private_tool_ids=["database.write_evidence_graph_context"],
-                        required_upstream_output_groups=[["EvidenceCollectionResult"]],
+                        required_upstream_output_groups=[
+                                ["EvidenceCollectionResult"],
+                                [
+                                    "ModelPredictionResult", "RankingResult", "ModelMetricsResult",
+                                    "BacktestSummaryResult", "SelectedStrategyResult",
+                                ],
+                            ],
                     ),
                 ],
                 input_schema=object_schema({}, required=[], additional_properties=True),
@@ -1204,13 +1224,13 @@ class AgentDirectory:
                                     "max_items": 8,
                                 },
                                 "model_facts": {
-                                    "description": "可选的内部模型或结构化事实。",
+                                    "description": "实体分析必须使用的系统内部模型或结构化事实；由 W02 等只读 Worker 提供。",
                                     "accepted_output_types": [
                                         "ModelPredictionResult", "RankingResult", "ModelMetricsResult",
                                         "BacktestSummaryResult", "SelectedStrategyResult",
                                     ],
-                                    "required": False,
-                                    "min_items": 0,
+                                    "required": True,
+                                    "min_items": 1,
                                     "max_items": 8,
                                 },
                                 "relation_context": {
@@ -1231,14 +1251,25 @@ class AgentDirectory:
                             ],
                             completion_criteria=[
                                 "所有事实和分析能够回溯到上游结果。",
+                                "必须同时消费外部 EvidenceCollectionResult 和至少一个系统内部模型/结构化事实结果；内部结果为空时明确形成不确定性。",
                                 "关系存在不得直接等同于因果影响。",
                                 "不得生成组合风险或操作建议。",
                             ],
                             completion_report_required=True,
-                            planning_notes=["W09 不自行检索证据或查询数据库。"],
+                            planning_notes=[
+                                "W09 不自行检索证据或查询数据库。",
+                                "MainAgent 应先规划 W01 外部证据和 W02 系统内部数据，再把二者作为 W09 的声明上游。",
+                                "W09 只分析 ID 去重后的 canonical evidence，不应消费新闻直查和 RAG 的重复原始记录。",
+                            ],
                             allowed_request_modes=["analysis", "proposal"],
                             side_effect_policy={"kind": "read_only", "commits_state": False},
-                            required_upstream_output_groups=[["EvidenceCollectionResult"]],
+                            required_upstream_output_groups=[
+                                ["EvidenceCollectionResult"],
+                                [
+                                    "ModelPredictionResult", "RankingResult", "ModelMetricsResult",
+                                    "BacktestSummaryResult", "SelectedStrategyResult",
+                                ],
+                            ],
                         )
                         for task_type, description_text, selection_requirements, user_examples in [
                             (
@@ -1262,7 +1293,13 @@ class AgentDirectory:
                 ),
                 output_schema=_entity_analysis_result_schema(),
                 output_types=["EntityAnalysisResult"],
-                required_upstream_output_groups=[["EvidenceCollectionResult"]],
+                required_upstream_output_groups=[
+                    ["EvidenceCollectionResult"],
+                    [
+                        "ModelPredictionResult", "RankingResult", "ModelMetricsResult",
+                        "BacktestSummaryResult", "SelectedStrategyResult",
+                    ],
+                ],
                 selection_requirements=["只用于金融实体层面的分析或比较。"],
                 non_responsibilities=[
                     "自行收集证据",
@@ -1274,8 +1311,8 @@ class AgentDirectory:
                 ],
                 side_effects=[],
                 private_worker_prompt=(
-                    "你是金融实体分析 Worker。只能消费上游结构化结果，区分事实、分析和不确定性；"
-                    "不得自行检索、查询数据库、分析组合风险或生成方案。"
+                    "你是金融实体分析 Worker。只能消费上游结构化结果，必须同时使用 W01 的 ID 去重外部证据和系统内部模型/结构化事实，"
+                    "区分事实、分析、模型信号、关系解释和不确定性。不得自行检索、查询数据库、分析组合风险或生成方案。"
                 ),
             ),
             AgentCapabilityCard(
@@ -1887,10 +1924,18 @@ class AgentDirectory:
                         upstream_input_bindings={
                             "upstream_results": {
                                 "description": (
-                                    "本次最终回答实际需要汇总的上游 WorkerResult。"
-                                    "只引用与 report_goal 直接相关的结果。"
+                                    "本次最终回答实际需要汇总的终端专业 WorkerResult。"
+                                    "只引用与 report_goal 直接相关且尚未被其他所选结果汇总的结果。"
+                                    "write_report 不直接消费 EvidenceCollectionResult；实体分析场景应消费 W09 的 EntityAnalysisResult。"
                                 ),
-                                "accepted_output_types": ["*"],
+                                "accepted_output_types": [
+                                    "EntityAnalysisResult", "PortfolioRiskResult", "ReviewedProposal",
+                                    "ModelPredictionResult", "RankingResult", "ModelMetricsResult",
+                                    "BacktestSummaryResult", "SelectedStrategyResult",
+                                    "PortfolioAnalysisResult", "AccountStateResult", "UserProfileResult",
+                                    "GraphRelationResult", "DiagnosticResult", "EvidenceGraphContextResult",
+                                    "PortfolioGraphContextResult",
+                                ],
                                 "required": True,
                                 "min_items": 1,
                                 "max_items": 8,
@@ -1899,7 +1944,8 @@ class AgentDirectory:
                         authoritative_arg_bindings={"reply_language": "reply_language"},
                         selection_requirements=[
                             "需要向用户返回最终自然语言回答时选择。",
-                            "必须通过 upstream_results 引用所有被报告使用的专业结果。",
+                            "必须通过 upstream_results 引用所有被报告使用的终端专业结果。",
+                            "若 W09 已消费 W01/W02，W06 只引用 W09，不重复引用传递性的 W01/W02 原始结果。",
                             "不得把 W06 当作任何专业分析、风险判断或 Proposal 生成能力。",
                         ],
                         user_goal_examples=[
@@ -1912,13 +1958,14 @@ class AgentDirectory:
                             "生成调仓 Proposal",
                         ],
                         completion_criteria=[
-                            "输出 FinalReport，包含 source_task_ids、content 和 limitations。",
+                            "输出 FinalReport，包含 source_task_ids、Markdown content、limitations 和结构化完成报告。",
                             "正文中的实体、数值、风险和方案结论均能回溯到上游结果。",
                             "若上游是 ReviewedProposal，明确方案仍待审批且尚未执行。",
                         ],
                         completion_report_required=True,
                         planning_notes=[
-                            "先完成专业 Worker，再把需要呈现的结果引用到 upstream_results。",
+                            "先完成专业 Worker，再把需要呈现的终端结果引用到 upstream_results。",
+                            "不要把已被某个终端专业结果消费的传递性上游再次交给 W06；实体分析报告通常只引用 EntityAnalysisResult。",
                             "不要为了让回答更完整而增加用户未请求的风险、建议或明细。",
                         ],
                         allowed_request_modes=["analysis", "proposal"],
@@ -2000,8 +2047,9 @@ class AgentDirectory:
                 side_effects=[],
                 supports_parallel=False,
                 private_worker_prompt=(
-                    "你只依据上游 WorkerResult 生成最终报告或摘要。不得调用业务数据源、补造事实、"
+                    "你只依据终端上游 WorkerResult 生成最终 Markdown 报告或摘要。不得调用业务数据源、重新读取原始新闻/RAG 记录、补造事实、"
                     "改变上游结论或越过审批边界。实体名称只能使用上游权威实体目录。"
+                    "当上游是 EntityAnalysisResult 时，只重组其中 facts、analysis、model_signals、uncertainties、conclusion 与引用信息。"
                     "最终必须返回 FinalReport WorkerResult，并接受事实与职责边界校验。"
                 ),
             ),
@@ -2149,11 +2197,42 @@ class AgentDirectory:
                 ),
             ),
         ]
+        llm_completion_workers = {W04, W05, W06, W09}
         cards = [
             replace(
                 card,
+                access_mode=(
+                    AccessMode.WRITE if card.worker_id == W08 else AccessMode.READ
+                ),
+                private_tool_ids=(
+                    [
+                        "risk.calculate_concentration",
+                        "risk.read_account_risk_facts",
+                        "risk.summarize_exposure",
+                        "risk.finalize_facts",
+                    ]
+                    if card.worker_id == W04 else list(card.private_tool_ids)
+                ),
                 task_contracts=[
-                    _apply_forward_semantics(card.worker_id, contract)
+                    replace(
+                        _apply_forward_semantics(card.worker_id, contract),
+                        access_mode=(
+                            AccessMode.WRITE if card.worker_id == W08 else AccessMode.READ
+                        ),
+                        completion_report_required=True,
+                        completion_report_source=(
+                            "llm" if card.worker_id in llm_completion_workers else "runtime"
+                        ),
+                        private_tool_ids=(
+                            [
+                                "risk.calculate_concentration",
+                                "risk.read_account_risk_facts",
+                                "risk.summarize_exposure",
+                                "risk.finalize_facts",
+                            ]
+                            if card.worker_id == W04 else list(contract.private_tool_ids)
+                        ),
+                    )
                     for contract in card.task_contracts
                 ],
             )
@@ -2218,7 +2297,8 @@ class AgentDirectory:
                         "freshness_semantics": public["freshness_semantics"],
                         "authority_level": public["authority_level"],
                         "allowed_request_modes": public["allowed_request_modes"],
-                        "side_effect_policy": public["side_effect_policy"],
+                        "access_mode": public["access_mode"],
+                        "completion_report_source": public["completion_report_source"],
                         "required_upstream_output_groups": public[
                             "required_upstream_output_groups"
                         ],
@@ -2238,6 +2318,7 @@ class AgentDirectory:
                     "side_effects": list(card.side_effects),
                     "supports_parallel": card.supports_parallel,
                     "can_generate_proposal": card.can_generate_proposal,
+                    "access_mode": AccessMode.from_value(card.access_mode).value,
                     "missing_context_policy": card.missing_context_policy,
                 }
             )
