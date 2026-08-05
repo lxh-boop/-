@@ -154,9 +154,10 @@ class WorkerToolDagPlanner:
                     ),
                 },
             ],
-            max_output_tokens=4200,
+            max_output_tokens=2200,
             validator=validate,
             operation=f"worker_tool_dag_plan:{worker_role}:{worker_task_type}",
+            disable_thinking=True,
             event_callback=emit,
             repair_mode="targeted",
             repair_guidance=(
@@ -272,9 +273,10 @@ class WorkerToolDagPlanner:
                     ),
                 },
             ],
-            max_output_tokens=4200,
+            max_output_tokens=2800,
             validator=validate,
             operation=f"worker_tool_dag_replan:{previous_plan.worker_role}",
+            disable_thinking=True,
             event_callback=emit,
             repair_mode="targeted",
             repair_guidance=(

@@ -7,6 +7,7 @@ from rag.schemas import RetrievalResult
 
 DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-base"
 DEFAULT_RERANKER_MAX_LENGTH = 256
+DEFAULT_FINAL_RERANK_RESULTS = 5
 
 
 class Reranker:
@@ -36,7 +37,7 @@ class Reranker:
         self,
         query: str,
         candidate_chunks: list[RetrievalResult | dict[str, Any]],
-        top_k: int = 10,
+        top_k: int = DEFAULT_FINAL_RERANK_RESULTS,
     ) -> list[RetrievalResult]:
         candidates = [
             item
@@ -80,6 +81,10 @@ class Reranker:
                 for item in rows
             ]
 
+        final_limit = min(
+            DEFAULT_FINAL_RERANK_RESULTS,
+            max(1, int(top_k or DEFAULT_FINAL_RERANK_RESULTS)),
+        )
         ranked = []
         seen_documents: set[str] = set()
         for item in rows:
@@ -111,6 +116,6 @@ class Reranker:
                     }
                 )
             )
-            if len(ranked) >= max(1, int(top_k)):
+            if len(ranked) >= final_limit:
                 break
         return ranked

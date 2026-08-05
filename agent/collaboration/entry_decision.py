@@ -201,9 +201,10 @@ class MainEntryDecisionPlanner:
                     ),
                 },
             ],
-            max_output_tokens=500,
+            max_output_tokens=360,
             validator=_validate_decision,
             operation="request_mode_decision",
+            disable_thinking=True,
         )
         mode = RequestMode(str(payload.get("mode") or "").strip().lower())
         reason = str(payload.get("reason") or "")[:500]

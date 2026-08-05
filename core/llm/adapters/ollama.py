@@ -13,9 +13,19 @@ class OllamaAdapter(OpenAICompatibleAdapter):
     """Use Ollama's OpenAI-compatible endpoint without accepting shell input."""
 
     @staticmethod
-    def _prepared_messages(profile: ModelProfile, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _prepared_messages(
+        profile: ModelProfile,
+        messages: list[dict[str, Any]],
+        *,
+        disable_thinking: bool | None = None,
+    ) -> list[dict[str, Any]]:
         copied = [dict(item) for item in messages]
-        if not profile.disable_thinking:
+        effective_disable = (
+            profile.disable_thinking
+            if disable_thinking is None
+            else bool(disable_thinking)
+        )
+        if not effective_disable:
             return copied
         for item in copied:
             if item.get("role") == "system":
@@ -27,10 +37,19 @@ class OllamaAdapter(OpenAICompatibleAdapter):
         return copied
 
     @staticmethod
-    def _provider_parameters(profile: ModelProfile) -> dict[str, Any]:
+    def _provider_parameters(
+        profile: ModelProfile,
+        *,
+        disable_thinking: bool | None = None,
+    ) -> dict[str, Any]:
         """Translate thinking configuration to Ollama's OpenAI-compatible API."""
 
-        if profile.disable_thinking:
+        effective_disable = (
+            profile.disable_thinking
+            if disable_thinking is None
+            else bool(disable_thinking)
+        )
+        if effective_disable:
             return {
                 "extra_body": {
                     "reasoning_effort": "none",
@@ -66,6 +85,7 @@ class OllamaAdapter(OpenAICompatibleAdapter):
         messages: list[dict[str, Any]],
         temperature: float,
         max_output_tokens: int,
+        disable_thinking: bool | None = None,
     ) -> LLMResponse:
         try:
             return super().generate(
@@ -74,6 +94,7 @@ class OllamaAdapter(OpenAICompatibleAdapter):
                 messages=messages,
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
+                disable_thinking=disable_thinking,
             )
         except (LLMConfigurationError, LLMResponseError, LLMProviderError):
             raise

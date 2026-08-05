@@ -19,6 +19,7 @@ class LLMAdapter(ABC):
         messages: list[dict[str, Any]],
         temperature: float,
         max_output_tokens: int,
+        disable_thinking: bool | None = None,
     ) -> LLMResponse:
         raise NotImplementedError
 

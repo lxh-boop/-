@@ -155,6 +155,7 @@ def run_strategy_guard(
         validator=validate,
         operation=task.task_type,
         repair_mode="targeted",
+        disable_thinking=False,
         repair_guidance=(
             "只修复 JSON Schema、source_task_ids、requires_approval/execution_allowed 和 completion_report。"
             "不得新增上游没有的业务事实，不得转成写操作。"

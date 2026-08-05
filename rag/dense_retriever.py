@@ -13,6 +13,8 @@ from rag.schemas import RagChunk, RetrievalResult
 
 DEFAULT_DENSE_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 DENSE_INDEX_SCHEMA_VERSION = 1
+DEFAULT_DENSE_MIN_SIMILARITY = 0.35
+DEFAULT_RECALL_CANDIDATE_LIMIT = 200
 
 
 class DenseRetriever:
@@ -84,9 +86,20 @@ class DenseRetriever:
     def search(
         self,
         query: str,
-        top_k: int = 10,
+        top_k: int | None = None,
         metadata_filter: dict[str, Any] | None = None,
+        *,
+        min_similarity: float = DEFAULT_DENSE_MIN_SIMILARITY,
+        max_candidates: int | None = None,
     ) -> list[RetrievalResult]:
+        """Recall by cosine-similarity threshold instead of fixed TopK.
+
+        Stored and query embeddings are normalized by the embedding model, so
+        their dot product is cosine similarity. ``top_k`` is retained only as a
+        compatibility post-threshold cap; production hybrid retrieval uses
+        ``top_k=None``.
+        """
+
         if not self.available or self.embeddings is None or self.embeddings.shape[1] == 0:
             return []
         query_embedding = self.embed_texts([query])
@@ -94,21 +107,34 @@ class DenseRetriever:
             return []
         scores = np.dot(self.embeddings, query_embedding[0])
         allowed = {chunk.chunk_id for chunk in filter_chunks(self.chunks, metadata_filter)}
-        rows = []
+        threshold = min(1.0, max(-1.0, float(min_similarity)))
+        rows: list[RetrievalResult] = []
         for chunk, score in zip(self.chunks, scores):
             if chunk.chunk_id not in allowed:
+                continue
+            similarity = float(score)
+            if similarity < threshold:
                 continue
             rows.append(
                 RetrievalResult(
                     chunk_id=chunk.chunk_id,
                     news_id=chunk.news_id,
                     chunk_text=chunk.chunk_text,
-                    dense_score=float(score),
-                    metadata=chunk.to_dict(),
+                    dense_score=similarity,
+                    metadata={
+                        **chunk.to_dict(),
+                        "dense_similarity": similarity,
+                        "dense_similarity_threshold": float(threshold),
+                    },
                 )
             )
         rows.sort(key=lambda item: item.dense_score, reverse=True)
-        return rows[: max(1, int(top_k))]
+        limit = max_candidates
+        if limit is None and top_k is not None:
+            limit = top_k
+        if limit is not None:
+            rows = rows[: max(1, int(limit))]
+        return rows
 
     def save_index(self, path: str | Path) -> Path:
         out_path = Path(path)

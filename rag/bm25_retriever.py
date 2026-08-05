@@ -12,6 +12,10 @@ from rag.schemas import RagChunk, RetrievalResult
 from rag.utils import DEFAULT_EVENT_TERMS, clean_text
 
 
+DEFAULT_BM25_MIN_SIMILARITY = 0.20
+DEFAULT_RECALL_CANDIDATE_LIMIT = 200
+
+
 class BM25Retriever:
     def __init__(self, financial_terms: list[str] | None = None, k1: float = 1.5, b: float = 0.75):
         self.financial_terms = list(dict.fromkeys((financial_terms or []) + DEFAULT_EVENT_TERMS))
@@ -83,29 +87,64 @@ class BM25Retriever:
     def search(
         self,
         query: str,
-        top_k: int = 10,
+        top_k: int | None = None,
         metadata_filter: dict[str, Any] | None = None,
+        *,
+        min_similarity: float = DEFAULT_BM25_MIN_SIMILARITY,
+        max_candidates: int | None = None,
     ) -> list[RetrievalResult]:
+        """Recall documents by normalized BM25 similarity.
+
+        The query-specific best BM25 score is normalized to ``1.0`` and other
+        positive scores are expressed as a ratio of that best match.  Recall is
+        selected by ``min_similarity`` rather than a fixed TopK.
+
+        ``top_k`` remains as a compatibility-only post-threshold safety cap for
+        older direct callers.  Production hybrid retrieval passes ``top_k=None``
+        and uses ``max_candidates`` solely as an operational memory bound.
+        """
+
         query_tokens = self.tokenize(query)
         allowed = {chunk.chunk_id for chunk in filter_chunks(self.chunks, metadata_filter)}
-        rows: list[RetrievalResult] = []
+        scored: list[tuple[RagChunk, float]] = []
         for chunk, doc_tokens in zip(self.chunks, self.tokenized_docs):
             if chunk.chunk_id not in allowed:
                 continue
             score = self._score_tokens(query_tokens, doc_tokens)
-            if score <= 0:
+            if score > 0:
+                scored.append((chunk, float(score)))
+        if not scored:
+            return []
+
+        scored.sort(key=lambda item: item[1], reverse=True)
+        best_score = max(scored[0][1], 1e-12)
+        threshold = min(1.0, max(0.0, float(min_similarity)))
+        rows: list[RetrievalResult] = []
+        for chunk, score in scored:
+            similarity = min(1.0, max(0.0, score / best_score))
+            if similarity < threshold:
                 continue
+            metadata = {
+                **chunk.to_dict(),
+                "bm25_similarity": float(similarity),
+                "bm25_similarity_threshold": float(threshold),
+            }
             rows.append(
                 RetrievalResult(
                     chunk_id=chunk.chunk_id,
                     news_id=chunk.news_id,
                     chunk_text=chunk.chunk_text,
                     bm25_score=score,
-                    metadata=chunk.to_dict(),
+                    metadata=metadata,
                 )
             )
-        rows.sort(key=lambda item: item.bm25_score, reverse=True)
-        return rows[: max(1, int(top_k))]
+
+        limit = max_candidates
+        if limit is None and top_k is not None:
+            limit = top_k
+        if limit is not None:
+            rows = rows[: max(1, int(limit))]
+        return rows
 
     def save_index(self, path: str | Path) -> Path:
         out_path = Path(path)

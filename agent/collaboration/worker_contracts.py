@@ -54,11 +54,18 @@ def array_schema(
     return schema
 
 
-def string_schema(*, min_length: int = 0, enum: list[str] | None = None) -> dict[str, Any]:
+def string_schema(
+    *,
+    min_length: int = 0,
+    max_length: int | None = None,
+    enum: list[str] | None = None,
+) -> dict[str, Any]:
     schema: dict[str, Any] = {
         "type": "string",
         "minLength": max(0, int(min_length)),
     }
+    if max_length is not None:
+        schema["maxLength"] = max(0, int(max_length))
     if enum:
         schema["enum"] = [str(item) for item in enum]
     return schema
@@ -220,8 +227,8 @@ def validate_schema(value: Any, schema: dict[str, Any], *, path: str = "$") -> N
 
     Supported keywords are intentionally small and deterministic: ``type``,
     ``anyOf``, ``enum``, ``properties``, ``required``,
-    ``additionalProperties``, ``items``, ``minItems``, ``maxItems``, and
-    ``minLength``.
+    ``additionalProperties``, ``items``, ``minItems``, ``maxItems``,
+    ``minLength``, and ``maxLength``.
     """
 
     if not isinstance(schema, dict):
@@ -290,6 +297,13 @@ def validate_schema(value: Any, schema: dict[str, Any], *, path: str = "$") -> N
                 "string_too_short",
                 path,
                 f"minLength={minimum}",
+            )
+        maximum = schema.get("maxLength")
+        if maximum is not None and len(value) > int(maximum):
+            raise WorkerContractViolation(
+                "string_too_long",
+                path,
+                f"maxLength={maximum}",
             )
 
     if isinstance(value, list):

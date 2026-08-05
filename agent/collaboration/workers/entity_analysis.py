@@ -35,21 +35,23 @@ _MAX_EVIDENCE_RECORDS_PER_ENTITY = 20
 
 def _claim_schema(*, kind: str = "generic") -> dict[str, Any]:
     properties: dict[str, Any] = {
-        "claim_id": string_schema(min_length=1),
-        "statement": string_schema(min_length=1),
-        "source_task_ids": array_schema({"type": "string"}),
+        "claim_id": string_schema(min_length=1, max_length=80),
+        "statement": string_schema(min_length=1, max_length=320),
+        "source_task_ids": array_schema(
+            string_schema(min_length=1, max_length=80), max_items=8
+        ),
     }
     required = ["claim_id", "statement", "source_task_ids"]
     if kind == "model_signal":
         properties.update({
             "direction": string_schema(enum=["up", "down", "flat", "mixed", "unknown"]),
-            "horizon": string_schema(min_length=1),
+            "horizon": string_schema(min_length=1, max_length=80),
             "strength": string_schema(enum=["slight", "moderate", "strong", "unknown"]),
         })
         required.extend(["direction", "horizon", "strength"])
     elif kind == "relation":
         properties.update({
-            "relation_type": string_schema(min_length=1),
+            "relation_type": string_schema(min_length=1, max_length=120),
             "causality": string_schema(enum=["established", "not_established", "unknown"]),
         })
         required.extend(["relation_type", "causality"])
@@ -64,14 +66,22 @@ def _entity_analysis_llm_schema() -> dict[str, Any]:
     claim = _claim_schema()
     return object_schema(
         {
-            "entity_refs": array_schema(object_schema({}, additional_properties=True)),
-            "facts": array_schema(claim),
-            "analysis": array_schema(claim),
-            "model_signals": array_schema(_claim_schema(kind="model_signal")),
-            "relation_interpretations": array_schema(_claim_schema(kind="relation")),
-            "uncertainties": array_schema(claim),
-            "conclusion": {"type": "string"},
-            "source_task_ids": array_schema({"type": "string"}),
+            "entity_refs": array_schema(
+                object_schema({}, additional_properties=True), max_items=8
+            ),
+            "facts": array_schema(claim, max_items=8),
+            "analysis": array_schema(claim, max_items=6),
+            "model_signals": array_schema(
+                _claim_schema(kind="model_signal"), max_items=5
+            ),
+            "relation_interpretations": array_schema(
+                _claim_schema(kind="relation"), max_items=5
+            ),
+            "uncertainties": array_schema(claim, max_items=6),
+            "conclusion": string_schema(max_length=500),
+            "source_task_ids": array_schema(
+                string_schema(min_length=1, max_length=80), max_items=12
+            ),
             "completion_report": completion_report_schema(),
         },
         required=[
@@ -486,7 +496,8 @@ def run_entity_analysis(
         "只有你基于上游结构化结果确认全部 criteria 满足、全部 required_information_slots 已产生时，"
         "才能设置 expected_task_completed=true。若没有形成实体分析，只能产生 uncertainty，必须设置为 false。"
         "completion_report.report_source 必须为 llm。不得输出 should_freeze、reusable 或 replan 决策，这些只由程序流程规则计算。"
-        "每个 statement 只表达一个结论，不复制整段证据原文，不在多个数组中重复同一结论。"
+        "每个 statement 只表达一个原子结论，不复制整段证据原文，不在多个数组中重复同一结论。"
+        "只输出结构化分析字段，不生成摘要段落、Markdown、面向用户的报告或重复解释；conclusion 仅保留一句总括。"
         "严格按照 entity_analysis_output_schema 输出 JSON，不要 Markdown。"
     )
     if language == "en":
@@ -532,6 +543,7 @@ def run_entity_analysis(
         validator=validate,
         operation=task.task_type,
         repair_mode="targeted",
+        disable_thinking=False,
         repair_guidance=(
             "只修复 JSON 类型、对象字段、source_task_ids 和 completion_report 的结构一致性。"
             "所有声明数组元素必须是对象，只能引用 allowed_source_task_ids，不得新增事实或来源。"

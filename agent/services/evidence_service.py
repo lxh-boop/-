@@ -109,7 +109,8 @@ class RagRepository:
     ) -> list[dict[str, Any]]:
         index_dir = Path(output_dir) / "rag_indexes"
         signature = self._index_signature(index_dir)
-        cache_key = (*signature, str(stock_code), str(query), int(top_k))
+        final_rerank_limit = 5
+        cache_key = (*signature, str(stock_code), str(query), final_rerank_limit)
         cached = self._cache_get(cache_key)
         if cached is not None:
             self.last_diagnostics = {
@@ -131,7 +132,7 @@ class RagRepository:
             search_started = time.perf_counter()
             results = retriever.search(
                 query or stock_code,
-                final_top_k=int(top_k),
+                final_top_k=final_rerank_limit,
                 metadata_filter={"stock_code": stock_code},
             )
             search_ms = (time.perf_counter() - search_started) * 1000.0
@@ -168,6 +169,8 @@ class RagRepository:
                 "record_count": len(records),
                 "dense_available": bool(getattr(getattr(retriever, "dense", None), "available", False)),
                 "reranker_available": bool(getattr(getattr(retriever, "reranker", None), "available", False)),
+                "retrieval_policy": dict(getattr(retriever, "last_diagnostics", {}) or {}),
+                "final_rerank_limit": final_rerank_limit,
             }
             self._cache_put(cache_key, records)
             return records
@@ -176,7 +179,11 @@ class RagRepository:
             try:
                 from rag_retriever import retrieve_stock_context
 
-                frame = retrieve_stock_context(code=stock_code, query=query or stock_code, top_k=int(top_k))
+                frame = retrieve_stock_context(
+                    code=stock_code,
+                    query=query or stock_code,
+                    top_k=final_rerank_limit,
+                )
                 records = [] if getattr(frame, "empty", True) else [
                     {
                         **dict(record),

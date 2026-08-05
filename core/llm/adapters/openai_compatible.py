@@ -103,10 +103,26 @@ class OpenAICompatibleAdapter(LLMAdapter):
         return OpenAI(**kwargs)
 
     @staticmethod
-    def _prepared_messages(profile: ModelProfile, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _prepared_messages(
+        profile: ModelProfile,
+        messages: list[dict[str, Any]],
+        *,
+        disable_thinking: bool | None = None,
+    ) -> list[dict[str, Any]]:
         copied = [dict(item) for item in messages]
-        # Model-name handling is allowed only inside profile/adapter code.
-        if not (profile.disable_thinking and "qwen" in profile.model_name.lower()):
+        effective_disable = (
+            profile.disable_thinking
+            if disable_thinking is None
+            else bool(disable_thinking)
+        )
+        # DashScope/OpenAI-compatible Qwen APIs expose an explicit
+        # ``enable_thinking`` request parameter.  Do not spend prompt tokens on
+        # ``/no_think`` for remote API calls; the provider parameter below is
+        # authoritative.  Keep the prompt marker only as a compatibility
+        # fallback for non-API Qwen-compatible runtimes.
+        if profile.deployment_mode == "api":
+            return copied
+        if not (effective_disable and "qwen" in profile.model_name.lower()):
             return copied
         for item in copied:
             if item.get("role") == "system":
@@ -118,9 +134,24 @@ class OpenAICompatibleAdapter(LLMAdapter):
         return copied
 
     @staticmethod
-    def _provider_parameters(profile: ModelProfile) -> dict[str, Any]:
+    def _provider_parameters(
+        profile: ModelProfile,
+        *,
+        disable_thinking: bool | None = None,
+    ) -> dict[str, Any]:
+        effective_disable = (
+            profile.disable_thinking
+            if disable_thinking is None
+            else bool(disable_thinking)
+        )
         marker = f"{profile.provider_id} {profile.base_url} {profile.model_name}".lower()
-        if "deepseek" in marker and "v4" in marker:
+        # Qwen3.7/3.6/3.5 hybrid-thinking models enable thinking by default.
+        # The official OpenAI-compatible API requires this non-standard
+        # parameter inside ``extra_body``.  Send both True and False explicitly
+        # so every stage has deterministic thinking behavior.
+        if "qwen" in marker:
+            return {"extra_body": {"enable_thinking": not effective_disable}}
+        if effective_disable and "deepseek" in marker and "v4" in marker:
             return {"extra_body": {"thinking": {"type": "disabled"}}}
         return {}
 
@@ -183,6 +214,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
         messages: list[dict[str, Any]],
         temperature: float,
         max_output_tokens: int,
+        disable_thinking: bool | None = None,
     ) -> LLMResponse:
         try:
             client_started = time.perf_counter()
@@ -193,10 +225,14 @@ class OpenAICompatibleAdapter(LLMAdapter):
             request_started = time.perf_counter()
             response = client.chat.completions.create(
                 model=profile.model_name,
-                messages=self._prepared_messages(profile, messages),
+                messages=self._prepared_messages(
+                    profile, messages, disable_thinking=disable_thinking
+                ),
                 temperature=float(temperature),
                 max_tokens=max(1, int(max_output_tokens)),
-                **self._provider_parameters(profile),
+                **self._provider_parameters(
+                    profile, disable_thinking=disable_thinking
+                ),
                 **self._stream_parameters(profile),
             )
             headers_received = time.perf_counter()
@@ -268,6 +304,15 @@ class OpenAICompatibleAdapter(LLMAdapter):
                     "first_delta_kind": first_delta_kind,
                     "reasoning_chars": reasoning_chars,
                     "content_chars": len(content),
+                    "thinking_disable_requested": bool(
+                        profile.disable_thinking
+                        if disable_thinking is None
+                        else disable_thinking
+                    ),
+                    "thinking_disable_effective": not bool(
+                        (profile.disable_thinking if disable_thinking is None else disable_thinking)
+                        and reasoning_chars
+                    ),
                     "timing_note": (
                         "queue_network=request-to-stream-headers; "
                         "input_prefill=headers-to-first-provider-delta; "

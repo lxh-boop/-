@@ -660,6 +660,7 @@ def record_llm_timing(
     total_tokens: int = 0,
     cached_prompt_tokens: int = 0,
     reasoning_tokens: int = 0,
+    thinking_disabled: bool = False,
     timing: dict[str, Any] | None = None,
     error_type: str = "",
 ) -> str:
@@ -685,6 +686,20 @@ def record_llm_timing(
         "total_tokens": int(total_tokens or 0),
         "cached_prompt_tokens": int(cached_prompt_tokens or 0),
         "reasoning_tokens": int(reasoning_tokens or 0),
+        "thinking_disabled": bool(thinking_disabled),
+        "thinking_disable_requested": bool(
+            observed.get("thinking_disable_requested", thinking_disabled)
+        ),
+        "thinking_disable_effective": observed.get("thinking_disable_effective"),
+        "thinking_mode": (
+            "关闭（已生效）"
+            if thinking_disabled and observed.get("thinking_disable_effective") is True
+            else "关闭请求未生效"
+            if thinking_disabled and observed.get("thinking_disable_effective") is False
+            else "关闭（待Provider验证）"
+            if thinking_disabled
+            else "保留"
+        ),
         "measurement_mode": str(observed.get("measurement_mode") or "unknown"),
         "client_setup_ms": observed.get("client_setup_ms"),
         "queue_network_ms": observed.get("queue_network_ms"),
@@ -1004,15 +1019,16 @@ def finalize_flow_markdown(
             ])
             if llm_executions:
                 lines.extend([
-                    "| Stage | Task ID | Operation | 排队/网络(ms) | 输入预填充(ms) | 思考与输出(ms) | Provider总耗时(ms) | 输入Token | 输出Token | 测量模式 |",
-                    "|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+                    "| Stage | Task ID | Operation | 思考模式 | 排队/网络(ms) | 输入预填充(ms) | 思考与输出(ms) | Provider总耗时(ms) | 输入Token | 输出Token | 测量模式 |",
+                    "|---|---|---|---|---:|---:|---:|---:|---:|---:|---|",
                 ])
                 for item in llm_executions:
                     lines.append(
-                        "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |".format(
+                        "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |".format(
                             _markdown_inline(item.get("stage")),
                             _markdown_inline(item.get("task_id") or "-"),
                             _markdown_inline(item.get("operation")),
+                            _markdown_inline(item.get("thinking_mode")),
                             _markdown_inline(item.get("queue_network_ms")),
                             _markdown_inline(item.get("input_prefill_ms")),
                             _markdown_inline(item.get("thinking_output_ms")),

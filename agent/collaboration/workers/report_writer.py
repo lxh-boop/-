@@ -32,9 +32,10 @@ from .common import dependency_results as dependency_result_items
 from .common import refs_from_dependencies, safe_public_value
 
 
-_REPORT_MAX_OUTPUT_TOKENS = 3200
-_REPORT_MAX_SECTIONS = 8
-_REPORT_MAX_SECTION_CHARS = 3500
+_REPORT_MAX_OUTPUT_TOKENS = 2200
+_REPORT_MAX_SECTIONS = 6
+_REPORT_MAX_SECTION_CHARS = 1600
+_REPORT_MAX_LIMITATIONS = 8
 
 
 def _scalar_mapping(value: Any) -> dict[str, Any]:
@@ -272,8 +273,9 @@ def _system_prompt(language: str, policy: ReportPolicy) -> str:
             "Do not retrieve data, re-read raw news/RAG records, perform specialist analysis, invent entities, "
             "numbers, risks, recommendations, or causal claims. When the upstream result is EntityAnalysisResult, "
             "only reorganize its facts, analysis, model_signals, relation_interpretations, uncertainties, conclusion, "
-            "and source claim ids. Return concise section objects matching the schema; do not duplicate all upstream "
-            "claims into a second claim list and do not put a complete report in an additional field. "
+            "and source claim ids. Do not reconsider specialist conclusions or perform a second analysis pass. "
+            "Return concise section objects matching the schema; do not duplicate all upstream claims into a second "
+            "claim list and do not put a complete report in an additional field. "
             "Do not expose internal worker names, task ids, tools, GraphRef fields, or storage details. "
             "completion_report.report_source must be llm."
         )
@@ -282,6 +284,7 @@ def _system_prompt(language: str, policy: ReportPolicy) -> str:
         "不得检索数据、重新读取原始新闻或 RAG 记录、补造实体、数值、风险、建议或因果结论。"
         "当上游是 EntityAnalysisResult 时，只能重组其中 facts、analysis、model_signals、"
         "relation_interpretations、uncertainties、conclusion 和 source claim 引用。"
+        "不得重新判断、推导或改写专业结论，只做结构化内容到用户报告的表达转换。"
         "严格输出分节结构，每个分节给出 heading、markdown 和 source_claim_ids；不要再复制一份完整 claims 列表，"
         "也不要额外输出另一份完整报告。limitations 只写正文未覆盖的限制，不得与不确定性或其他 section 重复。"
         "不得暴露内部 Worker 名称、task_id、工具、GraphRef 或数据库实现。"
@@ -292,22 +295,27 @@ def _system_prompt(language: str, policy: ReportPolicy) -> str:
 def _report_llm_schema() -> dict[str, Any]:
     section_schema = object_schema(
         {
-            "heading": string_schema(min_length=1),
-            "markdown": string_schema(min_length=1),
-            "source_claim_ids": array_schema(string_schema(min_length=1), max_items=30),
+            "heading": string_schema(min_length=1, max_length=80),
+            "markdown": string_schema(min_length=1, max_length=_REPORT_MAX_SECTION_CHARS),
+            "source_claim_ids": array_schema(
+                string_schema(min_length=1, max_length=80), max_items=20
+            ),
         },
         required=["heading", "markdown", "source_claim_ids"],
         additional_properties=False,
     )
     return object_schema(
         {
-            "title": string_schema(min_length=1),
+            "title": string_schema(min_length=1, max_length=120),
             "sections": array_schema(
                 section_schema,
                 min_items=1,
                 max_items=_REPORT_MAX_SECTIONS,
             ),
-            "limitations": array_schema({"type": "string"}, max_items=20),
+            "limitations": array_schema(
+                string_schema(min_length=1, max_length=260),
+                max_items=_REPORT_MAX_LIMITATIONS,
+            ),
             "completion_report": completion_report_schema(),
         },
         required=["title", "sections", "limitations", "completion_report"],
@@ -493,6 +501,7 @@ def run_report_writer(
             validator=validate,
             operation="write_graph_grounded_report",
             repair_mode="targeted",
+            disable_thinking=True,
             repair_guidance=(
                 "只修复 sectioned_markdown_report.v1 的 JSON 结构、source_claim_ids、completion_report 或报告校验问题。"
                 "不得增加上游没有的事实、实体、数值、风险、建议或来源。每个 section 保持简洁，"

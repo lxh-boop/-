@@ -229,9 +229,10 @@ class AgentCollaborationCoordinator:
                     }),
                 },
             ],
-            max_output_tokens=900,
+            max_output_tokens=500,
             validator=validate,
             operation="extract_graph_entity_candidates",
+            disable_thinking=True,
         )
         return [
             dict(item)

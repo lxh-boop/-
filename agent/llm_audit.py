@@ -114,6 +114,7 @@ def record_llm_call(
     cached_prompt_tokens: int = 0,
     reasoning_tokens: int = 0,
     timing: dict[str, Any] | None = None,
+    thinking_disabled: bool = False,
 ) -> str:
     """Persist one actual transport attempt when invoked by the formal executor."""
     context = dict(_CONTEXT.get() or {})
@@ -169,6 +170,7 @@ def record_llm_call(
         "total_tokens": max(0, int(total_tokens or 0)),
         "cached_prompt_tokens": max(0, int(cached_prompt_tokens or 0)),
         "reasoning_tokens": max(0, int(reasoning_tokens or 0)),
+        "thinking_disabled": bool(thinking_disabled),
         "timing": sanitize_for_trace(dict(timing or {})),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -195,6 +197,7 @@ def record_llm_call(
             total_tokens=max(0, int(total_tokens or 0)),
             cached_prompt_tokens=max(0, int(cached_prompt_tokens or 0)),
             reasoning_tokens=max(0, int(reasoning_tokens or 0)),
+            thinking_disabled=bool(thinking_disabled),
             timing=dict(timing or {}),
             error_type=str(error_type or ""),
         )

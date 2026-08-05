@@ -78,6 +78,7 @@ class LLMService:
         error: Exception | None = None,
         prompt_chars: int = 0,
         max_output_tokens: int = 0,
+        disable_thinking: bool | None = None,
     ) -> str:
         try:
             from agent.llm_audit import record_llm_call
@@ -107,6 +108,11 @@ class LLMService:
                 cached_prompt_tokens=int((response.usage if response else {}).get("cached_prompt_tokens", 0) or 0),
                 reasoning_tokens=int((response.usage if response else {}).get("reasoning_tokens", 0) or 0),
                 timing=dict(response.timing) if response else {},
+                thinking_disabled=(
+                    bool(getattr(self.profile, "disable_thinking", False))
+                    if disable_thinking is None
+                    else bool(disable_thinking)
+                ),
             )
         except Exception:
             return ""
@@ -193,6 +199,7 @@ class LLMService:
         max_output_tokens: int,
         temperature: float = 0.2,
         operation: str = "",
+        disable_thinking: bool | None = None,
     ) -> str:
         if not self.is_available:
             raise LLMConfigurationError("当前 Model Profile 未配置可用凭据或模型。")
@@ -224,6 +231,7 @@ class LLMService:
                 messages=[dict(item) for item in messages],
                 temperature=float(temperature),
                 max_output_tokens=max(1, int(max_output_tokens)),
+                disable_thinking=disable_thinking,
             )
         except Exception as exc:
             try:
@@ -242,6 +250,7 @@ class LLMService:
                 error=exc,
                 prompt_chars=prompt_chars,
                 max_output_tokens=max_output_tokens,
+                disable_thinking=disable_thinking,
             )
             self._set_response(None, event_id)
             mode_label = "本地 Ollama" if self.profile.deployment_mode == "local" else "远程 API"
@@ -264,6 +273,7 @@ class LLMService:
             response=response,
             prompt_chars=prompt_chars,
             max_output_tokens=max_output_tokens,
+            disable_thinking=disable_thinking,
         )
         self._set_response(response, event_id)
         return response.content
@@ -282,6 +292,7 @@ class LLMService:
         repair_context_builder: Callable[
             [dict[str, Any] | None, dict[str, Any]], list[dict[str, Any]]
         ] | None = None,
+        disable_thinking: bool | None = None,
     ) -> dict[str, Any]:
         """Generate JSON and perform exactly one full-plan repair request.
 
@@ -320,6 +331,11 @@ class LLMService:
                 ),
                 "message_count": len(messages),
                 "max_output_tokens": max_output_tokens,
+                "thinking_disabled": (
+                    bool(getattr(self.profile, "disable_thinking", False))
+                    if disable_thinking is None
+                    else bool(disable_thinking)
+                ),
             },
         )
         output = self.generate_text(
@@ -328,6 +344,7 @@ class LLMService:
             max_output_tokens=max_output_tokens,
             temperature=0.0,
             operation=effective_operation,
+            disable_thinking=disable_thinking,
         )
         first_event_id = self.last_audit_event_id
         diagnostics["primary"]["audit_event_id"] = first_event_id
@@ -452,6 +469,11 @@ class LLMService:
                         if isinstance(item, dict)
                     ),
                     "max_output_tokens": max_output_tokens,
+                    "thinking_disabled": (
+                        bool(getattr(self.profile, "disable_thinking", False))
+                        if disable_thinking is None
+                        else bool(disable_thinking)
+                    ),
                 },
             )
             repaired = self.generate_text(
@@ -460,6 +482,7 @@ class LLMService:
                 max_output_tokens=max_output_tokens,
                 temperature=0.0,
                 operation="schema_repair",
+                disable_thinking=disable_thinking,
             )
             repair_event_id = self.last_audit_event_id
             diagnostics["repair"]["audit_event_id"] = repair_event_id

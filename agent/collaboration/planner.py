@@ -1007,6 +1007,7 @@ class CoordinatorPlanner:
             validator=validate,
             operation=f"graph_agent_task_plan:{mode}",
             event_callback=emit_planning_event,
+            disable_thinking=False,
             repair_mode="targeted",
             repair_guidance=(
                 "保持用户目标和仍然合法的任务不变，只修复校验错误指向的字段与受其影响的依赖。"
@@ -1489,6 +1490,7 @@ class CoordinatorPlanner:
             validator=validate,
             operation=f"graph_agent_forward_replan:{mode}:round_{replan_round}",
             event_callback=emit,
+            disable_thinking=False,
             repair_mode="targeted",
             repair_guidance=(
                 "保留 goal_contract 和 frozen_reusable_tasks；不要修改已复用任务。"

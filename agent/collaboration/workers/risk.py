@@ -238,6 +238,7 @@ def run_risk(
         validator=validate,
         operation=task.task_type,
         repair_mode="targeted",
+        disable_thinking=False,
         repair_guidance=(
             "只修复 JSON Schema、risk/source 引用和 completion_report。不得修改原子风险事实或生成 Proposal。"
         ),

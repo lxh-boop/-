@@ -10,8 +10,8 @@
 | `metadata_filter.py` | 股票、行业、事件、发布时间、交易日、公告等 metadata 过滤，避免未来新闻 |
 | `bm25_retriever.py` | 关键词检索，召回股票名、代码和事件词相关 chunk |
 | `dense_retriever.py` | 语义检索；显式记录 `embedding_model_name`、`embedding_dimension`、`index_version`、`load_error` 和 `fallback_reason` |
-| `hybrid_retriever.py` | BM25 + Dense 合并去重，使用 RRF 融合后进入 reranker TopK |
-| `reranker.py` | 精排；缺少 cross-encoder 时按 hybrid_score fallback |
+| `hybrid_retriever.py` | BM25 + Dense 按相似度阈值召回，合并去重并使用 RRF 融合后进入 reranker |
+| `reranker.py` | 精排；缺少 cross-encoder 时按 hybrid_score fallback；最终最多返回 5 条 |
 | `retrieval_logger.py` | 写入 `rag_retrieval_log` 并更新 chunk 检索计数 |
 | `retention_policy.py` | 新闻生命周期策略 |
 | `index_store.py` | 索引保存和加载 |
@@ -41,3 +41,10 @@ Detailed baseline and handoff notes:
 每次检索应写入 `rag_retrieval_log`，包括 query、filters、BM25/Dense/Rerank 返回结果、返回 chunk 和 Agent 使用 chunk。被 Agent 使用过的证据应通过 `evidence_snapshot` 长期保留。
 
 免责声明：本项目仅用于机器学习研究、金融数据分析、量化策略验证、模拟盘展示和项目作品集展示。不构成投资建议。不承诺收益。不用于实盘自动交易。
+## V18.7 召回策略
+
+- BM25 不再按固定 TopK 截断，先将当前查询的最高 BM25 分数归一化为 1.0，再按相似度阈值召回；默认阈值为 0.20。
+- Dense 使用归一化向量的余弦相似度阈值召回；默认阈值为 0.35。
+- 两路召回后的候选上限仅用于内存保护，不作为相关性选择规则。
+- Cross-Encoder 重排序后最多保留 5 条；不足 5 条时不补造低相关结果。
+
