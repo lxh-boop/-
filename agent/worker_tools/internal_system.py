@@ -9,7 +9,7 @@ from typing import Any
 
 import pandas as pd
 
-from agent.collaboration.agent_directory import PORTFOLIO_ANALYST
+from agent.collaboration.worker_directory import PORTFOLIO_ANALYST
 from agent.graph.provider_adapter import GraphProviderAdapter
 from agent.services.market_analysis_service import market_analysis_service
 from agent.services.portfolio_service import portfolio_service
@@ -18,6 +18,8 @@ from agent.tool_runtime import (
     OP_READ,
     TOOL_VISIBILITY_WORKER_PRIVATE,
     ToolDefinition,
+    ToolInputContract,
+    ToolOutputContract,
     description,
     result_schema,
     schema,
@@ -28,6 +30,7 @@ from core.config.paths import BACKTEST_MASTER_TABLE_PATH
 
 INTERNAL_PREDICTION_GET_STOCK = "internal.prediction.get_stock"
 INTERNAL_RANKING_GET_LATEST = "internal.ranking.get_latest"
+INTERNAL_ENTITY_RESOLVE_RANKED_SECURITY = "internal.entity.resolve_ranked_security"
 INTERNAL_MODEL_GET_METRICS = "internal.model.get_metrics"
 INTERNAL_BACKTEST_GET_SUMMARY = "internal.backtest.get_summary"
 INTERNAL_STRATEGY_GET_SELECTED = "internal.strategy.get_selected"
@@ -160,6 +163,8 @@ def build_internal_system_tool_definitions(
                 "rank": rank,
                 "is_topk": bool(rank is not None and rank <= top_k),
                 "total_count": total_count,
+                "security_node_id": str(arguments.get("security_node_id") or ""),
+                "selected_entity_ref": _jsonable(arguments.get("selected_entity_ref") or {}),
                 "source_id": "ranking_latest",
                 "reason": "" if record else "stock_not_in_prediction_universe",
             },
@@ -187,6 +192,119 @@ def build_internal_system_tool_definitions(
             "warnings": [],
             "errors": [] if result.get("success") else [str(result.get("status") or "ranking_data_unavailable")],
             "sources": [{"source_id": "ranking_latest"}],
+        }
+
+    def resolve_ranked_security(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        """Resolve a security discovered by an upstream ranking Tool.
+
+        Identity is derived only from structured internal ranking records and is
+        verified by Neo4j.  The Worker planner may therefore discover an entity
+        during execution without guessing it from free text.
+        """
+
+        raw = arguments.get("market_ranking_signals")
+        if isinstance(raw, list):
+            records = [dict(item) for item in raw if isinstance(item, dict)]
+            data_date = str(arguments.get("as_of_time") or "")
+        else:
+            payload = dict(raw or {}) if isinstance(raw, dict) else {}
+            nested = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+            records = [dict(item) for item in nested.get("records") or [] if isinstance(item, dict)]
+            data_date = str(nested.get("data_date") or arguments.get("as_of_time") or "")
+
+        if not records:
+            return {
+                "success": False,
+                "message": "Ranking result contains no security candidate.",
+                "data": {
+                    "security_node_id": "",
+                    "selected_entity_ref": {},
+                    "selected_ranking_record": {},
+                    "business_empty": True,
+                },
+                "warnings": [],
+                "errors": ["ranking_security_candidate_missing"],
+                "error_type": "business_empty",
+                "failure_kind": "business_empty",
+                "retryable": False,
+                "sources": [{"source_id": "ranking_latest", "as_of_date": data_date}],
+            }
+
+        # Ranking rows are already structured internal data. Prefer explicit
+        # security identity fields; never mine arbitrary numbers from narrative.
+        selected = records[0]
+        identity_values: list[str] = []
+        for key in ("exchange_symbol", "ts_code", "symbol", "stock_code", "code", "instrument"):
+            value = str(selected.get(key) or "").strip()
+            if value and value not in identity_values:
+                identity_values.append(value)
+        if not identity_values:
+            return {
+                "success": False,
+                "message": "Top ranking row has no declared security identity.",
+                "data": {
+                    "security_node_id": "",
+                    "selected_entity_ref": {},
+                    "selected_ranking_record": _prediction_record(selected),
+                },
+                "warnings": [],
+                "errors": ["ranking_security_identity_missing"],
+                "error_type": "entity_resolution_failure",
+                "failure_kind": "entity_resolution_failure",
+                "retryable": False,
+                "sources": [{"source_id": "ranking_latest", "as_of_date": data_date}],
+            }
+
+        candidates = []
+        seen_node_ids: set[str] = set()
+        for value in identity_values:
+            for candidate in provider.identity.resolve_identity(
+                value,
+                role="focus",
+                locked=True,
+                as_of_time=data_date,
+            ):
+                node_id = str(candidate.graph_ref.node_id or "")
+                if node_id and node_id not in seen_node_ids:
+                    candidates.append(candidate)
+                    seen_node_ids.add(node_id)
+
+        if len(candidates) != 1:
+            return {
+                "success": False,
+                "message": (
+                    "Top ranking security cannot be resolved uniquely in the authoritative graph."
+                ),
+                "data": {
+                    "security_node_id": "",
+                    "selected_entity_ref": {},
+                    "selected_ranking_record": _prediction_record(selected),
+                    "candidate_count": len(candidates),
+                },
+                "warnings": [],
+                "errors": ["ranking_security_graph_ref_unresolved"],
+                "error_type": "entity_resolution_failure",
+                "failure_kind": "entity_resolution_failure",
+                "retryable": False,
+                "sources": [{"source_id": "neo4j_identity", "as_of_date": data_date}],
+            }
+
+        candidate = candidates[0]
+        ref = candidate.graph_ref
+        return {
+            "success": True,
+            "message": "Ranked security resolved to authoritative GraphRef.",
+            "data": {
+                "security_node_id": ref.node_id,
+                "selected_entity_ref": ref.to_dict(),
+                "selected_entity": provider.public_entity_descriptor(ref),
+                "selected_ranking_record": _prediction_record(selected),
+                "data_date": data_date,
+                "source_id": "neo4j_identity",
+            },
+            "warnings": [],
+            "errors": [],
+            "sources": [{"source_id": "neo4j_identity", "as_of_date": data_date}],
         }
 
     def get_metrics(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -282,43 +400,176 @@ def build_internal_system_tool_definitions(
         )
 
     specs = [
-        (INTERNAL_PREDICTION_GET_STOCK, "Query Stock Prediction", get_prediction, ["security_node_id"], ["prediction"]),
-        (INTERNAL_RANKING_GET_LATEST, "Query Latest Ranking", get_ranking, [], ["ranking"]),
-        (INTERNAL_MODEL_GET_METRICS, "Query Model Metrics", get_metrics, [], ["model_metrics"]),
-        (INTERNAL_BACKTEST_GET_SUMMARY, "Query Backtest Summary", get_backtest, [], ["backtest_summary"]),
-        (INTERNAL_STRATEGY_GET_SELECTED, "Query Selected Strategy", get_strategy, [], ["selected_strategy"]),
-        (INTERNAL_PORTFOLIO_GET_STATE, "Query Portfolio State", get_portfolio, ["user_id"], ["portfolio_state"]),
-        (INTERNAL_ACCOUNT_GET_STATE, "Query Account State", get_account, ["user_id"], ["account_state"]),
-        (INTERNAL_USER_PROFILE_GET, "Query User Profile", get_profile, ["user_id"], ["user_profile"]),
+        {
+            "name": INTERNAL_PREDICTION_GET_STOCK,
+            "display": "Query Stock Prediction",
+            "handler": get_prediction,
+            "required": ["security_node_id"],
+            "outputs": ["entity_model_signals"],
+            "function": "Read model prediction and ranking facts for one already-resolved security.",
+            "applies": "W02 has an authoritative security_node_id from initial context or an upstream private Tool.",
+            "not_for": "Discovering which security should be analyzed when no identity has been resolved yet.",
+        },
+        {
+            "name": INTERNAL_RANKING_GET_LATEST,
+            "display": "Query Latest Ranking",
+            "handler": get_ranking,
+            "required": [],
+            "outputs": ["market_ranking_signals"],
+            "function": "Read the latest model ranking across the configured stock universe.",
+            "applies": "W02 needs market ranking facts or must discover a target security from ranking results.",
+            "not_for": "Resolving a ranking row into GraphRef or reading a single security's detailed signal.",
+        },
+        {
+            "name": INTERNAL_ENTITY_RESOLVE_RANKED_SECURITY,
+            "display": "Resolve Ranked Security",
+            "handler": resolve_ranked_security,
+            "required": ["market_ranking_signals"],
+            "outputs": ["selected_entity_ref", "security_node_id"],
+            "function": "Resolve the leading security from structured ranking output into an authoritative GraphRef.",
+            "applies": "A prior private Tool produced market_ranking_signals and downstream entity-specific Tools need identity.",
+            "not_for": "Guessing securities from free text or bypassing Neo4j identity authority.",
+        },
+        {
+            "name": INTERNAL_MODEL_GET_METRICS, "display": "Query Model Metrics", "handler": get_metrics,
+            "required": [], "outputs": ["model_quality_metrics"],
+            "function": "Read model quality metrics already stored by the application.",
+            "applies": "W02 needs model-quality facts.", "not_for": "Ranking discovery or entity resolution.",
+        },
+        {
+            "name": INTERNAL_BACKTEST_GET_SUMMARY, "display": "Query Backtest Summary", "handler": get_backtest,
+            "required": [], "outputs": ["backtest_summary"],
+            "function": "Read backtest summary records from the application's authoritative table.",
+            "applies": "W02 needs backtest facts.", "not_for": "Live ranking or entity resolution.",
+        },
+        {
+            "name": INTERNAL_STRATEGY_GET_SELECTED, "display": "Query Selected Strategy", "handler": get_strategy,
+            "required": [], "outputs": ["selected_strategy_state"],
+            "function": "Read the currently selected strategy state.",
+            "applies": "W02 needs configured strategy facts.", "not_for": "Generating or changing a strategy.",
+        },
+        {
+            "name": INTERNAL_PORTFOLIO_GET_STATE, "display": "Query Portfolio State", "handler": get_portfolio,
+            "required": ["user_id"], "outputs": ["current_portfolio_state", "portfolio_positions"],
+            "function": "Read the current paper portfolio and positions.",
+            "applies": "W02 needs portfolio facts for the current user.", "not_for": "Portfolio writes or recommendations.",
+        },
+        {
+            "name": INTERNAL_ACCOUNT_GET_STATE, "display": "Query Account State", "handler": get_account,
+            "required": ["user_id"], "outputs": ["account_financial_state"],
+            "function": "Read the current paper account financial state.",
+            "applies": "W02 needs account facts for the current user.", "not_for": "Account mutation.",
+        },
+        {
+            "name": INTERNAL_USER_PROFILE_GET, "display": "Query User Profile", "handler": get_profile,
+            "required": ["user_id"], "outputs": ["user_profile_state", "user_constraints"],
+            "function": "Read the saved user profile and constraints.",
+            "applies": "W02 needs user-specific facts or constraints.", "not_for": "Changing user profile state.",
+        },
     ]
     definitions: list[ToolDefinition] = []
-    for name, display, handler, required, outputs in specs:
-        properties = {
-            "security_node_id": {"type": "string"},
-            "user_id": {"type": "string"},
-            "top_k": {"type": "integer"},
-            "model_name": {"type": "string"},
-            "trade_date": {"type": "string"},
-            "holding_period": {"type": "integer"},
-            "as_of_time": {"type": "string"},
-        }
+
+    def io_contracts(tool_name: str) -> tuple[list[ToolInputContract], list[ToolOutputContract]]:
+        if tool_name == INTERNAL_RANKING_GET_LATEST:
+            return [], [
+                ToolOutputContract(
+                    slot_id="market_ranking_signals",
+                    schema_id="RankingSignals.v1",
+                    source_path="data",
+                    description="Latest model ranking facts, including ranked records and snapshot metadata.",
+                )
+            ]
+        if tool_name == INTERNAL_ENTITY_RESOLVE_RANKED_SECURITY:
+            return [
+                ToolInputContract(
+                    slot_id="market_ranking_signals",
+                    schema_id="RankingSignals.v1",
+                    required=True,
+                    accepted_sources=("upstream_tool",),
+                    description="Structured ranking facts from an upstream ranking Tool.",
+                )
+            ], [
+                ToolOutputContract(
+                    slot_id="selected_entity_ref",
+                    schema_id="GraphRef.v1",
+                    source_path="data.selected_entity_ref",
+                    description="Authoritative GraphRef for the selected ranked security.",
+                ),
+                ToolOutputContract(
+                    slot_id="security_node_id",
+                    schema_id="SecurityNodeId.v1",
+                    source_path="data.security_node_id",
+                    description="Authoritative graph node id consumed by entity-specific internal Tools.",
+                ),
+            ]
+        if tool_name == INTERNAL_PREDICTION_GET_STOCK:
+            return [
+                ToolInputContract(
+                    slot_id="security_node_id",
+                    schema_id="SecurityNodeId.v1",
+                    required=True,
+                    accepted_sources=("context", "upstream_tool"),
+                    description="Authoritative security node id from runtime context or entity resolution.",
+                )
+            ], [
+                ToolOutputContract(
+                    slot_id="entity_model_signals",
+                    schema_id="EntityModelSignals.v1",
+                    source_path="data",
+                    description="Model prediction and ranking facts for one authoritative security.",
+                )
+            ]
+        if tool_name == INTERNAL_MODEL_GET_METRICS:
+            return [], [
+                ToolOutputContract(
+                    slot_id="model_quality_metrics",
+                    schema_id="ModelQualityMetrics.v1",
+                    source_path="data",
+                    description="Stored model quality and evaluation metrics.",
+                )
+            ]
+        return [], []
+
+    common_properties = {
+        "security_node_id": {"type": "string"},
+        "selected_entity_ref": {"type": "object"},
+        "market_ranking_signals": {"type": "object"},
+        "user_id": {"type": "string"},
+        "top_k": {"type": "integer"},
+        "model_name": {"type": "string"},
+        "trade_date": {"type": "string"},
+        "holding_period": {"type": "integer"},
+        "as_of_time": {"type": "string"},
+    }
+    for spec in specs:
+        required = list(spec["required"])
+        outputs = list(spec["outputs"])
+        input_contracts, output_contracts = io_contracts(str(spec["name"]))
         definitions.append(
             ToolDefinition(
-                name=name,
-                display_name=display,
+                name=str(spec["name"]),
+                display_name=str(spec["display"]),
                 description=description(
-                    "Read authoritative structured data already produced by this application.",
-                    "W02 needs one internal system fact for a declared task contract.",
-                    "External news retrieval, graph materialization, risk conclusions, recommendations, proposals, or writes.",
-                    "Only task-contract fields and runtime-bound identity values.",
-                    "A normalized read-only internal data result.",
+                    str(spec["function"]),
+                    str(spec["applies"]),
+                    str(spec["not_for"]),
+                    ", ".join(required) if required else "Worker runtime context and optional query parameters.",
+                    ", ".join(outputs),
                 ),
-                input_schema=schema(properties, required=required),
-                output_schema=result_schema([]),
-                execution_handler=handler,
-                supported_actions=[name.rsplit(".", 1)[-1]],
+                input_schema=schema(common_properties, required=required),
+                output_schema=result_schema(
+                    ["security_node_id", "selected_entity_ref"]
+                    if spec["name"] == INTERNAL_ENTITY_RESOLVE_RANKED_SECURITY
+                    else []
+                ),
+                execution_handler=spec["handler"],
+                supported_actions=[str(spec["name"]).rsplit(".", 1)[-1]],
                 supported_objects=["internal_system_data"],
                 produced_outputs=outputs,
+                required_input_slots=required,
+                optional_input_slots=[key for key in common_properties if key not in required],
+                input_contracts=input_contracts,
+                output_contracts=output_contracts,
                 operation_type=OP_READ,
                 allowed_agent_types=[PORTFOLIO_ANALYST],
                 permission_scope=OP_READ,
@@ -336,6 +587,7 @@ def build_internal_system_tool_definitions(
 __all__ = [
     "INTERNAL_PREDICTION_GET_STOCK",
     "INTERNAL_RANKING_GET_LATEST",
+    "INTERNAL_ENTITY_RESOLVE_RANKED_SECURITY",
     "INTERNAL_MODEL_GET_METRICS",
     "INTERNAL_BACKTEST_GET_SUMMARY",
     "INTERNAL_STRATEGY_GET_SELECTED",

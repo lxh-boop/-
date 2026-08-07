@@ -359,6 +359,39 @@ def plan_schema_for_prompt(value: Any) -> Any:
     return schema
 
 
+
+def capability_plan_schema_for_prompt(value: Any) -> Any:
+    """Return the compact public capability-plan schema shown to MainAgent.
+
+    Unlike ``plan_schema_for_prompt``, this schema contains no Worker IDs,
+    task types, private tools, runtime parameters, or implementation contracts.
+    Only annotation keys and optional whitespace are removed.
+    """
+
+    schema = copy.deepcopy(schema_for_prompt(value))
+    properties = dict(schema.get("properties") or {})
+    goal = dict(properties.get("goal_contract") or {})
+    _set_max_length(goal, "goal_summary", 300)
+    _set_array_item_max_length(goal, "completion_criteria", 240)
+    _set_array_item_max_length(goal, "constraints", 200)
+    properties["goal_contract"] = goal
+    planning = dict(properties.get("planning_state") or {})
+    _set_max_length(planning, "stop_reason", 240)
+    properties["planning_state"] = planning
+    tasks = dict(properties.get("tasks") or {})
+    item_schema = dict(tasks.get("items") or {})
+    _set_max_length(item_schema, "objective", 220)
+    item_props = dict(item_schema.get("properties") or {})
+    completion = dict(item_props.get("completion_contract") or {})
+    _set_array_item_max_length(completion, "must_cover", 220)
+    _set_array_item_max_length(completion, "must_not_produce", 180)
+    item_props["completion_contract"] = completion
+    item_schema["properties"] = item_props
+    tasks["items"] = item_schema
+    properties["tasks"] = tasks
+    schema["properties"] = properties
+    return schema
+
 def coordinator_result_for_replan(value: Any) -> dict[str, Any]:
     """Keep only facts required for a forward-replan decision."""
 
@@ -455,6 +488,7 @@ def compact_json_dumps(value: Any) -> str:
 
 
 __all__ = [
+    "capability_plan_schema_for_prompt",
     "catalog_for_prompt",
     "compact_json_dumps",
     "coordinator_result_for_replan",

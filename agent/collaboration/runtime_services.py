@@ -112,22 +112,21 @@ class CollaborationRuntimeServices:
                 initial_status = STEP_READY if not task.dependency_task_ids else STEP_PENDING
                 self.recorder.create_step(
                     task.task_id,
-                    task.task_type,
+                    task.boundary_id,
                     depends_on=list(task.dependency_task_ids),
                     status=initial_status,
                     metadata={
-                        "runtime_layer": "worker_dag",
+                        "runtime_layer": "capability_dag",
                         "agent_role": task.assigned_agent,
                         "assigned_agent": task.assigned_agent,
-                        "task_type": task.task_type,
+                        "boundary_id": task.boundary_id,
                         "task_contract_version": task.contract_version,
-                        "required_outputs": list(task.required_outputs),
-                        "constraints": list(task.constraints),
-                        "priority": task.priority,
+                        "required_outputs": list(task.expected_output_slots),
+                                                "priority": task.priority,
                         "attempt": task.attempt,
                         "request_mode": task.metadata.get("request_mode"),
-                        "semantic_inputs": task.inputs,
-                        "dependency_derivation": task.metadata.get("dependency_derivation"),
+                        "resolved_input_bindings": task.resolved_input_bindings,
+                        "dependency_derivation": "output_input_slot_binding",
                         **self._ref_summary(task),
                     },
                 )
@@ -176,7 +175,7 @@ class CollaborationRuntimeServices:
                 {
                     "success": step_status == STEP_SUCCEEDED,
                     "step_status": step_status,
-                    "intent": task.task_type,
+                    "intent": task.boundary_id,
                     "depends_on": list(task.dependency_task_ids),
                     "message": result.summary,
                     "warnings": list(result.warnings),
@@ -184,12 +183,12 @@ class CollaborationRuntimeServices:
                     "started_at": started_at,
                     "finished_at": finished_at,
                     "duration_seconds": duration_seconds,
-                    "execution_mode": "worker_dag",
+                    "execution_mode": task.execution_mode,
                     "agent_role": task.assigned_agent,
                     "agent_input_summary": {
                         "objective": task.objective[:500],
-                        "required_outputs": list(task.required_outputs),
-                        "semantic_inputs": task.inputs,
+                        "required_outputs": list(task.expected_output_slots),
+                        "resolved_input_bindings": task.resolved_input_bindings,
                         "dependency_task_ids": list(task.dependency_task_ids),
                     },
                     "agent_output_summary": {
@@ -201,7 +200,7 @@ class CollaborationRuntimeServices:
                         "artifact_ref_count": len(result.artifact_refs),
                     },
                     "metadata": {
-                        "runtime_layer": "worker_dag",
+                        "runtime_layer": "capability_dag",
                         "worker_result_status": result.status.value,
                         "worker_contract_version": result.contract_version,
                         "tool_execution": (

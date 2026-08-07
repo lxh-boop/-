@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 from agent.tool_runtime import OP_READ, ToolRegistry
+from agent.tool_runtime.validation import input_contracts_for, output_contracts_for
 from agent.worker_tools import WorkerToolDirectory
 
 from .contracts import ToolDagContractViolation, ToolDagPlan, ToolDagTask
@@ -44,13 +45,15 @@ def _validate_input_binding_shape(value: Any, *, path: str) -> None:
             if not str(item.get("from_context") or "").strip():
                 raise ToolDagContractViolation("tool_context_ref_key_required", item_path)
         else:
-            unknown = set(item) - {"from_tool_task_id", "data_key"}
+            unknown = set(item) - {"from_tool_task_id", "output_slot", "data_key"}
             if unknown:
                 raise ToolDagContractViolation(
                     "tool_result_ref_has_unknown_fields", item_path, ",".join(sorted(unknown))
                 )
             if not str(item.get("from_tool_task_id") or "").strip():
                 raise ToolDagContractViolation("tool_result_ref_task_id_required", item_path)
+            if str(item.get("output_slot") or "").strip() and str(item.get("data_key") or "").strip():
+                raise ToolDagContractViolation("tool_result_ref_output_slot_or_data_key", item_path)
 
 
 def _matches_schema_type(value: Any, schema: dict[str, Any]) -> bool:
@@ -80,6 +83,29 @@ def dependencies_from_inputs(inputs: dict[str, Any]) -> list[str]:
             rows.append(task_id)
     return rows
 
+
+
+
+def _input_contract(definition: Any, slot_id: str) -> Any | None:
+    for item in input_contracts_for(definition):
+        if str(item.slot_id) == str(slot_id):
+            return item
+    return None
+
+
+def _output_contract(definition: Any, slot_id: str) -> Any | None:
+    for item in output_contracts_for(definition):
+        if str(item.slot_id) == str(slot_id):
+            return item
+    return None
+
+
+def _schema_compatible(producer: Any | None, consumer: Any | None) -> bool:
+    if producer is None or consumer is None:
+        return True
+    left = str(getattr(producer, "schema_id", "") or "").strip()
+    right = str(getattr(consumer, "schema_id", "") or "").strip()
+    return not left or not right or left == right
 
 class ToolDagValidator:
     """Validate private Tool selection, schemas, dependencies and goal coverage.
@@ -183,11 +209,23 @@ class ToolDagValidator:
                     )
             for name, spec in inputs.items():
                 _validate_input_binding_shape(spec, path=f"{path}.inputs.{name}")
-                if not list(_iter_input_refs(spec)):
+                refs = list(_iter_input_refs(spec))
+                if not refs:
                     raise ToolDagContractViolation(
                         "tool_task_input_must_reference_context_or_tool",
                         f"{path}.inputs.{name}",
                     )
+                contract = _input_contract(definition, name)
+                if contract is not None and contract.accepted_sources:
+                    allowed_sources = set(contract.accepted_sources)
+                    for ref in refs:
+                        source_kind = "context" if str(ref.get("from_context") or "").strip() else "upstream_tool"
+                        if source_kind not in allowed_sources:
+                            raise ToolDagContractViolation(
+                                "tool_input_source_not_allowed",
+                                f"{path}.inputs.{name}",
+                                source_kind,
+                            )
             for ref in _iter_input_refs(inputs):
                 context_key = str(ref.get("from_context") or "").strip()
                 upstream_id = str(ref.get("from_tool_task_id") or "").strip()
@@ -217,7 +255,11 @@ class ToolDagValidator:
             tasks.append(task)
             definitions[task_id] = definition
 
-        known = set(task_ids)
+        frozen_ids = set(signatures)
+        known_current = set(task_ids)
+        known = known_current | frozen_ids
+        task_by_id = {task.tool_task_id: task for task in tasks}
+
         for index, task in enumerate(tasks):
             unknown_dependencies = sorted(set(dependencies_from_inputs(task.inputs)) - known)
             if unknown_dependencies:
@@ -226,6 +268,48 @@ class ToolDagValidator:
                     f"$.tasks[{index}].inputs",
                     ",".join(unknown_dependencies),
                 )
+            consumer_definition = definitions[task.tool_task_id]
+            for input_name, spec in task.inputs.items():
+                consumer_contract = _input_contract(consumer_definition, input_name)
+                for ref in _iter_input_refs(spec):
+                    upstream_id = str(ref.get("from_tool_task_id") or "").strip()
+                    if not upstream_id:
+                        continue
+                    output_slot = str(ref.get("output_slot") or "").strip()
+                    legacy_data_key = str(ref.get("data_key") or "").strip()
+                    if upstream_id in task_by_id:
+                        producer_definition = definitions[upstream_id]
+                    else:
+                        signature = signatures.get(upstream_id) or {}
+                        producer_definition = self.registry.get(str(signature.get("tool_name") or ""))
+                    if producer_definition is None:
+                        raise ToolDagContractViolation(
+                            "tool_task_dependency_definition_not_found",
+                            f"$.tasks[{index}].inputs.{input_name}",
+                            upstream_id,
+                        )
+                    if output_slot:
+                        producer_contract = _output_contract(producer_definition, output_slot)
+                        if producer_contract is None:
+                            raise ToolDagContractViolation(
+                                "tool_output_slot_not_produced",
+                                f"$.tasks[{index}].inputs.{input_name}",
+                                f"{upstream_id}:{output_slot}",
+                            )
+                        if not _schema_compatible(producer_contract, consumer_contract):
+                            raise ToolDagContractViolation(
+                                "tool_slot_schema_mismatch",
+                                f"$.tasks[{index}].inputs.{input_name}",
+                                f"{producer_contract.schema_id}->{consumer_contract.schema_id}",
+                            )
+                    elif producer_definition.output_contracts:
+                        # Contracted Tools expose semantic output slots only.
+                        # Their raw Python data paths are Runtime-private.
+                        raise ToolDagContractViolation(
+                            "tool_contracted_output_requires_output_slot",
+                            f"$.tasks[{index}].inputs.{input_name}",
+                            legacy_data_key or upstream_id,
+                        )
 
         final_ids = [str(item).strip() for item in finals if str(item or "").strip()]
         if len(final_ids) != len(set(final_ids)):
@@ -234,13 +318,23 @@ class ToolDagValidator:
         if missing_finals:
             raise ToolDagContractViolation("final_tool_task_not_found", "$.final_output_task_ids", ",".join(missing_finals))
 
-        self._validate_acyclic(tasks)
-        self._validate_contribution(tasks, final_ids)
+        self._validate_acyclic(tasks, externally_satisfied=frozen_ids)
+        self._validate_contribution(tasks, final_ids, external_ids=frozen_ids)
         final_outputs: set[str] = set()
-        task_by_id = {task.tool_task_id: task for task in tasks}
         for task_id in final_ids:
-            final_outputs.update(task_by_id[task_id].expected_output_keys)
-            final_outputs.update(definitions[task_id].produced_outputs or [])
+            if task_id in task_by_id:
+                final_outputs.update(task_by_id[task_id].expected_output_keys)
+                final_outputs.update(
+                    str(item.slot_id) for item in output_contracts_for(definitions[task_id]) if str(item.slot_id)
+                )
+            else:
+                signature = signatures.get(task_id) or {}
+                final_outputs.update(str(item) for item in signature.get("expected_output_keys") or [] if str(item))
+                frozen_definition = self.registry.get(str(signature.get("tool_name") or ""))
+                if frozen_definition is not None:
+                    final_outputs.update(
+                        str(item.slot_id) for item in output_contracts_for(frozen_definition) if str(item.slot_id)
+                    )
         missing_goal_outputs = sorted(required_goal_keys - final_outputs)
         if missing_goal_outputs:
             raise ToolDagContractViolation(
@@ -258,10 +352,14 @@ class ToolDagValidator:
         )
 
     @staticmethod
-    def _validate_acyclic(tasks: list[ToolDagTask]) -> None:
+    def _validate_acyclic(
+        tasks: list[ToolDagTask],
+        *,
+        externally_satisfied: set[str] | None = None,
+    ) -> None:
         by_id = {task.tool_task_id: task for task in tasks}
         remaining = set(by_id)
-        completed: set[str] = set()
+        completed: set[str] = set(externally_satisfied or set())
         while remaining:
             ready = [
                 task_id
@@ -274,16 +372,26 @@ class ToolDagValidator:
             remaining.difference_update(ready)
 
     @staticmethod
-    def _validate_contribution(tasks: list[ToolDagTask], final_ids: list[str]) -> None:
+    def _validate_contribution(
+        tasks: list[ToolDagTask],
+        final_ids: list[str],
+        *,
+        external_ids: set[str] | None = None,
+    ) -> None:
         by_id = {task.tool_task_id: task for task in tasks}
+        external = set(external_ids or set())
         needed = set(final_ids)
-        stack = list(final_ids)
+        stack = [task_id for task_id in final_ids if task_id in by_id]
         while stack:
             task_id = stack.pop()
             for dependency in dependencies_from_inputs(by_id[task_id].inputs):
                 if dependency not in needed:
                     needed.add(dependency)
-                    stack.append(dependency)
+                    if dependency in by_id:
+                        stack.append(dependency)
+                elif dependency in by_id and dependency not in external:
+                    # Already marked needed; no second traversal required.
+                    pass
         unused = sorted(set(by_id) - needed)
         if unused:
             raise ToolDagContractViolation("tool_dag_task_has_no_final_contribution", "$.tasks", ",".join(unused))

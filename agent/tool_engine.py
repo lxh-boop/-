@@ -148,7 +148,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             supported_actions=["query", "analyze", "construct_recommendation"],
             supported_objects=["current_portfolio"],
             produced_outputs=["portfolio_state", "account_summary", "position_count"],
-            legacy_names=["portfolio_state"],
+            aliases=["portfolio_state"],
         ),
         ToolDefinition(
             name="portfolio.get_account_summary",
@@ -166,7 +166,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             supported_actions=["query", "analyze"],
             supported_objects=["paper_account", "current_portfolio"],
             produced_outputs=["account_summary", "cash_state", "account"],
-            legacy_names=["portfolio_account_summary"],
+            aliases=["portfolio_account_summary"],
         ),
         ToolDefinition(
             name="portfolio.get_positions",
@@ -184,7 +184,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             supported_actions=["query", "analyze"],
             supported_objects=["positions", "current_portfolio"],
             produced_outputs=["positions", "position_weights", "position_count"],
-            legacy_names=["portfolio_positions"],
+            aliases=["portfolio_positions"],
         ),
         ToolDefinition(
             name="portfolio.get_orders",
@@ -202,7 +202,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             supported_actions=["query", "analyze"],
             supported_objects=["orders", "paper_account"],
             produced_outputs=["orders", "order_count", "latest_trade_date"],
-            legacy_names=["portfolio_orders"],
+            aliases=["portfolio_orders"],
         ),
         ToolDefinition(
             name="portfolio.analyze_risk",
@@ -220,7 +220,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             supported_actions=["analyze", "construct_recommendation", "explain"],
             supported_objects=["current_portfolio"],
             produced_outputs=["current_risk", "risk_factors", "limitations"],
-            legacy_names=["portfolio_risk"],
+            aliases=["portfolio_risk"],
         ),
         ToolDefinition(
             name="portfolio.compare_risk_before_after",
@@ -238,7 +238,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             supported_actions=["analyze", "construct_recommendation", "explain"],
             supported_objects=["current_portfolio", "risk"],
             produced_outputs=["risk_before_after", "delta", "summary", "limitations"],
-            legacy_names=["portfolio_risk_compare"],
+            aliases=["portfolio_risk_compare"],
         ),
         ToolDefinition(
             name="portfolio.design_target_portfolio",
@@ -270,7 +270,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_READ,
             allowed_agent_types=[AGENT_MAIN, AGENT_READ],
             permission_scope=OP_READ,
-            legacy_names=["design_target_portfolio"],
+            aliases=["design_target_portfolio"],
         ),
         ToolDefinition(
             name="portfolio.construct_target_portfolio",
@@ -307,7 +307,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_READ,
             allowed_agent_types=[AGENT_MAIN, AGENT_READ],
             permission_scope=OP_READ,
-            legacy_names=["construct_target_portfolio"],
+            aliases=["construct_target_portfolio"],
         ),
         ToolDefinition(
             name="portfolio.load_target_portfolio",
@@ -328,7 +328,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_READ,
             allowed_agent_types=[AGENT_MAIN, AGENT_READ],
             permission_scope=OP_READ,
-            legacy_names=["load_target_portfolio"],
+            aliases=["load_target_portfolio"],
         ),
         ToolDefinition(
             name="portfolio.compare_portfolios",
@@ -349,7 +349,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_READ,
             allowed_agent_types=[AGENT_MAIN, AGENT_READ],
             permission_scope=OP_READ,
-            legacy_names=["compare_portfolios"],
+            aliases=["compare_portfolios"],
         ),
         ToolDefinition(
             name="market.get_ranking",
@@ -367,7 +367,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             supported_actions=["query", "construct_recommendation", "explain"],
             supported_objects=["market_evidence", "candidate_stocks"],
             produced_outputs=["candidate_stocks", "market_evidence", "reasons", "limitations"],
-            legacy_names=["ranking"],
+            aliases=["ranking"],
         ),
         ToolDefinition(
             name="market.analyze_stock",
@@ -385,7 +385,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             supported_actions=["analyze", "explain"],
             supported_objects=["stock", "market_evidence"],
             produced_outputs=["stock_analysis", "market_evidence", "evidence", "reasons", "limitations"],
-            legacy_names=["stock_analysis"],
+            aliases=["stock_analysis"],
         ),
         ToolDefinition(
             name="market.lookup_stock",
@@ -403,7 +403,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             supported_actions=["query", "analyze", "explain"],
             supported_objects=["stock", "market_evidence"],
             produced_outputs=["stock_lookup", "market_evidence", "evidence", "reasons", "limitations"],
-            legacy_names=["stock_lookup", "classic_stock_score"],
+            aliases=["stock_lookup", "classic_stock_score"],
         ),
         ToolDefinition(
             name="market.compare_stocks",
@@ -421,7 +421,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             supported_actions=["compare", "analyze", "explain"],
             supported_objects=["stock", "market_evidence"],
             produced_outputs=["stock_comparison", "market_evidence", "evidence", "reasons", "limitations"],
-            legacy_names=[],
+            aliases=[],
         ),
         ToolDefinition(
             name="market.get_signal_summary",
@@ -439,7 +439,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             supported_actions=["query", "explain"],
             supported_objects=["market_evidence", "candidate_stocks"],
             produced_outputs=["candidate_stocks", "market_evidence", "signal_summary", "reasons", "limitations"],
-            legacy_names=["classic_ranking"],
+            aliases=["classic_ranking"],
         ),
         ToolDefinition(
             name="evidence.search_news",
@@ -457,7 +457,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             supported_actions=["query", "retrieve_evidence", "explain"],
             supported_objects=["stock", "news_evidence", "market_evidence"],
             produced_outputs=["news_events", "evidence", "market_evidence", "sources", "reasons", "limitations"],
-            legacy_names=["stock_news", "news_search"],
+            aliases=["stock_news", "news_search"],
         ),
         ToolDefinition(
             name="evidence.search_rag",
@@ -475,7 +475,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             supported_actions=["query", "retrieve_evidence", "explain"],
             supported_objects=["stock", "rag_evidence", "market_evidence"],
             produced_outputs=["rag_contexts", "evidence", "market_evidence", "sources", "limitations"],
-            legacy_names=["stock_rag", "rag_search"],
+            aliases=["stock_rag", "rag_search"],
         ),
         ToolDefinition(
             name="evidence.get_stock_evidence",
@@ -493,7 +493,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             supported_actions=["query", "retrieve_evidence", "explain"],
             supported_objects=["stock", "market_evidence"],
             produced_outputs=["evidence", "market_evidence", "sources", "reasons", "limitations"],
-            legacy_names=[],
+            aliases=[],
         ),
         ToolDefinition(
             name="evidence.get_market_evidence",
@@ -511,7 +511,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             supported_actions=["query", "retrieve_evidence", "explain"],
             supported_objects=["market_evidence"],
             produced_outputs=["evidence", "market_evidence", "sources", "reasons", "limitations"],
-            legacy_names=[],
+            aliases=[],
         ),
         ToolDefinition(
             name="evidence.mcp_readonly_evidence",
@@ -533,7 +533,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_READ,
             allowed_agent_types=[AGENT_MAIN, AGENT_READ],
             permission_scope=OP_READ,
-            legacy_names=["mcp_market_risk_summary"],
+            aliases=["mcp_market_risk_summary"],
         ),
         ToolDefinition(
             name="system.scheduler_status",
@@ -554,7 +554,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_SYSTEM,
             allowed_agent_types=[AGENT_MAIN],
             permission_scope=OP_SYSTEM,
-            legacy_names=["scheduler_status"],
+            aliases=["scheduler_status"],
         ),
         ToolDefinition(
             name="report.list_latest",
@@ -572,7 +572,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             supported_actions=["query", "explain"],
             supported_objects=["report"],
             produced_outputs=["report_summary"],
-            legacy_names=["report", "report_latest"],
+            aliases=["report", "report_latest"],
         ),
         ToolDefinition(
             name="memory.search",
@@ -603,7 +603,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_READ,
             allowed_agent_types=[AGENT_MAIN, AGENT_READ],
             permission_scope=OP_READ,
-            legacy_names=[],
+            aliases=[],
         ),
         ToolDefinition(
             name="memory.get_summary",
@@ -625,7 +625,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_READ,
             allowed_agent_types=[AGENT_MAIN, AGENT_READ],
             permission_scope=OP_READ,
-            legacy_names=[],
+            aliases=[],
         ),
         ToolDefinition(
             name="user.profile.get",
@@ -646,7 +646,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_READ,
             allowed_agent_types=[AGENT_MAIN, AGENT_READ],
             permission_scope=OP_READ,
-            legacy_names=["user_profile"],
+            aliases=["user_profile"],
         ),
         ToolDefinition(
             name="sandbox.python_analysis",
@@ -678,7 +678,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             allowed_agent_types=[AGENT_MAIN],
             permission_scope=OP_SYSTEM,
             runtime_policy={"max_attempts": 1, "tool_timeout_seconds": 9910},
-            legacy_names=["python_sandbox_analysis"],
+            aliases=["python_sandbox_analysis"],
         ),
         ToolDefinition(
             name="mcp.readonly.invoke",
@@ -706,7 +706,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_READ,
             allowed_agent_types=[AGENT_MAIN, AGENT_READ],
             permission_scope=OP_READ,
-            legacy_names=["mcp_tool"],
+            aliases=["mcp_tool"],
         ),
         ToolDefinition(
             name="portfolio.recommend_position",
@@ -735,7 +735,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_READ,
             allowed_agent_types=[AGENT_MAIN, AGENT_READ],
             permission_scope=OP_READ,
-            legacy_names=["position_recommendation"],
+            aliases=["position_recommendation"],
         ),
         ToolDefinition(
             name="portfolio.recommend_replacement",
@@ -764,7 +764,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_READ,
             allowed_agent_types=[AGENT_MAIN, AGENT_READ],
             permission_scope=OP_READ,
-            legacy_names=["replacement_recommendation"],
+            aliases=["replacement_recommendation"],
         ),
         ToolDefinition(
             name="portfolio.preview_manual_change",
@@ -798,7 +798,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_PROPOSAL,
             allowed_agent_types=[AGENT_MAIN, AGENT_WRITE],
             permission_scope=OP_PROPOSAL,
-            legacy_names=["manual_position_operation_tool"],
+            aliases=["manual_position_operation_tool"],
         ),
         ToolDefinition(
             name="portfolio.preview_rebalance",
@@ -828,7 +828,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_PROPOSAL,
             allowed_agent_types=[AGENT_MAIN, AGENT_WRITE],
             permission_scope=OP_PROPOSAL,
-            legacy_names=["rebalance_plan"],
+            aliases=["rebalance_plan"],
         ),
         ToolDefinition(
             name="portfolio.preview_adjust_position",
@@ -860,7 +860,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_PROPOSAL,
             allowed_agent_types=[AGENT_MAIN, AGENT_WRITE],
             permission_scope=OP_PROPOSAL,
-            legacy_names=["adjust_position"],
+            aliases=["adjust_position"],
         ),
         ToolDefinition(
             name="portfolio.preview_paper_trade",
@@ -890,7 +890,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_PROPOSAL,
             allowed_agent_types=[AGENT_MAIN, AGENT_WRITE],
             permission_scope=OP_PROPOSAL,
-            legacy_names=["paper_trade_preview"],
+            aliases=["paper_trade_preview"],
         ),
         ToolDefinition(
             name="portfolio.commit_paper_trade",
@@ -920,7 +920,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             allowed_agent_types=[AGENT_MAIN, AGENT_WRITE],
             permission_scope=OP_WRITE,
             requires_approval=True,
-            legacy_names=["paper_trade_execute", "paper_trading_execution_tool"],
+            aliases=["paper_trade_execute", "paper_trading_execution_tool"],
         ),
         ToolDefinition(
             name="strategy.get_context",
@@ -1390,7 +1390,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_PROPOSAL,
             allowed_agent_types=[AGENT_MAIN, AGENT_WRITE],
             permission_scope=OP_PROPOSAL,
-            legacy_names=["strategy_builder_tool"],
+            aliases=["strategy_builder_tool"],
         ),
         ToolDefinition(
             name="strategy.management.preview",
@@ -1420,7 +1420,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_PROPOSAL,
             allowed_agent_types=[AGENT_MAIN, AGENT_WRITE],
             permission_scope=OP_PROPOSAL,
-            legacy_names=["strategy_management_tool"],
+            aliases=["strategy_management_tool"],
         ),
         ToolDefinition(
             name="strategy.disable.preview",
@@ -1449,7 +1449,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_PROPOSAL,
             allowed_agent_types=[AGENT_MAIN, AGENT_WRITE],
             permission_scope=OP_PROPOSAL,
-            legacy_names=["strategy_disable_preview"],
+            aliases=["strategy_disable_preview"],
         ),
         ToolDefinition(
             name="strategy.disable.commit",
@@ -1479,7 +1479,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             allowed_agent_types=[AGENT_MAIN, AGENT_WRITE],
             permission_scope=OP_WRITE,
             requires_approval=True,
-            legacy_names=["strategy_disable_commit"],
+            aliases=["strategy_disable_commit"],
         ),
         ToolDefinition(
             name="capital.change.preview",
@@ -1510,7 +1510,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_PROPOSAL,
             allowed_agent_types=[AGENT_MAIN, AGENT_WRITE],
             permission_scope=OP_PROPOSAL,
-            legacy_names=["capital_management_preview"],
+            aliases=["capital_management_preview"],
         ),
         ToolDefinition(
             name="capital.change.commit",
@@ -1540,7 +1540,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             allowed_agent_types=[AGENT_MAIN, AGENT_WRITE],
             permission_scope=OP_WRITE,
             requires_approval=True,
-            legacy_names=["capital_management_execute"],
+            aliases=["capital_management_execute"],
         ),
         ToolDefinition(
             name="backfill.preview",
@@ -1572,7 +1572,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             operation_type=OP_PROPOSAL,
             allowed_agent_types=[AGENT_MAIN, AGENT_WRITE],
             permission_scope=OP_PROPOSAL,
-            legacy_names=["backfill_preview"],
+            aliases=["backfill_preview"],
         ),
         ToolDefinition(
             name="backfill.commit",
@@ -1602,7 +1602,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             allowed_agent_types=[AGENT_MAIN, AGENT_WRITE],
             permission_scope=OP_WRITE,
             requires_approval=True,
-            legacy_names=["backfill_execute"],
+            aliases=["backfill_execute"],
         ),
         ToolDefinition(
             name="approval.confirm_plan",
@@ -1632,7 +1632,7 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             allowed_agent_types=[AGENT_MAIN, AGENT_WRITE],
             permission_scope=OP_WRITE,
             requires_approval=True,
-            legacy_names=["strategy_confirmation_execute"],
+            aliases=["strategy_confirmation_execute"],
         ),
     ]
 
@@ -1674,6 +1674,3 @@ def execute_tool(
         approval_granted=approval_granted,
     )
 
-
-def execute_tool_legacy_dict(*args: Any, **kwargs: Any) -> dict[str, Any]:
-    return execute_tool(*args, **kwargs).to_legacy_dict()

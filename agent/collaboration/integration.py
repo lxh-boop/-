@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from agent.runtime_version import RUNTIME_VERSION
+
 from pathlib import Path
 from typing import Any
 
@@ -13,13 +15,13 @@ from .coordinator import AgentCollaborationCoordinator
 from .entry_decision import EntryDecision, RequestMode
 from .llm_runtime import require_run_llm_service
 from .runtime_services import CollaborationRuntimeServices
-from .session_memory import SessionMemoryStore
+from .session_state import SessionStateStore
 
 
-RUNTIME_BUILD = "V18.1"
+RUNTIME_BUILD = RUNTIME_VERSION
 ACCESS_MODEL_VERSION = "read-write.v1"
-COMPLETION_CONTRACT_VERSION = "worker-completion-contract.v1"
-COMPLETION_REPORT_VERSION = "worker-completion-report.v1"
+COMPLETION_CONTRACT_VERSION = "capability-contract-list.v1"
+COMPLETION_REPORT_VERSION = "capability-contract-report.v1"
 EVIDENCE_ANALYSIS_REPORT_VERSION = "evidence-analysis-report.v1"
 
 
@@ -45,13 +47,12 @@ class UnifiedGraphAgentRequest:
                 "action": "main_agent_decides",
                 "objects": [],
                 "constraints": [],
-                "expected_outputs": ["graph_worker_results_or_control_result"],
+                "expected_outputs": ["capability_contract_results_or_control_result"],
             },
             "task_plan": {
                 "tasks": [],
-                "planning_level": "worker_agent",
-                "tool_visibility": "none",
-                "legacy_entity_protocol": False,
+                "planning_level": "capability_contract",
+                "tool_visibility": "worker_progressive_private",
             },
             "supervisor_decision": {
                 "decision_source": "single_main_agent_graph_entry",
@@ -63,7 +64,8 @@ class UnifiedGraphAgentRequest:
                 "confidence": 1.0,
                 "reason": "all_requests_enter_existing_main_coordinator_with_graph_contracts",
                 "safety_flags": [
-                    "coordinator_tool_visibility_none",
+                    "main_agent_worker_progressive_visibility",
+                    "main_agent_tool_visibility_none",
                     "worker_private_tools",
                     "neo4j_entity_authority",
                     "legacy_public_entity_protocol_disabled",
@@ -154,9 +156,9 @@ def execute_unified_agent_request(
         "GRAPH_RUNTIME_INITIALIZATION_COMPLETED",
         {
             "graph_id": str(getattr(getattr(coordinator, "store", None), "graph_id", "")),
-            "worker_count": len(
-                getattr(getattr(coordinator, "directory", None), "safe_catalog", lambda: [])()
-            ),
+            "worker_count": len(getattr(getattr(coordinator, "directory", None), "list", lambda: [])()),
+            "worker_visibility": "all_public_descriptions_upfront",
+            "tool_visibility": "worker_private_tool_dag_planned_before_execution",
             "runtime_build": RUNTIME_BUILD,
             "access_model_version": ACCESS_MODEL_VERSION,
             "completion_contract_version": COMPLETION_CONTRACT_VERSION,
@@ -256,4 +258,4 @@ def clear_financial_graph_agent_session(
     output_dir: str | Path = "outputs",
     hard: bool = True,
 ) -> dict[str, int]:
-    return SessionMemoryStore(output_dir=output_dir).clear_session(session_id, hard=hard)
+    return SessionStateStore(output_dir=output_dir).clear_session(session_id, hard=hard)

@@ -39,14 +39,17 @@ from .contracts import (
     OP_READ,
     OP_WRITE,
     ToolDefinition,
+    ToolError,
     UnifiedToolResult,
 )
 from .registry import ToolRegistry
 from .validation import (
+    materialise_semantic_output_slots,
     normalise_raw_result,
     safe_argument_keys,
     validate_input,
     validate_output,
+    validate_semantic_output_contracts,
 )
 
 
@@ -62,8 +65,7 @@ class ToolExecutor:
         circuit_registry: CircuitBreakerRegistry | None = None,
     ) -> None:
         if registry is None:
-            # Import lazily so ``agent.tool_engine`` can remain the compatibility
-            # facade that owns the existing global business-tool catalogue.
+            # Import the canonical global business-tool catalogue lazily.
             from agent.tool_engine import get_tool_registry_v2
 
             registry = get_tool_registry_v2()
@@ -334,7 +336,11 @@ class ToolExecutor:
                 requested_name=requested_name,
                 canonical_name=canonical_name,
             )
-            output_errors = validate_output(definition, result)
+            semantic_slots = materialise_semantic_output_slots(definition, result)
+            output_errors = [
+                *validate_output(definition, result),
+                *validate_semantic_output_contracts(definition, result),
+            ]
             if output_errors:
                 result["success"] = False
                 result["errors"] = (
@@ -372,6 +378,8 @@ class ToolExecutor:
                 "argument_keys": argument_keys,
                 "failure_kind": str(result.get("failure_kind") or ""),
                 "retryable": bool(result.get("retryable", False)),
+                "tool_io_contract_version": "tool-io-contract.v1" if definition.output_contracts or definition.input_contracts else "legacy",
+                "semantic_output_slots": list(semantic_slots),
             }
             reported_success = bool(result.get("success"))
             reported_error_type = str(result.get("error_type") or "")
@@ -382,6 +390,13 @@ class ToolExecutor:
                 or (result.get("message") if not reported_success else "")
                 or ""
             )
+            structured_error = None
+            if not reported_success:
+                structured_error = ToolError.create(
+                    error_id=str(result.get("error_id") or ("output_validation" if output_errors else reported_error_type) or "tool_reported_failure"),
+                    operation=(definition.supported_actions[0] if definition.supported_actions else canonical_name or requested_name),
+                    reason=(";".join(output_errors) if output_errors else reported_error_message),
+                )
             unified = UnifiedToolResult(
                 success=reported_success,
                 tool_name=requested_name,
@@ -391,6 +406,7 @@ class ToolExecutor:
                 errors=list(result.get("errors") or []),
                 error_type="output_validation" if output_errors else reported_error_type,
                 error_message=";".join(output_errors) if output_errors else reported_error_message,
+                error=structured_error,
                 metadata=metadata,
                 artifact_id=artifact_id,
                 started_at=started_at,
@@ -448,10 +464,10 @@ class ToolExecutor:
                         "tool_name": requested_name,
                         "error_type": unified.error_type,
                     },
-                    error={
-                        "error_type": unified.error_type,
-                        "error_message": unified.error_message,
-                    },
+                    error=(unified.error.to_dict() if unified.error else {
+                        "error_code": unified.error_type,
+                        "reason": unified.error_message,
+                    }),
                     artifact_refs=refs,
                 )
             self._update_context_bundle(context_bundle, unified)
@@ -616,6 +632,10 @@ class ToolExecutor:
             },
             level="ERROR",
         )
+        retryable = error_type not in {
+            "unregistered_tool", "disabled_tool", "unauthorized_tool",
+            "unauthorized_operation_type", "approval_required", "input_validation",
+        }
         failure = UnifiedToolResult(
             success=False,
             tool_name=tool_name,
@@ -623,6 +643,11 @@ class ToolExecutor:
             errors=[error_type],
             error_type=error_type,
             error_message=message,
+            error=ToolError.create(
+                error_id=error_type,
+                operation=canonical_name or tool_name,
+                reason=message,
+            ),
             metadata={
                 "canonical_tool_name": canonical_name or tool_name,
                 "runtime_reliability": dict(runtime_metadata or {}),

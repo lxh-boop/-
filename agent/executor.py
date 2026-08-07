@@ -158,7 +158,6 @@ def _empty_failure(
     }
     graph_runtime = {
         "contract_version": "financial_graph_runtime.v1",
-        "legacy_public_protocol_enabled": False,
         "planner": planner_snapshot,
         "worker_dag": {
             "contract_version": "worker_dag_snapshot.v1",
@@ -183,8 +182,6 @@ def _empty_failure(
             "tasks": [],
             "user_goal": {"raw_message": query, "resolved_message": query},
             "diagnostics": {
-                "legacy_router_called": False,
-                "legacy_entity_protocol_enabled": False,
                 "single_llm_service": True,
                 "failure": failure,
             },
@@ -287,7 +284,6 @@ def run_agent_request(
             "public_contract": "GraphRef",
             "task_contract": "graph_agent_task.v1",
             "result_contract": "graph_worker_result.v1",
-            "legacy_public_protocol_enabled": False,
         },
         "llm_runtime_snapshot": {**active_llm.public_dict, "config_hash": active_llm.config_hash},
     })
@@ -439,14 +435,11 @@ def run_agent_request(
         "task_plan": {
             "tasks": agent_tasks,
             "planning_level": "worker_agent",
-            "tool_visibility": "none",
-            "legacy_entity_protocol": False,
+            "tool_visibility": "main_agent_none_worker_progressive_private",
         },
         "diagnostics": {
             "llm_used": True,
             "decision_source": "existing_main_coordinator",
-            "legacy_router_called": False,
-            "legacy_entity_protocol_enabled": False,
             "single_llm_service": True,
             "llm_profile_id": llm_service.profile_id,
             "llm_config_hash": llm_service.config_hash,

@@ -462,10 +462,10 @@ def failure_record(row: dict[str, Any]) -> dict[str, Any] | None:
         stage, code_path = "trace_incomplete", "benchmarks/agent_capability/scoring.py:assess_trace_validity"
         evidence.extend(str(reason) for reason in validity.get("failure_reasons") or [])
     elif not score.get("real_llm"):
-        stage, code_path = "latency_or_provider", "agent/intent_decomposition/layered_decomposer.py:decompose_intent"
+        stage, code_path = "latency_or_provider", "agent/collaboration/planner.py:CoordinatorPlanner.plan"
         evidence.append("The formal entry point did not record both real LLM planner and reviewer calls.")
     elif not (trace.get("stages") or {}).get("task_plan"):
-        stage, code_path = "task_planning", "agent/intent_decomposition/llm_decomposer.py:decompose_with_llm"
+        stage, code_path = "task_planning", "agent/collaboration/planner.py:CoordinatorPlanner.plan"
         evidence.append("Real LLM route was reached but no TaskPlan was returned.")
     elif bool(trace.get("state_changed")):
         stage, code_path = "write_gateway", "agent/write_gateway.py"
@@ -477,10 +477,10 @@ def failure_record(row: dict[str, Any]) -> dict[str, Any] | None:
         stage, code_path = "logic_integrity", "agent/logic_integrity.py:validate_agent_logic_integrity"
         evidence.append("The Agent ended in a deterministic safe failure; this identifies the stage, not a claimed root cause.")
     elif not score.get("intent_action_accuracy"):
-        stage, code_path = "intent_understanding", "agent/intent_decomposition/llm_decomposer.py:decompose_with_llm"
+        stage, code_path = "intent_understanding", "agent/collaboration/planner.py:CoordinatorPlanner.plan"
         evidence.append("Actual UserGoal action does not overlap the benchmark gold action.")
     elif (score.get("tool") or {}).get("selection", {}).get("f1", 0) < 1:
-        stage, code_path = "tool_selection", "agent/orchestration/multi_task_executor.py"
+        stage, code_path = "tool_selection", "agent/collaboration/specialist_runtime.py:SpecialistRuntime.run"
         evidence.append("Planned/executed capabilities do not cover the required read-only capability set.")
     elif not score.get("chain_complete"):
         stage, code_path = "completion_contract", "agent/executor.py:run_agent_request"

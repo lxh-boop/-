@@ -13,7 +13,7 @@ from agent.worker_tools import (
 )
 
 from ..models import GraphAgentTask, GraphWorkerResult, MemoryUpdate, MissingContextItem, ResultStatus
-from .common import safe_public_value
+from .common import contract_output_slots, safe_public_value
 
 
 def _tool_context(task: GraphAgentTask, output_dir: str | Path, db_path: str | Path | None) -> dict[str, Any]:
@@ -69,8 +69,9 @@ def run_graph_context(
     *,
     resolved_inputs: dict[str, Any] | None = None,
 ) -> GraphWorkerResult:
-    if task.task_type == "write_portfolio_graph_context":
-        portfolio_state = _payload_for_role(resolved_inputs, "portfolio_state")
+    output_slots = set(contract_output_slots(task))
+    if "portfolio_graph_context" in output_slots:
+        portfolio_state = _payload_for_role(resolved_inputs, "current_portfolio_state")
         if not portfolio_state:
             return _missing(
                 task,
@@ -110,7 +111,7 @@ def run_graph_context(
             raise ValueError("portfolio_ref_missing_after_database_write")
         portfolio_ref = GraphRef.from_dict(portfolio_ref_raw)
         holding_refs = refs_from(raw.get("holding_refs") or [])
-        source_task_ids = task.input_task_ids("portfolio_state")
+        source_task_ids = task.input_task_ids("current_portfolio_state")
         payload = {
             "portfolio_ref": portfolio_ref.to_dict(),
             "holding_refs": [ref.to_dict() for ref in holding_refs],
@@ -146,8 +147,8 @@ def run_graph_context(
             metadata={"produced_refs": [ref.to_dict() for ref in produced_refs], "database_write": True},
         )
 
-    if task.task_type == "write_evidence_graph_context":
-        collection = _payload_for_role(resolved_inputs, "evidence_collection")
+    if "evidence_graph_context" in output_slots:
+        collection = _payload_for_role(resolved_inputs, "entity_external_evidence")
         if not collection:
             return _missing(
                 task,
@@ -169,7 +170,7 @@ def run_graph_context(
             "written_record_count": int(raw.get("written_record_count") or 0),
             "failed_record_count": int(raw.get("failed_record_count") or 0),
             "write_results": safe_public_value(raw.get("ingestion_results") or []),
-            "source_task_ids": task.input_task_ids("evidence_collection"),
+            "source_task_ids": task.input_task_ids("entity_external_evidence"),
         }
         return GraphWorkerResult(
             task_id=task.task_id,
@@ -203,7 +204,7 @@ def run_graph_context(
             metadata={"produced_refs": [ref.to_dict() for ref in evidence_refs], "database_write": True},
         )
 
-    raise ValueError(f"unsupported_database_write_task:{task.task_type}")
+    raise ValueError(f"unsupported_database_write_contract:{sorted(output_slots)}")
 
 
 __all__ = ["run_graph_context"]

@@ -101,7 +101,7 @@ def completion_report_schema() -> dict[str, Any]:
     )
     return object_schema(
         {
-            "schema_version": {"type": "string", "enum": ["worker-completion-report.v1"]},
+            "schema_version": {"type": "string", "enum": ["capability-contract-report.v1"]},
             "report_source": {"type": "string", "enum": ["llm", "runtime", "system"]},
             "execution_status": {
                 "type": "string",

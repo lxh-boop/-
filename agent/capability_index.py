@@ -371,7 +371,7 @@ def _allowed_agents_for_unified_tool(definition: ToolDefinition) -> list[str]:
 
 def _record_from_unified_tool(definition: ToolDefinition) -> CapabilityRecord:
     public_view = definition.public_view()
-    primary_name = str((definition.legacy_names or [definition.name])[0])
+    primary_name = str((definition.aliases or [definition.name])[0])
     required_inputs = _input_names(definition.input_schema, required=True)
     optional_inputs = _input_names(definition.input_schema, required=False)
     operation_type = str(definition.operation_type or OP_READ)
@@ -384,7 +384,7 @@ def _record_from_unified_tool(definition: ToolDefinition) -> CapabilityRecord:
     read_or_write = "read" if permission_scope == "read" else "write"
     content = {
         "name": definition.name,
-        "legacy_names": definition.legacy_names,
+        "aliases": definition.aliases,
         "description": definition.description,
         "schema": definition.input_schema,
         "operation_type": operation_type,
@@ -401,7 +401,7 @@ def _record_from_unified_tool(definition: ToolDefinition) -> CapabilityRecord:
         produced_outputs=sorted(set(definition.produced_outputs or OUTPUTS_BY_TOOL.get(primary_name) or {"tool_result"})),
         read_or_write=read_or_write,
         tool_or_workflow="tool",
-        registered_tool_names=list(dict.fromkeys([primary_name, definition.name, *definition.legacy_names])),
+        registered_tool_names=list(dict.fromkeys([primary_name, definition.name, *definition.aliases])),
         allowed_agent_types=_allowed_agents_for_unified_tool(definition),
         permission_scope=permission_scope,
         requires_approval=bool(definition.requires_approval),

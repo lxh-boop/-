@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from agent.console_trace import flow_event
-from agent.tool_runtime import ToolExecutor, UnifiedToolResult
+from agent.tool_runtime import ToolError, ToolExecutor, UnifiedToolResult
 
 from .contracts import (
     ToolDagExecutionResult,
@@ -40,11 +40,16 @@ class ToolDagExecutor:
             return context[str(spec.get("from_context") or "")]
         if "from_tool_task_id" in spec:
             result = results[str(spec.get("from_tool_task_id") or "")]
+            output_slot = str(spec.get("output_slot") or "").strip()
+            if output_slot:
+                slots = (result.data or {}).get("slots")
+                if not isinstance(slots, dict) or output_slot not in slots:
+                    raise KeyError(f"tool_output_slot_missing:{output_slot}")
+                return slots[output_slot]
             key = str(spec.get("data_key") or "").strip()
             if key:
                 return (result.data or {}).get(key)
-            # The default Tool-to-Tool handoff is the complete normalized result.
-            # This preserves success/error/business-empty metadata for finalizers.
+            # Legacy Tool handoff may still consume the complete normalized result.
             return result.to_dict()
         return {
             key: ToolDagExecutor._resolve_ref(value, context=context, results=results)
@@ -99,14 +104,28 @@ class ToolDagExecutor:
             "error_count": len(result.errors or []),
         }
 
+    @staticmethod
+    def _published_output_keys(result: UnifiedToolResult) -> set[str]:
+        data = dict(result.data or {})
+        keys = {str(key) for key in data}
+        keys.update(
+            str(item)
+            for item in data.get("produced_information_slots") or []
+            if str(item)
+        )
+        if isinstance(data.get("slots"), dict):
+            keys.update(str(key) for key in data["slots"] if str(key))
+        return keys
+
     @classmethod
     def _record_from_result(
         cls,
         task: ToolDagTask,
         result: UnifiedToolResult,
     ) -> ToolNodeExecutionRecord:
-        produced = sorted((result.data or {}).keys())
-        missing = sorted(set(task.expected_output_keys) - set(produced))
+        published = cls._published_output_keys(result)
+        produced = sorted(published)
+        missing = sorted(set(task.expected_output_keys) - published)
         execution_success = bool(result.success)
         contract_valid = not missing
         summary = cls._result_summary(result)
@@ -140,10 +159,13 @@ class ToolDagExecutor:
             freeze_reason = "node_requires_retry_or_replacement"
         failure = {}
         if status != "succeeded":
+            structured = result.error.to_dict() if getattr(result, "error", None) else {}
             failure = {
                 "failure_kind": str((result.metadata or {}).get("failure_kind") or "tool_failure"),
-                "error_type": str(result.error_type or "tool_reported_failure"),
-                "error_message": str(result.error_message or ";".join(result.errors or []))[:2000],
+                "error_id": str(structured.get("error_id") or ""),
+                "error_id": str(structured.get("error_id") or result.error_type or "tool_reported_failure"),
+                "operation": str(structured.get("operation") or task.objective),
+                "reason": str(structured.get("reason") or result.error_message or ";".join(result.errors or []))[:2000],
                 "retryable": retryable,
             }
         return ToolNodeExecutionRecord(
@@ -208,6 +230,7 @@ class ToolDagExecutor:
         only_task_ids: set[str] | None = None,
     ) -> ToolDagExecutionResult:
         by_id = {task.tool_task_id: task for task in plan.tasks}
+        preexisting_ids = set(existing_results or {})
         results: dict[str, UnifiedToolResult] = dict(existing_results or {})
         node_records: list[ToolNodeExecutionRecord] = []
         execution_batches: list[list[str]] = []
@@ -293,6 +316,11 @@ class ToolDagExecutor:
                             errors=[f"{type(exc).__name__}:{exc}"],
                             error_type=type(exc).__name__,
                             error_message=str(exc),
+                            error=ToolError.create(
+                                error_id=type(exc).__name__,
+                                operation=task.objective,
+                                reason=str(exc),
+                            ),
                             metadata={"failure_kind": "tool_failure", "retryable": True},
                         )
                     results[task_id] = result
@@ -323,13 +351,20 @@ class ToolDagExecutor:
         required = set(plan.goal_contract.get("required_output_keys") or [])
         produced: set[str] = set()
         for result in final_results:
-            produced.update((result.data or {}).keys())
+            produced.update(self._published_output_keys(result))
         success = (
             bool(final_results)
             and all(
-                records_by_id.get(task_id) is not None
-                and records_by_id[task_id].status == "succeeded"
-                and records_by_id[task_id].completion_status == "completed"
+                (
+                    task_id in preexisting_ids
+                    and task_id in results
+                    and bool(results[task_id].success)
+                )
+                or (
+                    records_by_id.get(task_id) is not None
+                    and records_by_id[task_id].status == "succeeded"
+                    and records_by_id[task_id].completion_status == "completed"
+                )
                 for task_id in plan.final_output_task_ids
             )
             and required.issubset(produced)

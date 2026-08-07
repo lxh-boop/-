@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent.collaboration.agent_directory import RISK_ANALYST
+from agent.collaboration.worker_directory import RISK_ANALYST
 from agent.tool_runtime import (
     OP_READ,
     TOOL_VISIBILITY_WORKER_PRIVATE,

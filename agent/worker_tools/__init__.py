@@ -9,6 +9,11 @@ from .evidence import (
     EVIDENCE_SEARCH_RAG_TOOL,
     build_evidence_tool_definitions,
 )
+from .graph_relation import (
+    GRAPH_RELATION_FIND_PATHS,
+    GRAPH_RELATION_READ_NEIGHBORHOOD,
+    build_graph_relation_tool_definitions,
+)
 from .graph_context import (
     DATABASE_WRITE_EVIDENCE_GRAPH_CONTEXT,
     GRAPH_PORTFOLIO_MATERIALIZE_SNAPSHOT,
@@ -35,6 +40,9 @@ __all__ = [
     "EVIDENCE_RETRIEVE_TOOL",
     "EVIDENCE_SEARCH_NEWS_TOOL",
     "EVIDENCE_SEARCH_RAG_TOOL",
+    "GRAPH_RELATION_FIND_PATHS",
+    "GRAPH_RELATION_READ_NEIGHBORHOOD",
+    "build_graph_relation_tool_definitions",
     "DATABASE_WRITE_EVIDENCE_GRAPH_CONTEXT",
     "GRAPH_PORTFOLIO_MATERIALIZE_SNAPSHOT",
     "DATABASE_WRITE_PORTFOLIO_GRAPH_CONTEXT",

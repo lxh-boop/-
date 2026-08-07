@@ -1,4 +1,4 @@
-"""In-memory registry for canonical tool definitions and legacy aliases."""
+"""In-memory registry for canonical tool definitions and aliases."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ class ToolRegistry:
         if definition.name in self._definitions or definition.name in self._aliases:
             raise ValueError(f"duplicate_tool_name:{definition.name}")
         self._definitions[definition.name] = definition
-        for alias in definition.legacy_names:
+        for alias in definition.aliases:
             if alias in self._definitions or alias in self._aliases:
                 raise ValueError(f"duplicate_tool_name:{alias}")
             self._aliases[alias] = definition.name
@@ -68,6 +68,30 @@ class ToolRegistry:
         if definition.mutates_business_state and not definition.requires_approval:
             raise ValueError(
                 f"business_state_mutation_requires_approval:{definition.name}"
+            )
+        input_slots = [str(item.slot_id or "").strip() for item in definition.input_contracts]
+        output_slots = [str(item.slot_id or "").strip() for item in definition.output_contracts]
+        if any(not slot for slot in input_slots):
+            raise ValueError(f"tool_input_contract_slot_required:{definition.name}")
+        if any(not slot for slot in output_slots):
+            raise ValueError(f"tool_output_contract_slot_required:{definition.name}")
+        if len(input_slots) != len(set(input_slots)):
+            raise ValueError(f"duplicate_tool_input_contract_slot:{definition.name}")
+        if len(output_slots) != len(set(output_slots)):
+            raise ValueError(f"duplicate_tool_output_contract_slot:{definition.name}")
+        input_properties = definition.input_schema.get("properties") or {}
+        undeclared_inputs = sorted(set(input_slots) - set(input_properties))
+        if undeclared_inputs:
+            raise ValueError(
+                f"tool_input_contract_not_in_input_schema:{definition.name}:{','.join(undeclared_inputs)}"
+            )
+        missing_paths = [
+            item.slot_id for item in definition.output_contracts
+            if not str(item.source_path or "").strip()
+        ]
+        if missing_paths:
+            raise ValueError(
+                f"tool_output_contract_source_path_required:{definition.name}:{','.join(missing_paths)}"
             )
 
     def get(self, name: str) -> ToolDefinition | None:
@@ -118,7 +142,7 @@ class ToolRegistry:
                 "version": definition.version,
                 "test_status": "passed",
                 "enabled": bool(definition.enabled),
-                "legacy_names": list(definition.legacy_names),
+                "aliases": list(definition.aliases),
                 "visibility": definition.visibility,
                 "side_effects": list(definition.side_effects),
                 "mutates_business_state": bool(

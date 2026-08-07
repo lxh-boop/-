@@ -2,9 +2,104 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
-from .contracts import ToolDefinition
+from .contracts import ToolDefinition, ToolInputContract, ToolOutputContract
+
+
+
+
+def input_contracts_for(definition: ToolDefinition) -> list[ToolInputContract]:
+    """Return explicit semantic input contracts, or infer a legacy view."""
+
+    if definition.input_contracts:
+        return list(definition.input_contracts)
+    required = {str(item) for item in (definition.required_input_slots or definition.input_schema.get("required") or []) if str(item)}
+    properties = definition.input_schema.get("properties") if isinstance(definition.input_schema.get("properties"), dict) else {}
+    slots: list[ToolInputContract] = []
+    names = list(dict.fromkeys([
+        *[str(item) for item in definition.required_input_slots or [] if str(item)],
+        *[str(item) for item in definition.optional_input_slots or [] if str(item)],
+        *[str(item) for item in properties if str(item)],
+    ]))
+    for name in names:
+        slots.append(ToolInputContract(slot_id=name, required=name in required))
+    return slots
+
+
+def output_contracts_for(definition: ToolDefinition) -> list[ToolOutputContract]:
+    """Return explicit semantic outputs, or infer legacy semantic slots."""
+
+    if definition.output_contracts:
+        return list(definition.output_contracts)
+    return [
+        ToolOutputContract(slot_id=str(slot), source_path="")
+        for slot in definition.produced_outputs or []
+        if str(slot)
+    ]
+
+
+def _extract_path(payload: dict[str, Any], path: str) -> tuple[bool, Any]:
+    text = str(path or "").strip()
+    if not text:
+        return False, None
+    current: Any = payload
+    if text == "$":
+        return True, payload
+    if text.startswith("$."):
+        text = text[2:]
+    for part in [item for item in text.split(".") if item]:
+        if not isinstance(current, dict) or part not in current:
+            return False, None
+        current = current[part]
+    return True, current
+
+
+def materialise_semantic_output_slots(
+    definition: ToolDefinition,
+    result: dict[str, Any],
+) -> list[str]:
+    """Map concrete Tool return paths to stable semantic output slots.
+
+    The mapping is Runtime-only. Worker planners never see ``source_path`` and
+    therefore do not depend on Python return-field names such as ``records``.
+    """
+
+    contracts = output_contracts_for(definition)
+    if not contracts or not definition.output_contracts:
+        return []
+    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    slots = dict(data.get("slots") or {}) if isinstance(data.get("slots"), dict) else {}
+    published: list[str] = []
+    envelope = {**dict(result), "data": data}
+    for contract in contracts:
+        found, value = _extract_path(envelope, contract.source_path)
+        if not found:
+            continue
+        slots[str(contract.slot_id)] = deepcopy(value)
+        published.append(str(contract.slot_id))
+    if slots:
+        data["slots"] = slots
+        existing = [str(item) for item in data.get("produced_information_slots") or [] if str(item)]
+        data["produced_information_slots"] = list(dict.fromkeys([*existing, *published]))
+        result["data"] = data
+    return published
+
+
+def validate_semantic_output_contracts(
+    definition: ToolDefinition,
+    result: dict[str, Any],
+) -> list[str]:
+    if not definition.output_contracts or not bool(result.get("success")):
+        return []
+    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    slots = data.get("slots") if isinstance(data.get("slots"), dict) else {}
+    return [
+        f"missing_output_slot:{contract.slot_id}"
+        for contract in definition.output_contracts
+        if str(contract.slot_id) not in slots
+    ]
 
 
 def schema(

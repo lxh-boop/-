@@ -108,7 +108,7 @@ class ToolNodeExecutionRecord:
 
     @property
     def success(self) -> bool:
-        """Compatibility view used by older Worker code."""
+        """Return whether this node completed and validated successfully."""
 
         return bool(
             self.status == "succeeded"
@@ -123,18 +123,15 @@ class ToolNodeExecutionRecord:
 
     @property
     def error_type(self) -> str:
-        return str((self.failure or {}).get("error_type") or "")
+        return str((self.failure or {}).get("error_id") or (self.failure or {}).get("error_type") or "")
 
     @property
     def error_message(self) -> str:
-        return str((self.failure or {}).get("error_message") or "")
+        return str((self.failure or {}).get("reason") or (self.failure or {}).get("error_message") or "")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-
-# Backward-compatible import name. The payload is now the unified record above.
-ToolDagObservation = ToolNodeExecutionRecord
 
 
 @dataclass(frozen=True)
@@ -149,11 +146,6 @@ class ToolDagExecutionResult:
     replan_count: int = 0
     replan_audit: list[dict[str, Any]] = field(default_factory=list)
 
-    @property
-    def observations(self) -> list[ToolNodeExecutionRecord]:
-        """Compatibility alias for V15 callers."""
-
-        return self.node_records
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -178,6 +170,7 @@ _TOOL_RESULT_REF_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "from_tool_task_id": {"type": "string"},
+        "output_slot": {"type": "string"},
         "data_key": {"type": "string"},
     },
     "required": ["from_tool_task_id"],
@@ -247,7 +240,6 @@ __all__ = [
     "TOOL_NODE_RECORD_SCHEMA_VERSION",
     "ToolDagContractViolation",
     "ToolDagExecutionResult",
-    "ToolDagObservation",
     "ToolDagPlan",
     "ToolDagTask",
     "ToolNodeExecutionRecord",

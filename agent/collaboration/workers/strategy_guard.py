@@ -24,8 +24,8 @@ from ..worker_contracts import (
     string_schema,
     validate_schema,
 )
-from .common import dependency_results as dependency_result_items
-from .common import safe_public_value
+from .common import execution_safe_value, safe_public_value
+from .slot_inputs import slot_envelopes
 
 
 def _proposal_output_schema() -> dict[str, Any]:
@@ -71,7 +71,7 @@ def run_strategy_guard(
     task: GraphAgentTask,
     *,
     current_user_request: str,
-    dependency_results: dict[str, dict[str, Any]],
+    resolved_inputs: dict[str, Any] | None,
     output_dir: str | Path,
     db_path: str | Path | None,
     default_top_k: int,
@@ -82,14 +82,17 @@ def run_strategy_guard(
     # unused: a READ proposal must not invoke the legacy persistent proposal tool.
     del output_dir, db_path, default_top_k, execution_context
 
-    selected_ids = list(dict.fromkeys(task.dependency_task_ids or dependency_results.keys()))
-    selected = {
-        task_id: payload
-        for task_id, payload in dependency_results.items()
-        if not selected_ids or task_id in set(selected_ids)
+    input_envelopes = [
+        row for row in slot_envelopes(task, resolved_inputs, projection="execution")
+        if row.get("source_task_ids")
+    ]
+    safe_dependencies = execution_safe_value(input_envelopes)
+    allowed_source_ids = {
+        str(source_id)
+        for row in input_envelopes
+        for source_id in row.get("source_task_ids") or []
+        if str(source_id)
     }
-    safe_dependencies = safe_public_value(dependency_result_items(selected))
-    allowed_source_ids = set(selected)
 
     def validate(payload: dict[str, Any]) -> None:
         validate_schema(payload, _proposal_output_schema())
@@ -118,7 +121,7 @@ def run_strategy_guard(
                 "role": "system",
                 "content": (
                     "你是 W05 Strategy Guard，是只读的 LLM Worker。你的任务是把用户明确的变更目标和"
-                    "上游权威 WorkerResult 转换为当前 Run 内的 ReviewedProposal，或明确返回 need_context/blocked。"
+                    "上游合同绑定的结构化信息Slot转换为当前 Run 内的 ReviewedProposal，或明确返回 need_context/blocked。"
                     "分析、建议和待审批 Proposal 都属于 READ；不得调用写工具，不得保存 Proposal，不得修改账户、"
                     "持仓、策略、画像或配置，不得声称已经执行。只使用 structured_upstream_results 中的事实，"
                     "不得补造证券、持仓、风险、模型信号或约束。proposal_ready 时 requires_approval 必须为 true，"
@@ -134,7 +137,7 @@ def run_strategy_guard(
                         "user_request": str(current_user_request or ""),
                         "task": task.safe_for_coordinator(),
                         "worker_args": safe_public_value(task.args),
-                        "structured_upstream_results": safe_dependencies,
+                        "structured_input_slots": safe_dependencies,
                         "allowed_source_task_ids": sorted(allowed_source_ids),
                         "completion_contract": dict(task.completion_contract or {}),
                         "proposal_persistence_policy": {
@@ -153,7 +156,7 @@ def run_strategy_guard(
         ],
         max_output_tokens=3200,
         validator=validate,
-        operation=task.task_type,
+        operation=task.boundary_id,
         repair_mode="targeted",
         disable_thinking=False,
         repair_guidance=(
@@ -171,7 +174,7 @@ def run_strategy_guard(
                 description=str(item.get("description") or "生成方案所需上下文"),
                 expected_format=str(item.get("expected_format") or "结构化业务参数"),
                 reason=str(payload.get("reason") or "当前上游信息不足。"),
-                searched_sources=["task", "structured_upstream_results", "session_context"],
+                searched_sources=["task", "RunSlotStore", "resolved_input_bindings"],
             )
             for item in payload.get("missing_items") or []
             if isinstance(item, dict)

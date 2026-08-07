@@ -156,6 +156,114 @@ class GraphImpactService:
         return paths
 
 
+    def find_neighborhood_paths(
+        self,
+        *,
+        entity_refs: list[GraphRef],
+        as_of_time: str = "",
+    ) -> list[GraphPathRef]:
+        """Return auditable relations around all supplied authoritative refs.
+
+        This operation is selected because the ``authoritative_entity_refs``
+        input slot is available. It does not branch on entity count: one or
+        many refs are processed by the same slot-compatible graph query.
+        """
+
+        object_ids = [ref.node_id for ref in entity_refs if ref.node_kind == GraphNodeKind.OBJECT]
+        evidence_ids = [ref.node_id for ref in entity_refs if ref.node_kind == GraphNodeKind.EVIDENCE]
+        assertion_ids_input = [ref.node_id for ref in entity_refs if ref.node_kind == GraphNodeKind.ASSERTION]
+        if not (object_ids or evidence_ids or assertion_ids_input):
+            return []
+        max_depth = max(1, min(self.policy.maximum_object_hops * 2, 8))
+        rows = self.store.execute_read(
+            f"""
+            MATCH (focus)
+            WHERE (focus:GraphObject AND focus.object_id IN $object_ids)
+               OR (focus:GraphEvidence AND focus.evidence_id IN $evidence_ids)
+               OR (focus:GraphAssertion AND focus.assertion_id IN $assertion_ids)
+            MATCH path = (focus)-[:SUBJECT|OBJECT|SUPPORTED_BY|CONTRADICTED_BY*1..{max_depth}]-(neighbor)
+            WHERE focus <> neighbor
+            WITH focus, neighbor, path,
+                 [n IN nodes(path) WHERE n:GraphAssertion | n.assertion_id] AS path_assertion_ids,
+                 [n IN nodes(path) WHERE n:GraphObject | n.object_id] AS path_object_ids,
+                 [n IN nodes(path) WHERE n:GraphEvidence | n.evidence_id] AS path_evidence_ids,
+                 [n IN nodes(path) WHERE n:GraphAssertion | coalesce(n.confidence, 0.5)] AS confidences
+            RETURN CASE WHEN focus:GraphEvidence THEN focus.evidence_id
+                        WHEN focus:GraphAssertion THEN focus.assertion_id
+                        ELSE focus.object_id END AS source_id,
+                   CASE WHEN focus:GraphEvidence THEN 'evidence'
+                        WHEN focus:GraphAssertion THEN 'assertion'
+                        ELSE 'object' END AS source_kind,
+                   CASE WHEN neighbor:GraphEvidence THEN neighbor.evidence_id
+                        WHEN neighbor:GraphAssertion THEN neighbor.assertion_id
+                        ELSE neighbor.object_id END AS target_id,
+                   CASE WHEN neighbor:GraphEvidence THEN 'evidence'
+                        WHEN neighbor:GraphAssertion THEN 'assertion'
+                        ELSE 'object' END AS target_kind,
+                   path_assertion_ids, path_object_ids, path_evidence_ids, confidences, length(path) AS relationship_length
+            ORDER BY relationship_length ASC
+            LIMIT 200
+            """,
+            {
+                "object_ids": object_ids,
+                "evidence_ids": evidence_ids,
+                "assertion_ids": assertion_ids_input,
+                "as_of": str(as_of_time or ""),
+            },
+        )
+        paths: list[GraphPathRef] = []
+        seen: set[tuple[str, str, tuple[str, ...]]] = set()
+        for row in rows:
+            confidences = [float(item or 0.0) for item in row.get("confidences") or []]
+            base = min(confidences) if confidences else 0.4
+            distance = max(1.0, float(row.get("relationship_length") or 1))
+            confidence = max(0.0, min(1.0, base / distance))
+            source_id = str(row.get("source_id") or "")
+            target_id = str(row.get("target_id") or "")
+            assertion_ids = tuple(str(item) for item in row.get("path_assertion_ids") or [] if item)
+            signature = (source_id, target_id, assertion_ids)
+            if not source_id or not target_id or signature in seen:
+                continue
+            seen.add(signature)
+            start_ref = GraphRef(
+                graph_id=self.store.graph_id,
+                node_id=source_id,
+                node_kind=str(row.get("source_kind") or "object"),
+                role="relation_source",
+                as_of_time=as_of_time,
+                source="neo4j_neighborhood_path",
+                confidence=confidence,
+                locked=True,
+            )
+            end_ref = GraphRef(
+                graph_id=self.store.graph_id,
+                node_id=target_id,
+                node_kind=str(row.get("target_kind") or "object"),
+                role="relation_neighbor",
+                as_of_time=as_of_time,
+                source="neo4j_neighborhood_path",
+                confidence=confidence,
+                locked=True,
+            )
+            paths.append(
+                GraphPathRef(
+                    path_id=new_graph_id("neighborhood_path"),
+                    start_ref=start_ref,
+                    end_ref=end_ref,
+                    assertion_ids=list(assertion_ids),
+                    object_ids=[str(item) for item in row.get("path_object_ids") or [] if item],
+                    evidence_ids=[str(item) for item in row.get("path_evidence_ids") or [] if item],
+                    path_type="financial_entity_neighborhood",
+                    confidence=confidence,
+                    explanation=(
+                        f"{start_ref.node_id} is connected to {end_ref.node_id} "
+                        "through an auditable financial-graph path."
+                    ),
+                )
+            )
+        return paths
+
+
     def find_relation_paths(
         self,
         *,

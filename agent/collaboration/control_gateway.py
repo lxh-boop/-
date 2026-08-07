@@ -50,9 +50,7 @@ def _extract_identity(query: str, context: dict[str, Any] | None) -> tuple[str, 
     return plan_id, token
 
 
-def _legacy_dict(value: Any) -> dict[str, Any]:
-    if hasattr(value, "to_legacy_dict"):
-        return dict(value.to_legacy_dict())
+def _result_dict(value: Any) -> dict[str, Any]:
     if hasattr(value, "to_dict"):
         return dict(value.to_dict())
     return dict(value or {}) if isinstance(value, dict) else {"success": False, "message": str(value)}
@@ -210,7 +208,7 @@ class ControlGateway:
         try:
             from agent.write_gateway import execute_confirmed_plan_v2
 
-            result = _legacy_dict(
+            result = _result_dict(
                 execute_confirmed_plan_v2(
                     plan_id,
                     token,

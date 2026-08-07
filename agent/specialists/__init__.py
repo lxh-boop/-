@@ -1,11 +1,3 @@
-from agent.specialists.market_intelligence import MarketIntelligenceAgent
-from agent.specialists.portfolio_analysis import PortfolioAnalysisAgent
-from agent.specialists.reporting import ReportingAgent
-from agent.specialists.risk_operation import RiskOperationAgent
+"""Specialist support modules. V21 Workers are registered through collaboration.worker_directory."""
 
-__all__ = [
-    "MarketIntelligenceAgent",
-    "PortfolioAnalysisAgent",
-    "ReportingAgent",
-    "RiskOperationAgent",
-]
+__all__: list[str] = []

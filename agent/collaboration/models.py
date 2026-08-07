@@ -271,218 +271,6 @@ class ResultStatus(str, Enum):
         return cls.FAILED
 
 
-@dataclass(frozen=True)
-class WorkerTaskContract:
-    """Task-specific public and private contract owned by one Worker.
-
-    A Worker may expose several business task types while retaining one stable
-    Worker identity.  MainAgent sees only the public schema; private tool IDs
-    remain inside the assigned Worker runtime.
-    """
-
-    task_type: str
-    description: str
-    input_schema: dict[str, Any] = field(default_factory=dict)
-    default_args: dict[str, Any] = field(default_factory=dict)
-    output_schema: dict[str, Any] = field(default_factory=dict)
-    output_type: str = ""
-    upstream_input_bindings: dict[str, dict[str, Any]] = field(default_factory=dict)
-    authoritative_arg_bindings: dict[str, str] = field(default_factory=dict, repr=False)
-    selection_requirements: list[str] = field(default_factory=list)
-    user_goal_examples: list[str] = field(default_factory=list)
-    negative_goal_examples: list[str] = field(default_factory=list)
-    completion_criteria: list[str] = field(default_factory=list)
-    completion_report_required: bool = True
-    completion_report_source: str = "runtime"
-    access_mode: AccessMode | str = AccessMode.READ
-    planning_notes: list[str] = field(default_factory=list)
-    # Forward-planning semantics exposed to MainAgent.  These fields describe
-    # what information a task can consume and produce independently of Worker
-    # names, so planning can expand from the currently available state without
-    # hard-coded business chains.
-    consumes_information_slots: list[str] = field(default_factory=list)
-    produces_information_slots: list[str] = field(default_factory=list)
-    required_context_slots: list[str] = field(default_factory=list)
-    coverage_semantics: dict[str, Any] = field(default_factory=dict)
-    freshness_semantics: dict[str, Any] = field(default_factory=dict)
-    authority_level: str = ""
-    allowed_request_modes: list[str] = field(default_factory=list)
-    side_effect_policy: dict[str, Any] = field(default_factory=dict)
-    required_upstream_output_groups: list[list[str]] = field(default_factory=list)
-    private_tool_ids: list[str] = field(default_factory=list, repr=False)
-
-    @property
-    def args_schema(self) -> dict[str, Any]:
-        """Canonical direct-argument schema; ``input_schema`` is legacy internal naming."""
-
-        return self.input_schema
-
-    @property
-    def semantic_inputs_schema(self) -> dict[str, Any]:
-        return _semantic_inputs_schema(self.upstream_input_bindings)
-
-    def safe_for_coordinator(self) -> dict[str, Any]:
-        public_args_schema = _plain(self.args_schema)
-        runtime_bound = set(self.authoritative_arg_bindings)
-        if isinstance(public_args_schema, dict):
-            required = public_args_schema.get("required")
-            if isinstance(required, list):
-                public_args_schema["required"] = [
-                    str(item) for item in required if str(item) not in runtime_bound
-                ]
-            public_args_schema["x-runtime-bound-args"] = sorted(runtime_bound)
-        return {
-            "task_type": self.task_type,
-            "description": self.description,
-            "args_schema": public_args_schema,
-            "semantic_inputs_schema": _plain(self.semantic_inputs_schema),
-            "default_args": _plain(self.default_args),
-            "output_schema": _plain(self.output_schema),
-            "output_type": self.output_type,
-            "upstream_input_bindings": _plain(self.upstream_input_bindings),
-            "runtime_bound_args": sorted(runtime_bound),
-            "selection_requirements": list(self.selection_requirements),
-            "user_goal_examples": list(self.user_goal_examples),
-            "negative_goal_examples": list(self.negative_goal_examples),
-            "completion_criteria": list(self.completion_criteria),
-            "completion_report_source": str(self.completion_report_source or "runtime"),
-            "access_mode": AccessMode.from_value(self.access_mode).value,
-            "planning_notes": list(self.planning_notes),
-            "consumes_information_slots": list(self.consumes_information_slots),
-            "produces_information_slots": list(self.produces_information_slots),
-            "required_context_slots": list(self.required_context_slots),
-            "coverage_semantics": _plain(self.coverage_semantics),
-            "freshness_semantics": _plain(self.freshness_semantics),
-            "authority_level": str(self.authority_level or ""),
-            "allowed_request_modes": list(self.allowed_request_modes),
-            "required_upstream_output_groups": _plain(
-                self.required_upstream_output_groups
-            ),
-        }
-
-
-@dataclass(frozen=True)
-class AgentCapabilityCard:
-    """Structured public contract for one MainAgent-selectable Worker.
-
-    ``worker_id`` is the stable short identifier written into the Worker DAG.
-    ``agent_id`` remains the existing runtime dispatch identifier so current
-    Worker implementations and persisted traces stay compatible.
-    """
-
-    worker_id: str
-    agent_id: str
-    role: str
-    description: str
-    responsibility: str
-    accepted_task_types: list[str] = field(default_factory=list)
-    task_contracts: list[WorkerTaskContract] = field(default_factory=list)
-    input_schema: dict[str, Any] = field(default_factory=dict)
-    output_schema: dict[str, Any] = field(default_factory=dict)
-    output_types: list[str] = field(default_factory=list)
-    required_upstream_output_groups: list[list[str]] = field(default_factory=list)
-    upstream_input_bindings: dict[str, dict[str, Any]] = field(default_factory=dict)
-    authoritative_arg_bindings: dict[str, str] = field(default_factory=dict, repr=False)
-    selection_requirements: list[str] = field(default_factory=list)
-    dependency_arg_fields: dict[str, list[str]] = field(default_factory=dict, repr=False)
-    non_responsibilities: list[str] = field(default_factory=list)
-    side_effects: list[str] = field(default_factory=list)
-    missing_context_policy: str = "return_to_main_agent"
-    supports_parallel: bool = True
-    can_generate_proposal: bool = False
-    access_mode: AccessMode | str = AccessMode.READ
-    private_tool_ids: list[str] = field(default_factory=list, repr=False)
-    private_worker_prompt: str = field(default="", repr=False)
-
-    def task_contract(self, task_type: str) -> WorkerTaskContract:
-        wanted = str(task_type or "").strip()
-        for contract in self.task_contracts:
-            if contract.task_type == wanted:
-                return contract
-        if wanted not in self.accepted_task_types:
-            raise KeyError(f"unknown_worker_task_contract:{self.worker_id}:{wanted}")
-        return WorkerTaskContract(
-            task_type=wanted,
-            description=self.description,
-            input_schema=self.input_schema,
-            default_args={},
-            output_schema=self.output_schema,
-            output_type=(self.output_types[0] if len(self.output_types) == 1 else ""),
-            upstream_input_bindings=self.upstream_input_bindings,
-            authoritative_arg_bindings=self.authoritative_arg_bindings,
-            selection_requirements=self.selection_requirements,
-            required_upstream_output_groups=self.required_upstream_output_groups,
-            access_mode=self.access_mode,
-            private_tool_ids=self.private_tool_ids,
-        )
-
-    def authoritative_bindings_for(self, task_type: str) -> dict[str, str]:
-        try:
-            return dict(self.task_contract(task_type).authoritative_arg_bindings)
-        except KeyError:
-            return dict(self.authoritative_arg_bindings)
-
-    def default_args_for(self, task_type: str) -> dict[str, Any]:
-        try:
-            return dict(self.task_contract(task_type).default_args)
-        except KeyError:
-            return {}
-
-    def private_tools_for(self, task_type: str) -> list[str]:
-        try:
-            values = self.task_contract(task_type).private_tool_ids
-        except KeyError:
-            values = self.private_tool_ids
-        return list(values or self.private_tool_ids)
-
-    @property
-    def input_description(self) -> str:
-        """Compatibility summary retained for older callers and UI views."""
-
-        required = list(self.input_schema.get("required") or [])
-        return "required args: " + ", ".join(required) if required else "structured args object"
-
-    def to_dict(self) -> dict[str, Any]:
-        return _plain(self)
-
-    def safe_for_coordinator(self) -> dict[str, Any]:
-        """Return the Worker card without private Tool or private prompt data."""
-
-        public_input_schema = _plain(self.input_schema)
-        if isinstance(public_input_schema, dict):
-            runtime_bound = set(self.authoritative_arg_bindings)
-            required = public_input_schema.get("required")
-            if isinstance(required, list):
-                public_input_schema["required"] = [
-                    str(item) for item in required if str(item) not in runtime_bound
-                ]
-            public_input_schema["x-runtime-bound-args"] = sorted(runtime_bound)
-
-        return {
-            "worker_id": self.worker_id,
-            "agent_id": self.agent_id,
-            "role": self.role,
-            "description": self.description,
-            "responsibility": self.responsibility,
-            "accepted_task_types": list(self.accepted_task_types),
-            "task_contracts": [item.safe_for_coordinator() for item in self.task_contracts],
-            "args_schema": public_input_schema,
-            "semantic_inputs_schema": _plain(_semantic_inputs_schema(self.upstream_input_bindings)),
-            "output_schema": _plain(self.output_schema),
-            "output_types": list(self.output_types),
-            "required_upstream_output_groups": _plain(self.required_upstream_output_groups),
-            "upstream_input_bindings": _plain(self.upstream_input_bindings),
-            "runtime_bound_args": sorted(self.authoritative_arg_bindings),
-            "selection_requirements": list(self.selection_requirements),
-            "non_responsibilities": list(self.non_responsibilities),
-            "side_effects": list(self.side_effects),
-            "missing_context_policy": self.missing_context_policy,
-            "supports_parallel": self.supports_parallel,
-            "can_generate_proposal": self.can_generate_proposal,
-            "access_mode": AccessMode.from_value(self.access_mode).value,
-        }
-
-
 @dataclass
 class MissingContextItem:
     key: str
@@ -542,41 +330,37 @@ class MemoryUpdate:
 
 
 @dataclass
-class GraphAgentTask:
+class CapabilityExecutionTask:
+    """Runtime task compiled from a MainAgent capability task.
+
+    The public plan carries a boundary plus a list of business contracts.  The
+    Runtime owns Worker binding and dependency derivation.  No task_type or
+    TaskProfile exists in this execution contract.
+    """
+
     task_id: str
     run_id: str
     session_id: str
     assigned_agent: str
     objective: str
-    task_type: str
     user_id: str
+    boundary_id: str
+    contracts: list[dict[str, Any]] = field(default_factory=list)
     worker_id: str = ""
-    args: dict[str, Any] = field(default_factory=dict)
-    inputs: dict[str, list[dict[str, str]]] = field(default_factory=dict)
-    expected_output_type: str = ""
-    # MainAgent-generated per-run expectation.  Capability cards describe what
-    # a task can generally do; these fields describe what this particular task
-    # must accomplish for the current GoalContract.
-    purpose: str = ""
-    why_selected: str = ""
-    input_contract: dict[str, Any] = field(default_factory=dict)
-    expected_output: dict[str, Any] = field(default_factory=dict)
-    expected_effect: dict[str, Any] = field(default_factory=dict)
-    completion_criteria: list[str] = field(default_factory=list)
-    completion_contract: dict[str, Any] = field(default_factory=dict)
-    failure_policy: dict[str, Any] = field(default_factory=dict)
-    replan_triggers: list[str] = field(default_factory=list)
+    business_parameters: dict[str, Any] = field(default_factory=dict)
+    resolved_input_bindings: list[dict[str, Any]] = field(default_factory=list)
+    dependency_task_ids: list[str] = field(default_factory=list)
+    expected_output_slots: list[str] = field(default_factory=list)
+    effect_limit: str = "read"
+    execution_mode: str = "agentic"
     focus_refs: list[GraphRef] = field(default_factory=list)
     context_refs: list[GraphRef] = field(default_factory=list)
-    dependency_task_ids: list[str] = field(default_factory=list)
-    required_outputs: list[str] = field(default_factory=list)
-    constraints: list[str] = field(default_factory=list)
     as_of_time: str = ""
     priority: int = 1
     status: TaskStatus = TaskStatus.CREATED
     attempt: int = 1
     metadata: dict[str, Any] = field(default_factory=dict)
-    contract_version: str = "graph_agent_task.v2"
+    contract_version: str = "capability_execution_task.v1"
 
     def __post_init__(self) -> None:
         self.task_id = str(self.task_id or new_id("task"))
@@ -584,30 +368,24 @@ class GraphAgentTask:
         self.session_id = str(self.session_id or "")
         self.assigned_agent = str(self.assigned_agent or "").upper()
         self.objective = str(self.objective or "").strip()
-        self.task_type = str(self.task_type or "general_analysis").strip()
         self.user_id = str(self.user_id or "default")
+        self.boundary_id = str(self.boundary_id or "").strip()
         self.worker_id = str(self.worker_id or "").strip().upper()
-        self.args = dict(self.args or {})
-        self.inputs = _task_inputs(self.inputs)
-        self.expected_output_type = str(self.expected_output_type or "").strip()
-        self.purpose = str(self.purpose or self.objective or "").strip()
-        self.why_selected = str(self.why_selected or "").strip()
-        self.input_contract = dict(self.input_contract or {})
-        self.expected_output = dict(self.expected_output or {})
-        self.expected_effect = dict(self.expected_effect or {})
-        self.completion_criteria = _str_list(self.completion_criteria, limit=30)
-        self.completion_contract = dict(self.completion_contract or {})
-        self.failure_policy = dict(self.failure_policy or {})
-        self.replan_triggers = _str_list(self.replan_triggers, limit=30)
+        self.contracts = [dict(item) for item in list(self.contracts or []) if isinstance(item, dict)]
+        self.business_parameters = dict(self.business_parameters or {})
+        self.resolved_input_bindings = [
+            dict(item) for item in list(self.resolved_input_bindings or []) if isinstance(item, dict)
+        ]
+        self.dependency_task_ids = _str_list(self.dependency_task_ids, limit=100)
+        self.expected_output_slots = _str_list(self.expected_output_slots, limit=100)
+        self.effect_limit = str(self.effect_limit or "read").strip().lower()
+        self.execution_mode = str(self.execution_mode or "agentic").strip().lower()
         self.focus_refs = refs_from(self.focus_refs)
         self.context_refs = refs_from(self.context_refs)
-        self.dependency_task_ids = _str_list(self.dependency_task_ids, limit=50)
-        self.required_outputs = _str_list(self.required_outputs, limit=50)
-        self.constraints = _str_list(self.constraints, limit=50)
         self.as_of_time = str(self.as_of_time or "")
         self.status = TaskStatus.from_value(self.status)
         self.metadata = dict(self.metadata or {})
-        self.contract_version = "graph_agent_task.v2"
+        self.contract_version = "capability_execution_task.v1"
         try:
             self.priority = max(0, min(10, int(self.priority)))
         except (TypeError, ValueError):
@@ -617,24 +395,63 @@ class GraphAgentTask:
         except (TypeError, ValueError):
             self.attempt = 1
 
-    def to_dict(self) -> dict[str, Any]:
-        return _plain(self)
+    @property
+    def args(self) -> dict[str, Any]:
+        """Compatibility name for existing domain adapters.
+
+        This is not a planner-owned task type contract; it is the ordinary
+        business-parameter bag after Runtime validation.
+        """
+        return self.business_parameters
+
+    @args.setter
+    def args(self, value: dict[str, Any]) -> None:
+        self.business_parameters = dict(value or {})
+
+    @property
+    def inputs(self) -> dict[str, list[dict[str, str]]]:
+        grouped: dict[str, list[dict[str, str]]] = {}
+        for row in self.resolved_input_bindings:
+            role = str(row.get("input_slot_id") or "input")
+            grouped.setdefault(role, []).append({
+                "from_task_id": str(row.get("producer_task_id") or ""),
+                "information_slot": str(row.get("output_slot_id") or role),
+                "expected_output_type": str(row.get("schema_id") or ""),
+            })
+        return grouped
+
+    @property
+    def expected_output_type(self) -> str:
+        return "CapabilityResult"
+
+    @property
+    def required_outputs(self) -> list[str]:
+        return list(self.expected_output_slots)
+
+    @property
+    def completion_contract(self) -> dict[str, Any]:
+        return {"contracts": [dict(item) for item in self.contracts]}
+
+    @completion_contract.setter
+    def completion_contract(self, value: dict[str, Any]) -> None:
+        # Legacy callers may assign this field.  The canonical source remains
+        # ``contracts`` and is never replaced by an old task-type contract.
+        candidate = dict(value or {})
+        if not self.contracts and isinstance(candidate.get("contracts"), list):
+            self.contracts = [dict(item) for item in candidate["contracts"] if isinstance(item, dict)]
 
     def input_task_ids(self, role: str | None = None) -> list[str]:
-        """Return ordered task IDs declared by semantic upstream inputs."""
-
-        selected = (
-            {str(role): self.inputs.get(str(role), [])}
-            if role is not None
-            else self.inputs
-        )
         result: list[str] = []
-        for items in selected.values():
-            for item in items:
-                task_id = str(item.get("from_task_id") or "").strip()
-                if task_id and task_id not in result:
-                    result.append(task_id)
+        for row in self.resolved_input_bindings:
+            if role is not None and str(row.get("input_slot_id") or "") != str(role):
+                continue
+            task_id = str(row.get("producer_task_id") or "").strip()
+            if task_id and task_id not in result:
+                result.append(task_id)
         return result
+
+    def to_dict(self) -> dict[str, Any]:
+        return _plain(self)
 
     def safe_for_coordinator(self) -> dict[str, Any]:
         return {
@@ -644,26 +461,18 @@ class GraphAgentTask:
             "session_id": self.session_id,
             "worker_id": self.worker_id,
             "assigned_agent": self.assigned_agent,
+            "boundary_id": self.boundary_id,
             "objective": self.objective,
-            "task_type": self.task_type,
-            "args": _compact(self.args, max_depth=4),
-            "inputs": _compact(self.inputs, max_depth=4),
-            "expected_output_type": self.expected_output_type,
-            "purpose": self.purpose,
-            "why_selected": self.why_selected,
-            "input_contract": _compact(self.input_contract, max_depth=5),
-            "expected_output": _compact(self.expected_output, max_depth=5),
-            "expected_effect": _compact(self.expected_effect, max_depth=5),
-            "completion_criteria": list(self.completion_criteria),
-            "completion_contract": _compact(self.completion_contract, max_depth=6),
-            "failure_policy": _compact(self.failure_policy, max_depth=4),
-            "replan_triggers": list(self.replan_triggers),
+            "contracts": _compact(self.contracts, max_depth=7),
+            "business_parameters": _compact(self.business_parameters, max_depth=4),
+            "resolved_input_bindings": _compact(self.resolved_input_bindings, max_depth=5),
+            "dependency_task_ids": list(self.dependency_task_ids),
+            "expected_output_slots": list(self.expected_output_slots),
+            "effect_limit": self.effect_limit,
+            "execution_mode": self.execution_mode,
             "user_id": self.user_id,
             "focus_refs": [ref.to_dict() for ref in self.focus_refs],
             "context_refs": [ref.to_dict() for ref in self.context_refs],
-            "dependency_task_ids": list(self.dependency_task_ids),
-            "required_outputs": list(self.required_outputs),
-            "constraints": list(self.constraints),
             "as_of_time": self.as_of_time,
             "priority": self.priority,
             "status": self.status.value,
@@ -671,8 +480,13 @@ class GraphAgentTask:
         }
 
     @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> "GraphAgentTask":
+    def from_dict(cls, value: dict[str, Any]) -> "CapabilityExecutionTask":
         return cls(**dict(value or {}))
+
+
+# Import-compatible name for modules that still import GraphAgentTask.  The
+# underlying active contract is capability-driven and contains no task_type.
+GraphAgentTask = CapabilityExecutionTask
 
 
 @dataclass
@@ -761,9 +575,10 @@ class GraphWorkerResult:
             key: value
             for key, value in self.metadata.items()
             if key in {
-                "task_type", "attempt", "partial_reason", "proposal_id", "plan_id",
+                "boundary_id", "attempt", "partial_reason", "proposal_id", "plan_id",
                 "requires_approval", "graph_view_id", "duration_ms",
-                "tool_execution", "resolved_input_roles",
+                "tool_execution", "resolved_input_slots", "produced_information_slots",
+                "missing_information_slots", "tool_dag_task_count",
             }
         }
         return {
@@ -801,7 +616,7 @@ class GraphWorkerResult:
 
 
 @dataclass
-class SessionMemoryItem:
+class SessionStateItem:
     memory_id: str
     session_id: str
     key: str

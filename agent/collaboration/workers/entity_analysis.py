@@ -2,62 +2,44 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from typing import Any
 
 from core.llm import LLMService
+from core.llm.contracts import LLMJSONError, extract_json_object
 from core.llm.prompt_compaction import compact_json_dumps, schema_for_prompt
 
-from ..completion import validate_completion_report
+from ..completion import build_completion_report
 from ..models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus
-from ..worker_contracts import array_schema, completion_report_schema, object_schema, string_schema, validate_schema
-from .common import dependency_results as dependency_result_items
-from .common import safe_public_value
+from ..worker_contracts import array_schema, object_schema, string_schema, validate_schema
+from .common import execution_safe_value, safe_public_value
+from .slot_inputs import contract_input_slot_ids, slot_envelopes
 
 
-_CLAIM_LIST_FIELDS = (
-    "facts",
-    "analysis",
-    "model_signals",
-    "relation_interpretations",
-    "uncertainties",
-)
-
-_INTERNAL_OUTPUT_TYPES = {
-    "ModelPredictionResult",
-    "RankingResult",
-    "ModelMetricsResult",
-    "BacktestSummaryResult",
-    "SelectedStrategyResult",
-}
-_MAX_EVIDENCE_RECORDS_PER_ENTITY = 20
+_CLAIM_LIST_FIELDS = ("facts", "analysis", "uncertainties")
 
 
-def _claim_schema(*, kind: str = "generic") -> dict[str, Any]:
-    properties: dict[str, Any] = {
-        "claim_id": string_schema(min_length=1, max_length=80),
-        "statement": string_schema(min_length=1, max_length=320),
-        "source_task_ids": array_schema(
-            string_schema(min_length=1, max_length=80), max_items=8
-        ),
-    }
-    required = ["claim_id", "statement", "source_task_ids"]
-    if kind == "model_signal":
-        properties.update({
-            "direction": string_schema(enum=["up", "down", "flat", "mixed", "unknown"]),
-            "horizon": string_schema(min_length=1, max_length=80),
-            "strength": string_schema(enum=["slight", "moderate", "strong", "unknown"]),
-        })
-        required.extend(["direction", "horizon", "strength"])
-    elif kind == "relation":
-        properties.update({
-            "relation_type": string_schema(min_length=1, max_length=120),
-            "causality": string_schema(enum=["established", "not_established", "unknown"]),
-        })
-        required.extend(["relation_type", "causality"])
+_EVIDENCE_SLOTS = {"entity_external_evidence", "evidence_source_records"}
+
+
+_MAX_EVIDENCE_RECORDS_PER_ENTITY = 12
+_MAX_RECORD_TEXT_CHARS = 700
+_MAX_PRIMARY_OUTPUT_TOKENS = 2600
+_MAX_REPAIR_OUTPUT_TOKENS = 2200
+_MAX_REPAIR_INPUT_CHARS = 12000
+
+
+def _claim_schema() -> dict[str, Any]:
     return object_schema(
-        properties,
-        required=required,
+        {
+            "claim_id": string_schema(min_length=1, max_length=80),
+            "statement": string_schema(min_length=1, max_length=320),
+            "source_task_ids": array_schema(
+                string_schema(min_length=1, max_length=80), max_items=8
+            ),
+        },
+        required=["claim_id", "statement", "source_task_ids"],
         additional_properties=False,
     )
 
@@ -71,29 +53,19 @@ def _entity_analysis_llm_schema() -> dict[str, Any]:
             ),
             "facts": array_schema(claim, max_items=8),
             "analysis": array_schema(claim, max_items=6),
-            "model_signals": array_schema(
-                _claim_schema(kind="model_signal"), max_items=5
-            ),
-            "relation_interpretations": array_schema(
-                _claim_schema(kind="relation"), max_items=5
-            ),
-            "uncertainties": array_schema(claim, max_items=6),
+            "uncertainties": array_schema(claim, max_items=4),
             "conclusion": string_schema(max_length=500),
             "source_task_ids": array_schema(
-                string_schema(min_length=1, max_length=80), max_items=12
+                string_schema(min_length=1, max_length=80), max_items=20
             ),
-            "completion_report": completion_report_schema(),
         },
         required=[
             "entity_refs",
             "facts",
             "analysis",
-            "model_signals",
-            "relation_interpretations",
             "uncertainties",
             "conclusion",
             "source_task_ids",
-            "completion_report",
         ],
         additional_properties=False,
     )
@@ -101,29 +73,18 @@ def _entity_analysis_llm_schema() -> dict[str, Any]:
 
 def _resolved_items(
     task: GraphAgentTask,
-    dependency_results: dict[str, dict[str, Any]],
     resolved_inputs: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
-    explicit: list[dict[str, Any]] = []
-    for value in dict(resolved_inputs or {}).values():
-        values = value if isinstance(value, list) else [value]
-        explicit.extend(item for item in values if isinstance(item, dict))
-    if explicit:
-        return explicit
-    requested = set(
-        task.input_task_ids("evidence")
-        + task.input_task_ids("model_facts")
-        + task.input_task_ids("relation_context")
+    """Project only contract-declared SlotBinder inputs that are actually present."""
+
+    return slot_envelopes(
+        task,
+        resolved_inputs,
+        include_slots=contract_input_slot_ids(task),
     )
-    selected = {
-        task_id: payload
-        for task_id, payload in dependency_results.items()
-        if not requested or task_id in requested
-    }
-    return dependency_result_items(selected)
 
 
-def _trim_text(value: Any, *, limit: int = 1200) -> str:
+def _trim_text(value: Any, *, limit: int = _MAX_RECORD_TEXT_CHARS) -> str:
     return str(value or "")[:limit]
 
 
@@ -192,15 +153,15 @@ def _compact_evidence_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _compact_payload(output_type: str, payload: Any) -> Any:
+def _compact_payload(slot_id: str, payload: Any) -> Any:
     if not isinstance(payload, dict):
         return safe_public_value(payload)
-    if output_type == "EvidenceCollectionResult":
+    if slot_id in _EVIDENCE_SLOTS:
         return _compact_evidence_payload(payload)
     # Internal fact results are already structured and normally much smaller.
-    encoded = json.dumps(safe_public_value(payload), ensure_ascii=False, default=str)
+    encoded = json.dumps(execution_safe_value(payload), ensure_ascii=False, default=str)
     if len(encoded) <= 16000:
-        return safe_public_value(payload)
+        return execution_safe_value(payload)
     return {
         "truncated": True,
         "summary": encoded[:15000],
@@ -229,7 +190,7 @@ def _authoritative_entity_refs(
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in evidence_items:
-        payload = item.get("payload", item.get("data"))
+        payload = item.get("payload")
         if not isinstance(payload, dict):
             continue
         for ref in payload.get("entity_refs") or []:
@@ -252,7 +213,7 @@ def _authoritative_entity_catalog(
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in evidence_items:
-        payload = item.get("payload", item.get("data"))
+        payload = item.get("payload")
         if not isinstance(payload, dict):
             continue
         for descriptor in payload.get("entity_catalog") or []:
@@ -265,154 +226,164 @@ def _authoritative_entity_catalog(
     return rows
 
 
-def _analysis_input_diagnostics(
-    safe_items: list[dict[str, Any]],
-    evidence_items: list[dict[str, Any]],
-    internal_items: list[dict[str, Any]],
-) -> dict[str, Any]:
-    raw_record_count = 0
-    canonical_record_count = 0
-    duplicate_record_count = 0
-    forwarded_record_count = 0
-    for item in evidence_items:
-        payload = item.get("payload", item.get("data"))
-        if not isinstance(payload, dict):
-            continue
-        dedup = dict(payload.get("deduplication") or {})
-        raw_record_count += int(dedup.get("raw_record_count") or payload.get("record_count") or 0)
-        canonical = int(dedup.get("canonical_record_count") or payload.get("record_count") or 0)
-        canonical_record_count += canonical
-        duplicate_record_count += int(dedup.get("duplicate_record_count") or 0)
-        for result in payload.get("results") or []:
-            if isinstance(result, dict):
-                forwarded_record_count += min(
-                    len([row for row in result.get("records") or [] if isinstance(row, dict)]),
-                    _MAX_EVIDENCE_RECORDS_PER_ENTITY,
-                )
-    encoded = json.dumps(safe_items, ensure_ascii=False, default=str)
-    internal_types = sorted({str(item.get("output_type") or "") for item in internal_items})
-    return {
-        "evidence_task_ids": [
-            str(item.get("from_task_id") or item.get("task_id") or "")
-            for item in evidence_items
-        ],
-        "internal_task_ids": [
-            str(item.get("from_task_id") or item.get("task_id") or "")
-            for item in internal_items
-        ],
-        "internal_output_types": internal_types,
-        "internal_result_count": len(internal_items),
-        "raw_evidence_record_count": raw_record_count,
-        "canonical_evidence_record_count": canonical_record_count,
-        "duplicate_evidence_record_count": duplicate_record_count,
-        "evidence_records_forwarded_to_llm": forwarded_record_count,
-        "evidence_records_omitted_from_llm": max(0, canonical_record_count - forwarded_record_count),
-        "upstream_result_count": len(safe_items),
-        "llm_input_chars": len(encoded),
-        "evidence_record_limit_per_entity": _MAX_EVIDENCE_RECORDS_PER_ENTITY,
+def _generate_text_no_thinking(
+    llm_service: LLMService,
+    *,
+    stage: str,
+    messages: list[dict[str, Any]],
+    max_output_tokens: int,
+    operation: str,
+) -> str:
+    """Call generate_text while disabling model thinking when supported.
+
+    V22.0.1 keeps compatibility with older LLMService builds by discovering the
+    optional ``disable_thinking`` argument at runtime instead of requiring a core
+    LLM service replacement.
+    """
+
+    kwargs: dict[str, Any] = {
+        "stage": stage,
+        "messages": messages,
+        "max_output_tokens": max_output_tokens,
+        "temperature": 0.0,
+        "operation": operation,
     }
+    try:
+        if "disable_thinking" in inspect.signature(llm_service.generate_text).parameters:
+            kwargs["disable_thinking"] = True
+    except (TypeError, ValueError):
+        pass
+    return str(llm_service.generate_text(**kwargs) or "")
+
+
+def _generate_entity_analysis_json(
+    llm_service: LLMService,
+    *,
+    messages: list[dict[str, Any]],
+    output_schema: dict[str, Any],
+    validate: Any,
+    allowed_source_task_ids: list[str],
+    operation: str,
+) -> dict[str, Any]:
+    """Generate W09 business JSON with one Worker-local structural repair.
+
+    The repair request intentionally does not include the original evidence or
+    user task. It receives only the first model output, the validation error, the
+    business schema, and the already-authorized source task ids. This prevents
+    schema repair from becoming a second full business-analysis pass.
+    """
+
+    primary_text = _generate_text_no_thinking(
+        llm_service,
+        stage="graph_entity_analysis",
+        messages=messages,
+        max_output_tokens=_MAX_PRIMARY_OUTPUT_TOKENS,
+        operation=operation,
+    )
+    try:
+        primary = extract_json_object(primary_text)
+        validate(primary)
+        return primary
+    except Exception as primary_exc:
+        repair_request = {
+            "task": "repair_existing_json_only",
+            "instruction": (
+                "Repair only the JSON syntax/shape of invalid_output. Preserve existing claims. "
+                "Do not redo the analysis, do not add facts or sources, and do not infer missing content. "
+                "If a field was truncated and cannot be recovered from invalid_output, use the smallest valid empty value allowed by the schema."
+            ),
+            "validation_error": {
+                "type": type(primary_exc).__name__,
+                "message": str(primary_exc)[:2000],
+            },
+            "allowed_source_task_ids": allowed_source_task_ids,
+            "output_schema": schema_for_prompt(output_schema),
+            "invalid_output": primary_text[:_MAX_REPAIR_INPUT_CHARS],
+        }
+        repair_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a JSON structural repair function. Never perform business reasoning. "
+                    "Return exactly one complete JSON object and nothing else."
+                ),
+            },
+            {
+                "role": "user",
+                "content": compact_json_dumps(repair_request),
+            },
+        ]
+        repaired_text = _generate_text_no_thinking(
+            llm_service,
+            stage="graph_entity_analysis",
+            messages=repair_messages,
+            max_output_tokens=_MAX_REPAIR_OUTPUT_TOKENS,
+            operation="schema_repair_structural_only",
+        )
+        try:
+            repaired = extract_json_object(repaired_text)
+            validate(repaired)
+            return repaired
+        except Exception as repair_exc:
+            raise LLMJSONError(
+                "W09 local structured-output recovery exhausted: "
+                f"primary={type(primary_exc).__name__}:{str(primary_exc)[:800]}; "
+                f"repair={type(repair_exc).__name__}:{str(repair_exc)[:800]}"
+            ) from repair_exc
 
 
 def run_entity_analysis(
     llm_service: LLMService,
     task: GraphAgentTask,
-    dependency_results: dict[str, dict[str, Any]],
     *,
     resolved_inputs: dict[str, Any] | None = None,
     language: str = "zh",
 ) -> GraphWorkerResult:
-    if task.task_type not in {"analyze_financial_entities", "compare_financial_entities"}:
-        raise ValueError(f"unsupported_entity_analysis_task:{task.task_type}")
 
-    items = _resolved_items(task, dependency_results, resolved_inputs)
-    evidence_items = [
-        item
-        for item in items
-        if str(item.get("output_type") or "") == "EvidenceCollectionResult"
-    ]
-    internal_items = [
-        item
-        for item in items
-        if str(item.get("output_type") or "") in _INTERNAL_OUTPUT_TYPES
-    ]
-    if not evidence_items:
-        return GraphWorkerResult(
-            task_id=task.task_id,
-            agent_id=task.assigned_agent,
-            status=ResultStatus.NEED_CONTEXT,
-            output_type="EntityAnalysisResult",
-            data=None,
-            error=None,
-            focus_refs=task.focus_refs,
-            summary="金融实体分析缺少上游外部证据集合。",
-            missing_items=[
-                MissingContextItem(
-                    key="evidence",
-                    description="需要 W01 产生的 EvidenceCollectionResult。",
-                    expected_format="一个或多个 EvidenceCollectionResult WorkerResult",
-                    searched_sources=["declared upstream inputs", "dependency_results"],
-                )
-            ],
-        )
-
-    if not internal_items:
-        return GraphWorkerResult(
-            task_id=task.task_id,
-            agent_id=task.assigned_agent,
-            status=ResultStatus.NEED_CONTEXT,
-            output_type="EntityAnalysisResult",
-            data=None,
-            error=None,
-            focus_refs=task.focus_refs,
-            summary="金融实体分析缺少系统内部模型或结构化事实。",
-            missing_items=[
-                MissingContextItem(
-                    key="model_facts",
-                    description="需要 W02 等只读 Worker 产生的系统内部模型或结构化事实结果。",
-                    searched_sources=["declared upstream inputs", "dependency_results"],
-                )
-            ],
-        )
+    items = _resolved_items(task, resolved_inputs)
+    evidence_items = [item for item in items if item.get("slot_id") in _EVIDENCE_SLOTS]
 
     safe_items: list[dict[str, Any]] = []
+    full_evidence_source_ids: set[str] = set()
     for item in items:
-        task_id = str(item.get("from_task_id") or item.get("task_id") or "")
-        output_type = str(item.get("output_type") or "")
-        safe_items.append(
-            {
-                "task_id": task_id,
-                "output_type": output_type,
-                "status": str(item.get("status") or ""),
-                "payload": _compact_payload(
-                    output_type,
-                    item.get("payload", item.get("data")),
-                ),
-                "summary": _trim_text(item.get("summary"), limit=1000),
-                "confidence": item.get("confidence"),
+        slot_id = str(item.get("slot_id") or "")
+        source_task_ids = [str(value) for value in item.get("source_task_ids") or [] if str(value)]
+        payload = item.get("payload")
+        if slot_id == "entity_external_evidence":
+            full_evidence_source_ids.update(source_task_ids)
+            compact_payload = _compact_payload(slot_id, payload)
+        elif slot_id == "evidence_source_records" and set(source_task_ids).intersection(full_evidence_source_ids):
+            # W01 currently publishes the same evidence collection payload into both
+            # evidence slots. Keep the second slot's identity without duplicating the
+            # complete evidence corpus in the W09 prompt.
+            payload_dict = payload if isinstance(payload, dict) else {}
+            compact_payload = {
+                "payload_alias_of": "entity_external_evidence",
+                "record_count": int(payload_dict.get("record_count") or 0),
+                "source_count": int(payload_dict.get("source_count") or 0),
+                "coverage": safe_public_value(payload_dict.get("coverage") or {}),
+                "business_empty": bool(payload_dict.get("business_empty", False)),
             }
-        )
+        else:
+            compact_payload = _compact_payload(slot_id, payload)
+        safe_items.append({
+            "slot_id": slot_id,
+            "source_task_ids": source_task_ids,
+            "status": str(item.get("status") or "available"),
+            "payload": compact_payload,
+        })
     known_source_task_ids = {
-        str(item.get("task_id") or "")
+        str(source_id)
         for item in safe_items
-        if str(item.get("task_id") or "")
+        for source_id in item.get("source_task_ids") or []
+        if str(source_id)
     }
-    evidence_source_task_ids = {
-        str(item.get("from_task_id") or item.get("task_id") or "")
-        for item in evidence_items
-        if str(item.get("from_task_id") or item.get("task_id") or "")
-    }
-    internal_source_task_ids = {
-        str(item.get("from_task_id") or item.get("task_id") or "")
-        for item in internal_items
-        if str(item.get("from_task_id") or item.get("task_id") or "")
-    }
-    input_diagnostics = _analysis_input_diagnostics(safe_items, evidence_items, internal_items)
 
     output_schema = _entity_analysis_llm_schema()
 
     def validate(payload: dict[str, Any]) -> None:
         validate_schema(payload, output_schema)
-        required = ["entity_refs", *_CLAIM_LIST_FIELDS, "conclusion", "source_task_ids", "completion_report"]
+        required = ["entity_refs", *_CLAIM_LIST_FIELDS, "conclusion", "source_task_ids"]
         missing = [key for key in required if key not in payload]
         if missing:
             raise RuntimeError(f"entity_analysis_missing_fields:{','.join(missing)}")
@@ -461,154 +432,164 @@ def run_entity_analysis(
                 "entity_analysis_unknown_overall_source_task_ids:"
                 + ",".join(unknown_overall)
             )
-        if not set(source_task_ids).intersection(evidence_source_task_ids):
-            raise RuntimeError("entity_analysis_missing_evidence_source_task_id")
-        if not set(source_task_ids).intersection(internal_source_task_ids):
-            raise RuntimeError("entity_analysis_missing_internal_source_task_id")
-        for index, row in enumerate(payload.get("model_signals") or []):
-            if not set(_claim_source_ids(row)).intersection(internal_source_task_ids):
-                raise RuntimeError(
-                    f"entity_analysis_model_signal_requires_internal_source:{index}"
-                )
         if not isinstance(payload.get("conclusion"), str):
             raise RuntimeError("entity_analysis_conclusion_must_be_string")
-        validate_completion_report(
-            dict(payload.get("completion_report") or {}),
-            dict(task.completion_contract or {}),
-            path="$.completion_report",
-        )
 
     system = (
-        "你是金融实体分析 Worker。只能使用输入中的上游结构化结果，不能自行检索新闻、查询数据库、"
-        "解析新实体或补造证券名称、行业、数值和事件。EvidenceCollectionResult 已由 W01 按稳定 ID 合并去重，"
-        "只能分析其中 canonical records，不得把 direct_news 与 RAG 的同 ID 记录重复计数。"
-        "ModelPredictionResult、RankingResult 等结果提供系统内部模型或结构化事实，必须实际参与分析；"
-        "内部结果为空或 found=false 时，要把缺失作为不确定性，而不是忽略该上游。GraphRelationResult 只证明关系路径存在。"
-        "你负责解释外部证据与系统内部数据对金融实体本身的含义，区分事实、分析、模型信号、关系解释和不确定性。"
-        "关系存在不等于因果影响，不得生成组合风险结论、调仓建议、Proposal 或执行声明。"
-        "facts、analysis、model_signals、relation_interpretations、uncertainties 的每个元素必须有唯一 claim_id、statement 和 source_task_ids。"
-        "model_signals 还必须输出 direction(up/down/flat/mixed/unknown)、horizon 和 strength；"
-        "relation_interpretations 还必须输出 relation_type 与 causality(established/not_established/unknown)。"
-        "uncertainties 可以使用空 source_task_ids，但涉及内部数据缺失的不确定性应引用对应内部任务。"
-        "source_task_ids 必须同时包含至少一个外部证据任务和至少一个系统内部数据任务；"
-        "model_signals 中每条信号必须引用真实的系统内部数据任务。"
-        "你还必须严格对照 completion_contract 输出 completion_report。规则不替你判断业务是否完成；"
-        "只有你基于上游结构化结果确认全部 criteria 满足、全部 required_information_slots 已产生时，"
-        "才能设置 expected_task_completed=true。若没有形成实体分析，只能产生 uncertainty，必须设置为 false。"
-        "completion_report.report_source 必须为 llm。不得输出 should_freeze、reusable 或 replan 决策，这些只由程序流程规则计算。"
-        "每个 statement 只表达一个原子结论，不复制整段证据原文，不在多个数组中重复同一结论。"
-        "只输出结构化分析字段，不生成摘要段落、Markdown、面向用户的报告或重复解释；conclusion 仅保留一句总括。"
-        "严格按照 entity_analysis_output_schema 输出 JSON，不要 Markdown。"
+        "你是W09结构化实体分析Worker。你只处理本任务实际绑定并物化给你的信息Slot，"
+        "这些Slot就是你完整的工作世界；不要猜测、枚举或评价未绑定的信息、Worker、Tool、数据源或潜在分析维度。"
+        "你的职责是把收到的结构化输入融合为通用facts、analysis、uncertainties和conclusion。"
+        "不同来源的数据都统一融合进这些通用字段，不要按系统内部能力域创建固定输出栏目。"
+        "不得自行检索、查询数据库、解析新实体或补造输入中不存在的事实、数值、风险、建议和因果关系。"
+        "每个非空claim必须有唯一claim_id、statement和source_task_ids，且source_task_ids只能引用本次实际输入的上游任务。"
+        "uncertainties只能描述实际输入内容本身存在的不确定性，不得把未收到的信息描述成缺口。"
+        "只输出业务分析JSON，不输出completion_report；完成度和合同验收由Runtime负责。只输出JSON，不生成面向用户的完整自然语言报告。"
     )
     if language == "en":
         system = (
-            "You are the financial-entity analysis Worker. Use only supplied structured upstream results. "
-            "Do not retrieve data, query databases, resolve new entities, invent labels, or create portfolio advice. "
-            "The EvidenceCollectionResult contains ID-deduplicated canonical records; do not count direct-news and RAG duplicates twice. "
-            "System-internal model or structured fact results must materially participate in the analysis; represent an empty internal result as uncertainty. "
-            "Separate facts, analysis, model signals, relation interpretation, and uncertainty. A graph relation is "
-            "not proof of causal impact. Every item in facts, analysis, model_signals, relation_interpretations, and "
-            "uncertainties must contain a unique claim_id, statement, and source_task_ids. Model signals also require "
-            "direction, horizon, and strength; relation interpretations require relation_type and causality. "
-            "Only uncertainty items may have an empty source_task_ids array. Evaluate every completion_contract criterion "
-            "inside completion_report. Set expected_task_completed=true only when all criteria and required information slots "
-            "are satisfied. completion_report.report_source must be llm. Do not output freeze/reuse/replan decisions. Return only JSON matching entity_analysis_output_schema."
+            "You are W09, a structured entity-analysis Worker. Process only the information slots actually bound and materialized for this task; those slots are your entire working world. "
+            "Do not infer, enumerate, or evaluate unbound information, Workers, Tools, data sources, or hypothetical analysis dimensions. "
+            "Fuse supplied structured inputs into generic facts, analysis, uncertainties, and a conclusion. Do not create fixed output categories based on internal capability domains. "
+            "Do not retrieve data, query databases, resolve new entities, or invent facts, numbers, risks, recommendations, or causal claims. Every non-empty claim must cite only source_task_ids attached to actual inputs. "
+            "Uncertainties may describe uncertainty inside supplied information only. Return JSON only."
         )
 
-    analysis = llm_service.generate_json(
-        stage="graph_entity_analysis",
-        messages=[
-            {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": compact_json_dumps(
-                    {
-                        "analysis_goal": str(task.args.get("analysis_goal") or task.objective),
-                        "comparison_mode": task.task_type == "compare_financial_entities",
-                        "allowed_source_task_ids": sorted(known_source_task_ids),
-                        "evidence_source_task_ids": sorted(evidence_source_task_ids),
-                        "internal_source_task_ids": sorted(internal_source_task_ids),
-                        "analysis_input_diagnostics": input_diagnostics,
-                        "authoritative_entity_refs": _authoritative_entity_refs(task, evidence_items),
-                        "authoritative_entity_catalog": _authoritative_entity_catalog(task, evidence_items),
-                        "upstream_results": safe_items,
-                        "completion_contract": task.completion_contract,
-                        "entity_analysis_output_schema": schema_for_prompt(output_schema),
-                        "reply_language": language,
-                    },
-                ),
+
+    generation_messages = [
+        {"role": "system", "content": system},
+        {
+            "role": "user",
+            "content": compact_json_dumps(
+                {
+                    "analysis_goal": str(task.args.get("analysis_goal") or task.objective),
+                    "comparison_mode": len(task.focus_refs) > 1,
+                    "allowed_source_task_ids": sorted(known_source_task_ids),
+                    "bound_input_slot_ids": sorted(str(item.get("slot_id") or "") for item in safe_items),
+                    "authoritative_entity_refs": _authoritative_entity_refs(task, evidence_items),
+                    "authoritative_entity_catalog": _authoritative_entity_catalog(task, evidence_items),
+                    "bound_information_slots": safe_items,
+                    "entity_analysis_output_schema": schema_for_prompt(output_schema),
+                    "reply_language": language,
+                },
+            ),
+        },
+    ]
+    try:
+        analysis = _generate_entity_analysis_json(
+            llm_service,
+            messages=generation_messages,
+            output_schema=output_schema,
+            validate=validate,
+            allowed_source_task_ids=sorted(known_source_task_ids),
+            operation=task.boundary_id,
+        )
+    except LLMJSONError as exc:
+        completion = build_completion_report(
+            task,
+            execution_status="failed",
+            contract_status="not_satisfied",
+            business_status="unknown",
+            completion_status="not_completed",
+            expected_task_completed=False,
+            produced_information_slots=[],
+            limitations=[str(exc)[:1000]],
+            failure_kind="worker_structured_output_failure",
+            report_source="runtime",
+        )
+        return GraphWorkerResult(
+            task_id=task.task_id,
+            agent_id=task.assigned_agent,
+            status=ResultStatus.FAILED,
+            output_type="CapabilityResult",
+            data=None,
+            error={
+                "code": "worker_structured_output_failed",
+                "message": str(exc),
+                "component": task.assigned_agent,
+                "retryable": False,
+                "local_recovery_exhausted": True,
             },
+            focus_refs=task.focus_refs,
+            summary=(
+                "W09结构化输出修复失败。"
+                if language != "en" else
+                "W09 structured-output repair failed."
+            ),
+            warnings=[f"LLMJSONError:{exc}"],
+            completion=completion,
+            metadata={
+                "structured_output_local_recovery": "exhausted",
+                "main_agent_replan_recommended": False,
+                "database_write": False,
+            },
+        )
+
+    completion = build_completion_report(
+        task,
+        execution_status="succeeded",
+        contract_status="valid",
+        business_status="sufficient",
+        completion_status="completed",
+        expected_task_completed=True,
+        produced_information_slots=[
+            "entity_analysis",
+            "entity_analysis_uncertainty",
         ],
-        max_output_tokens=2600,
-        validator=validate,
-        operation=task.task_type,
-        repair_mode="targeted",
-        disable_thinking=False,
-        repair_guidance=(
-            "只修复 JSON 类型、对象字段、source_task_ids 和 completion_report 的结构一致性。"
-            "所有声明数组元素必须是对象，只能引用 allowed_source_task_ids，不得新增事实或来源。"
-            "completion_report 必须逐项覆盖 completion_contract.criteria，且不得输出流程控制字段。"
-        ),
+        limitations=[],
+        failure_kind="none",
+        report_source="runtime",
     )
-    completion = dict(analysis.get("completion_report") or {})
     authoritative_refs = _authoritative_entity_refs(task, evidence_items)
-    payload = {
-        "entity_refs": authoritative_refs or safe_public_value(analysis.get("entity_refs") or []),
+    entity_analysis_slot = {
+        "entity_refs": authoritative_refs or execution_safe_value(analysis.get("entity_refs") or []),
         "entity_catalog": _authoritative_entity_catalog(task, evidence_items),
-        "facts": safe_public_value(analysis.get("facts") or []),
-        "analysis": safe_public_value(analysis.get("analysis") or []),
-        "model_signals": safe_public_value(analysis.get("model_signals") or []),
-        "relation_interpretations": safe_public_value(
-            analysis.get("relation_interpretations") or []
-        ),
-        "uncertainties": safe_public_value(analysis.get("uncertainties") or []),
+        "facts": execution_safe_value(analysis.get("facts") or []),
+        "analysis": execution_safe_value(analysis.get("analysis") or []),
+        "uncertainties": execution_safe_value(analysis.get("uncertainties") or []),
         "conclusion": str(analysis.get("conclusion") or ""),
         "source_task_ids": sorted(known_source_task_ids),
-        "input_diagnostics": safe_public_value(input_diagnostics),
+    }
+    payload = {
+        **entity_analysis_slot,
+        "slots": {
+            "entity_analysis": entity_analysis_slot,
+            "entity_analysis_uncertainty": {
+                "entity_refs": entity_analysis_slot["entity_refs"],
+                "uncertainties": entity_analysis_slot["uncertainties"],
+                "source_task_ids": entity_analysis_slot["source_task_ids"],
+            },
+        },
+        "produced_information_slots": [
+            "entity_analysis",
+            "entity_analysis_uncertainty",
+        ],
     }
     return GraphWorkerResult(
         task_id=task.task_id,
         agent_id=task.assigned_agent,
-        status=(
-            ResultStatus.COMPLETED
-            if bool(completion.get("expected_task_completed"))
-            else ResultStatus.PARTIAL
-        ),
+        status=ResultStatus.COMPLETED,
         output_type="EntityAnalysisResult",
         payload_schema="entity_analysis_result.v1",
         payload=payload,
         data=payload,
         error=None,
         focus_refs=task.focus_refs,
-        summary=(
-            "已基于上游证据和结构化事实完成金融实体分析。"
-            if bool(completion.get("expected_task_completed"))
-            else "实体分析已返回结构化结果，但未满足全部预期任务条件。"
-        ),
+        summary="已基于上游证据和结构化事实完成金融实体分析。",
         findings=[
-            {
-                "kind": "entity_analysis_input_diagnostics",
-                **safe_public_value(input_diagnostics),
-            },
             {
                 "kind": "entity_analysis_output_diagnostics",
                 "fact_count": len(payload["facts"]),
                 "analysis_count": len(payload["analysis"]),
-                "model_signal_count": len(payload["model_signals"]),
-                "relation_interpretation_count": len(payload["relation_interpretations"]),
                 "uncertainty_count": len(payload["uncertainties"]),
                 "source_task_count": len(payload["source_task_ids"]),
-                "used_internal_source": bool(set(payload["source_task_ids"]).intersection(internal_source_task_ids)),
-                "used_evidence_source": bool(set(payload["source_task_ids"]).intersection(evidence_source_task_ids)),
             },
         ],
-        confidence=0.85 if bool(completion.get("expected_task_completed")) else 0.4,
+        confidence=0.85,
         completion=completion,
         metadata={
             "database_write": False,
             "source_task_ids": payload["source_task_ids"],
-            "compacted_upstream_payload": True,
-            "analysis_input_diagnostics_logged": True,
+            "bound_slot_projection": "execution_materialized_then_worker_compacted",
         },
     )
 

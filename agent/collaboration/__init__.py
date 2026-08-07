@@ -1,22 +1,34 @@
-"""Neo4j-backed single-entry financial Agent collaboration runtime.
+"""Capability-contract-driven financial Agent collaboration runtime.
 
-Imports are intentionally lazy so graph contracts remain usable by offline
-migration and validation scripts without requiring the LLM runtime.
+Imports are intentionally lazy so contract models remain usable by offline
+validation and migration tools without initializing the LLM runtime.
 """
 from __future__ import annotations
 
 from typing import Any
 
+from agent.capabilities import (
+    CapabilityBoundary,
+    CapabilityContract,
+    CapabilityTask,
+    ContractCompletionReport,
+    InputOutputBinding,
+    InputSlotRequirement,
+    OutputSlotGuarantee,
+    ResolvedCapabilityTask,
+)
+
+from .error_contracts import WorkerEscalation
+
 from .models import (
-    AgentCapabilityCard,
+    CapabilityExecutionTask,
     GraphAgentTask,
     GraphWorkerResult,
     MemoryUpdate,
     MissingContextItem,
     ResultStatus,
-    SessionMemoryItem,
+    SessionStateItem,
     TaskStatus,
-    WorkerTaskContract,
 )
 
 
@@ -46,15 +58,23 @@ def clear_financial_graph_agent_session(*args: Any, **kwargs: Any):
 
 
 __all__ = [
-    "AgentCapabilityCard",
+    "CapabilityBoundary",
+    "CapabilityContract",
+    "CapabilityExecutionTask",
+    "CapabilityTask",
+    "ContractCompletionReport",
     "GraphAgentTask",
     "GraphWorkerResult",
+    "InputOutputBinding",
+    "InputSlotRequirement",
     "MemoryUpdate",
     "MissingContextItem",
+    "OutputSlotGuarantee",
+    "ResolvedCapabilityTask",
     "ResultStatus",
-    "SessionMemoryItem",
+    "SessionStateItem",
     "TaskStatus",
-    "WorkerTaskContract",
+    "WorkerEscalation",
     "clear_financial_graph_agent_session",
     "execute_control_action",
     "execute_unified_agent_request",

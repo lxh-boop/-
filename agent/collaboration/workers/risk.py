@@ -90,7 +90,6 @@ def run_risk(
     llm_service: LLMService,
     tool_dag_runtime: WorkerToolDagRuntime,
     task: GraphAgentTask,
-    dependency_results: dict[str, dict[str, Any]],
     output_dir: str | Path,
     db_path: str | Path | None,
     *,
@@ -129,7 +128,7 @@ def run_risk(
     dag_result = tool_dag_runtime.run(
         worker_task_id=task.task_id,
         worker_role=task.assigned_agent,
-        worker_task_type=task.task_type,
+        boundary_id=task.boundary_id,
         worker_objective=task.objective,
         worker_prompt=worker_prompt,
         available_context=available_context,
@@ -236,7 +235,7 @@ def run_risk(
         ],
         max_output_tokens=3200,
         validator=validate,
-        operation=task.task_type,
+        operation=task.boundary_id,
         repair_mode="targeted",
         disable_thinking=False,
         repair_guidance=(

@@ -103,7 +103,7 @@ class RiskOperationAgent:
             },
             agent_type=AGENT_MAIN,
         )
-        result_dict = result.to_legacy_dict() if hasattr(result, "to_legacy_dict") else dict(result)
+        result_dict = result.to_dict() if hasattr(result, "to_dict") else dict(result)
         data = dict(result_dict.get("data") or {})
         result_dict = {
             **dict(result_dict),

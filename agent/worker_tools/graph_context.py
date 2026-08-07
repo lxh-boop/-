@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent.collaboration.agent_directory import DATABASE_WRITER
+from agent.collaboration.worker_directory import DATABASE_WRITER
 from agent.graph.provider_adapter import GraphProviderAdapter
 from agent.tool_runtime import (
     OP_SYSTEM,

@@ -17,6 +17,9 @@ from .contracts import (
     TOOL_VISIBILITY_SYSTEM_PRIVATE,
     TOOL_VISIBILITY_WORKER_PRIVATE,
     ToolDefinition,
+    ToolError,
+    ToolInputContract,
+    ToolOutputContract,
     UnifiedToolResult,
 )
 from .executor import ToolExecutor
@@ -44,6 +47,9 @@ __all__ = [
     "TOOL_VISIBILITY_SYSTEM_PRIVATE",
     "TOOL_VISIBILITY_WORKER_PRIVATE",
     "ToolDefinition",
+    "ToolError",
+    "ToolInputContract",
+    "ToolOutputContract",
     "ToolExecutor",
     "ToolRegistry",
     "UnifiedToolResult",

@@ -1,9 +1,4 @@
-"""Coordinator-facing facade for executing one assigned specialist task.
-
-This module owns Worker dispatch, common error handling, task-status transitions,
-and execution metadata. Domain behavior lives in ``agent.collaboration.workers``;
-this facade does not plan tasks, choose Workers, or expose private tools.
-"""
+"""Worker execution facade for the capability-contract runtime."""
 
 from __future__ import annotations
 
@@ -13,28 +8,23 @@ from typing import Any
 
 from core.llm import LLMService
 
-from agent.llm_audit import activate_llm_audit_context
-from agent.console_trace import get_llm_execution_timing, get_tool_execution_timing
-
+from agent.capabilities import CapabilityContract, CapabilityContractValidator
 from agent.communication import MessageType, publish_agent_message
-
+from agent.console_trace import flow_event, get_llm_execution_timing, get_tool_execution_timing
 from agent.graph.impact_service import GraphImpactService
 from agent.graph.provider_adapter import GraphProviderAdapter
+from agent.llm_audit import activate_llm_audit_context
+from agent.tool_dag import ToolDagExecutor, ToolDagValidator, WorkerToolDagPlanner, WorkerToolDagRuntime
 from agent.tool_runtime import ToolExecutor
-from agent.tool_dag import (
-    ToolDagExecutor,
-    ToolDagValidator,
-    WorkerToolDagPlanner,
-    WorkerToolDagRuntime,
-)
+from agent.runtime_state import RunSlotStore
 from agent.worker_tools import WorkerToolDirectory, build_worker_tool_registry
 
-from .completion import flow_decision, non_success_completion_report, runtime_completion_report
-from .agent_directory import (
-    AgentDirectory,
-    EVIDENCE_COLLECTOR,
-    ENTITY_ANALYST,
+from .context_projection import WorkerInputProjectionMiddleware
+from .worker_directory import (
+    CapabilityWorkerDirectory,
     DATABASE_WRITER,
+    ENTITY_ANALYST,
+    EVIDENCE_COLLECTOR,
     GRAPH_RELATION_RETRIEVER,
     PORTFOLIO_ANALYST,
     REPORT_WRITER,
@@ -42,8 +32,9 @@ from .agent_directory import (
     STRATEGY_GUARD,
     SYSTEM_DIAGNOSTIC,
 )
-from .models import AccessMode, GraphAgentTask, GraphWorkerResult, ResultStatus, TaskStatus
-from .worker_contracts import WorkerContractViolation
+from .error_contracts import escalation_from_worker_result
+from .completion import canonicalize_completion_report, flow_decision, non_success_completion_report, runtime_completion_report
+from .models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus, TaskStatus
 from .workers import (
     run_diagnostic,
     run_evidence,
@@ -58,39 +49,15 @@ from .workers import (
 from .workers.common import dependency_results as _dependency_results
 from .workers.common import refs_from_dependencies as _refs_from_dependencies
 from .workers.common import safe_public_value as _safe
-
-
-def _contract_violation_from_chain(exc: BaseException) -> WorkerContractViolation | None:
-    """Return a Worker contract violation wrapped by the LLM repair boundary.
-
-    ``LLMService.generate_json`` performs the Worker's single targeted repair and
-    raises ``LLMJSONError`` from the second validation exception when repair still
-    fails.  Keeping the original violation classification prevents a local output
-    repair failure from being misrouted as a MainAgent Worker-selection failure.
-    """
-
-    pending: list[BaseException] = [exc]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop(0)
-        marker = id(current)
-        if marker in seen:
-            continue
-        seen.add(marker)
-        if isinstance(current, WorkerContractViolation):
-            return current
-        for linked in (getattr(current, "__cause__", None), getattr(current, "__context__", None)):
-            if isinstance(linked, BaseException):
-                pending.append(linked)
-    return None
+from .workers.slot_inputs import missing_contract_required_slot_ids
 
 
 class SpecialistRuntime:
-    """Dispatch Worker tasks to domain-scoped executors.
+    """Execute one Worker-selected capability task.
 
-    The class remains the stable coordinator-facing facade. Worker implementation
-    details live in ``agent.collaboration.workers`` and retain the existing
-    GraphAgentTask/GraphWorkerResult contracts.
+    Worker selection is already complete.  This layer exposes only the assigned
+    Worker's private tools, resolves declared slot bindings, executes the domain
+    Worker and validates every contract in the task's contract list.
     """
 
     def __init__(
@@ -99,43 +66,49 @@ class SpecialistRuntime:
         llm_service: LLMService,
         provider: GraphProviderAdapter,
         impact_service: GraphImpactService,
-        directory: AgentDirectory | None = None,
+        slot_store: RunSlotStore,
+        directory: CapabilityWorkerDirectory | None = None,
     ) -> None:
         self.llm_service = llm_service
         self.provider = provider
         self.impact_service = impact_service
-        self.directory = directory or AgentDirectory()
-        self.worker_tool_registry = build_worker_tool_registry(provider=provider)
-        self.worker_tool_directory = WorkerToolDirectory(
-            self.worker_tool_registry
+        self.directory = directory or CapabilityWorkerDirectory()
+        self.input_projection = WorkerInputProjectionMiddleware(slot_store)
+        self.worker_tool_registry = build_worker_tool_registry(
+            provider=provider,
+            impact_service=impact_service,
         )
-        self.worker_tool_executor = ToolExecutor(
-            registry=self.worker_tool_registry
-        )
-        self.worker_tool_dag_validator = ToolDagValidator(
-            self.worker_tool_registry,
-            self.worker_tool_directory,
-        )
-        self.worker_tool_dag_planner = WorkerToolDagPlanner(
+        self.worker_tool_directory = WorkerToolDirectory(self.worker_tool_registry)
+        self.worker_tool_executor = ToolExecutor(registry=self.worker_tool_registry)
+        validator = ToolDagValidator(self.worker_tool_registry, self.worker_tool_directory)
+        planner = WorkerToolDagPlanner(
             llm_service=self.llm_service,
             directory=self.worker_tool_directory,
-            validator=self.worker_tool_dag_validator,
-        )
-        self.worker_tool_dag_executor = ToolDagExecutor(
-            self.worker_tool_executor,
-            max_parallel=4,
+            validator=validator,
         )
         self.worker_tool_dag_runtime = WorkerToolDagRuntime(
-            planner=self.worker_tool_dag_planner,
-            executor=self.worker_tool_dag_executor,
+            planner=planner,
+            executor=ToolDagExecutor(self.worker_tool_executor, max_parallel=4),
         )
+        self.contract_validator = CapabilityContractValidator()
+
+    @staticmethod
+    def _produced_slots(task: GraphAgentTask, result: GraphWorkerResult) -> list[str]:
+        data = dict(result.data or {}) if isinstance(result.data, dict) else {}
+        slots = [str(item) for item in data.get("produced_information_slots") or [] if str(item)]
+        if not slots and isinstance(data.get("slots"), dict):
+            slots = [str(key) for key in data["slots"]]
+        if not slots:
+            slots = [str(item) for item in result.metadata.get("produced_information_slots") or [] if str(item)]
+        if not slots and result.status in {ResultStatus.COMPLETED, ResultStatus.PROPOSAL_READY}:
+            slots = list(task.expected_output_slots)
+        return list(dict.fromkeys(slots))
 
     def run(
         self,
         task: GraphAgentTask,
         *,
         current_user_request: str,
-        dependency_results: dict[str, dict[str, Any]],
         output_dir: str | Path,
         db_path: str | Path | None,
         default_top_k: int,
@@ -143,6 +116,11 @@ class SpecialistRuntime:
         execution_context: dict[str, Any] | None = None,
     ) -> GraphWorkerResult:
         started = time.perf_counter()
+        context = dict(execution_context or {})
+        context.update({
+            "current_user_request": current_user_request,
+            "language": language,
+        })
         activate_llm_audit_context(
             run_id=task.run_id,
             conversation_id=task.session_id,
@@ -154,253 +132,269 @@ class SpecialistRuntime:
             agent_id=task.assigned_agent,
         )
         task.status = TaskStatus.RUNNING
-        resolved_inputs: dict[str, Any] = {}
-        task_contract = None
+        resolved_inputs, projected_inputs = self.input_projection.project(
+            task, execution_context=context
+        )
+        flow_event(
+            "WORKER_INPUT_PROJECTED",
+            {
+                "task_id": task.task_id,
+                "worker_id": task.worker_id,
+                "slot_ids": [item.slot_id for item in projected_inputs],
+                "upstream_value_refs": [item.value_ref for item in projected_inputs if item.value_ref],
+                "projection_mode": "slot_store_materialized",
+                "coordinator_summary_used_as_execution_input": False,
+            },
+            run_id=task.run_id,
+        )
 
-        # The registered contract owns required fields and completion-report
-        # structure. Planner metadata may enable stricter input binding, but it
-        # never decides whether completion semantics exist.
-        try:
-            card = self.directory.get(task.worker_id or task.assigned_agent)
-            task_contract = card.task_contract(task.task_type)
-        except KeyError:
-            card = None
-
-        if task_contract is not None:
-            task.completion_contract = self.directory.completion_contract_for_task(task)
-
-        try:
-            if task_contract is not None:
-                task_access = AccessMode.from_value(task_contract.access_mode)
-                goal_access = AccessMode.from_value(
-                    dict(task.metadata.get("goal_contract") or {}).get("access_mode")
-                )
-                if task_access == AccessMode.WRITE and goal_access != AccessMode.WRITE:
-                    raise WorkerContractViolation(
-                        "write_worker_not_authorized",
-                        "$.completion_contract.access_mode",
-                        task.worker_id or task.assigned_agent,
+        # Input sufficiency is a Runtime responsibility, not a Worker judgment.
+        # A Worker receives only the inputs that were actually bound to its
+        # CapabilityContract.  Missing contract-required bindings are stopped
+        # here before the domain Worker is invoked; unbound non-required slots
+        # are simply outside that Worker's world view.  Empty containers are
+        # valid bound values (e.g. explicit business_empty) and only None counts
+        # as absent.
+        missing_required = sorted(
+            missing_contract_required_slot_ids(task, resolved_inputs)
+        )
+        if missing_required:
+            task.status = TaskStatus.WAITING_CONTEXT
+            result = GraphWorkerResult(
+                task_id=task.task_id,
+                agent_id=task.assigned_agent,
+                status=ResultStatus.NEED_CONTEXT,
+                output_type="CapabilityResult",
+                data=None,
+                error={
+                    "error_id": "missing_context",
+                    "operation": task.objective or task.boundary_id,
+                    "reason": "CapabilityContract required input bindings are unavailable.",
+                },
+                focus_refs=task.focus_refs,
+                summary=(
+                    "Runtime未能绑定CapabilityContract要求的输入。"
+                    if language != "en"
+                    else "Runtime could not bind required CapabilityContract inputs."
+                ),
+                missing_items=[
+                    MissingContextItem(
+                        key=slot_id,
+                        description=f"CapabilityContract required input is not bound: {slot_id}",
+                        expected_format="Runtime SlotBinder input slot",
+                        searched_sources=["resolved_input_bindings", "resolved_inputs"],
                     )
-            if task_contract is not None and task.metadata.get("structured_worker_contract"):
-                self.directory.validate_task_contract(task)
-                resolved_inputs = self.directory.resolve_task_inputs(task, dependency_results)
+                    for slot_id in missing_required
+                ],
+                completion=non_success_completion_report(
+                    task,
+                    execution_status="need_context",
+                    reason="CapabilityContract required input bindings are unavailable.",
+                    failure_kind="missing_context",
+                ),
+            )
+            produced = self._produced_slots(task, result)
+            result.metadata.update({
+                "boundary_id": task.boundary_id,
+                "attempt": task.attempt,
+                "resolved_input_slots": sorted(resolved_inputs),
+                "produced_information_slots": produced,
+                "input_gate_owner": "runtime",
+            })
+            decision = flow_decision(
+                result.status,
+                result.completion,
+                output_type=result.output_type,
+                retryable=False,
+            )
+            result.status = decision.result_status
+            result.metadata.update({
+                "semantic_satisfied": decision.semantic_satisfied,
+                "should_freeze": decision.should_freeze,
+                "reusable": decision.reusable,
+                "replan_recommended": decision.replan_recommended,
+                "failure_kind": decision.failure_kind,
+                "freeze_reason": decision.freeze_reason,
+            })
+            return result
 
+        card = self.directory.get(task.worker_id or task.assigned_agent)
+        allowed_tools = list(task.metadata.get("allowed_tool_ids") or getattr(card, "private_tool_ids", []) or [])
+
+        try:
             if task.assigned_agent == EVIDENCE_COLLECTOR:
-                result = self._run_evidence(task, current_user_request, output_dir, db_path, default_top_k)
+                result = run_evidence(
+                    self.worker_tool_dag_runtime, task, current_user_request,
+                    output_dir, db_path, default_top_k,
+                    worker_prompt=str(card.private_worker_prompt or ""),
+                    allowed_tool_names=allowed_tools,
+                )
             elif task.assigned_agent == PORTFOLIO_ANALYST:
-                result = self._run_internal_system(task, output_dir, db_path, default_top_k)
+                result = run_internal_system(
+                    self.worker_tool_dag_runtime, task, output_dir, db_path, default_top_k,
+                    worker_prompt=str(card.private_worker_prompt or ""),
+                    allowed_tool_names=allowed_tools,
+                    provider=self.provider,
+                )
             elif task.assigned_agent == DATABASE_WRITER:
-                result = self._run_graph_context(task, resolved_inputs, output_dir, db_path)
+                result = run_graph_context(
+                    self.worker_tool_executor, task, output_dir, db_path,
+                    resolved_inputs=resolved_inputs,
+                )
             elif task.assigned_agent == ENTITY_ANALYST:
-                result = self._run_entity_analysis(task, dependency_results, resolved_inputs, language)
+                result = run_entity_analysis(
+                    self.llm_service, task,
+                    resolved_inputs=resolved_inputs, language=language,
+                )
             elif task.assigned_agent == GRAPH_RELATION_RETRIEVER:
-                result = self._run_graph_impact(task, dependency_results, resolved_inputs)
+                result = run_graph_impact(
+                    self.worker_tool_dag_runtime, task,
+                    resolved_inputs=resolved_inputs,
+                    worker_prompt=str(card.private_worker_prompt or ""),
+                    allowed_tool_names=allowed_tools,
+                    output_dir=output_dir,
+                    db_path=db_path,
+                )
             elif task.assigned_agent == RISK_ANALYST:
-                result = self._run_risk(
-                    task, dependency_results, resolved_inputs, output_dir, db_path, language
+                result = run_risk(
+                    self.llm_service, self.worker_tool_dag_runtime, task,
+                    output_dir, db_path,
+                    resolved_inputs=resolved_inputs,
+                    worker_prompt=str(card.private_worker_prompt or ""),
+                    allowed_tool_names=allowed_tools,
+                    language=language,
                 )
             elif task.assigned_agent == STRATEGY_GUARD:
-                result = self._run_strategy_guard(
-                    task,
+                result = run_strategy_guard(
+                    self.llm_service, task,
                     current_user_request=current_user_request,
-                    dependency_results=dependency_results,
+                    resolved_inputs=resolved_inputs,
                     output_dir=output_dir,
                     db_path=db_path,
                     default_top_k=default_top_k,
                     language=language,
-                    execution_context=execution_context,
+                    execution_context=context,
                 )
             elif task.assigned_agent == REPORT_WRITER:
-                result = self._run_report_writer(task, dependency_results, resolved_inputs, language)
-            elif task.assigned_agent == SYSTEM_DIAGNOSTIC:
-                result = self._run_diagnostic(task)
-            else:
-                result = GraphWorkerResult(
-                    task_id=task.task_id,
-                    agent_id=task.assigned_agent,
-                    status=ResultStatus.NOT_EXECUTED,
-                    output_type=task.expected_output_type,
-                    data=None,
-                    error={
-                        "code": "unknown_worker_agent",
-                        "message": f"Unsupported Worker agent: {task.assigned_agent}",
-                        "retryable": False,
-                    },
-                    focus_refs=task.focus_refs,
-                    summary=f"Unsupported Worker agent: {task.assigned_agent}",
-                    warnings=["unknown_worker_agent"],
+                result = run_report_writer(
+                    self.llm_service, task, language,
+                    resolved_inputs=resolved_inputs,
                 )
+            elif task.assigned_agent == SYSTEM_DIAGNOSTIC:
+                result = run_diagnostic(self.provider, task)
+            else:
+                raise RuntimeError(f"unknown_worker_agent:{task.assigned_agent}")
         except Exception as exc:
-            contract_violation = _contract_violation_from_chain(exc)
-            violation_code = str(getattr(contract_violation, "code", "") or "")
-            output_contract_failure = bool(
-                contract_violation is not None
-                and violation_code in {
-                    "report_output_validation_failed",
-                    "completion_report_version_mismatch",
-                    "completion_output_type_mismatch",
-                    "completion_report_unknown_information_slot",
-                    "completion_report_slot_overlap",
-                    "completion_report_slot_partition_incomplete",
-                    "completion_report_criteria_mismatch",
-                    "completed_report_requires_completed_status",
-                    "completed_report_cannot_have_missing_slots",
-                    "completed_report_requires_all_criteria",
-                    "incomplete_report_cannot_use_completed_status",
-                }
-            )
-            error_code = (
-                "worker_output_contract_failure"
-                if output_contract_failure
-                else "worker_contract_violation"
-                if contract_violation is not None
-                else "worker_execution_failed"
-            )
             result = GraphWorkerResult(
                 task_id=task.task_id,
                 agent_id=task.assigned_agent,
                 status=ResultStatus.FAILED,
-                output_type=task.expected_output_type,
+                output_type="CapabilityResult",
                 data=None,
                 error={
-                    "code": error_code,
+                    "code": "worker_execution_failed",
                     "message": str(exc),
                     "component": task.assigned_agent,
-                    "retryable": contract_violation is None,
+                    "retryable": True,
                 },
                 focus_refs=task.focus_refs,
-                summary=(
-                    "Worker 输入合同或专业数据链路执行失败。"
-                    if language != "en"
-                    else "The Worker input contract or specialist data path failed."
-                ),
+                summary="Worker 执行失败。" if language != "en" else "Worker execution failed.",
                 warnings=[f"{type(exc).__name__}:{exc}"],
-                metadata={"error_type": type(exc).__name__},
-                completion=(
-                    non_success_completion_report(
-                        task,
-                        execution_status="failed",
-                        reason=str(exc),
-                        failure_kind=(
-                            "worker_output_contract_failure"
-                            if output_contract_failure
-                            else "parameter_contract_failure"
-                            if contract_violation is not None
-                            else "worker_execution_failure"
-                        ),
-                    )
-                    if task_contract is not None
-                    else {}
+                completion=non_success_completion_report(
+                    task,
+                    execution_status="failed",
+                    reason=str(exc),
+                    failure_kind="worker_execution_failure",
                 ),
             )
 
-        if not result.output_type:
-            result.output_type = task.expected_output_type
-        result.metadata.setdefault("task_type", task.task_type)
-        result.metadata.setdefault("attempt", task.attempt)
-        result.metadata.setdefault("resolved_input_roles", sorted(resolved_inputs))
-        result.metadata.setdefault("completion_contract", dict(task.completion_contract or {}))
+        produced = self._produced_slots(task, result)
+        result.metadata.update({
+            "boundary_id": task.boundary_id,
+            "attempt": task.attempt,
+            "resolved_input_slots": sorted(resolved_inputs),
+            "produced_information_slots": produced,
+        })
+        if not result.completion:
+            result.completion = runtime_completion_report(
+                task,
+                result_status=result.status,
+                output_type=result.output_type,
+                data=result.data,
+                error=result.error,
+            )
 
-        if task_contract is not None:
-            if not result.completion:
-                if str(task_contract.completion_report_source or "runtime") == "runtime":
-                    result.completion = runtime_completion_report(
-                        task,
-                        task_contract,
-                        result_status=result.status,
-                        output_type=result.output_type,
-                        data=result.data,
-                        error=result.error,
-                    )
-                else:
-                    result.completion = non_success_completion_report(
-                        task,
-                        execution_status=(
-                            "need_context" if result.status == ResultStatus.NEED_CONTEXT
-                            else "blocked" if result.status == ResultStatus.BLOCKED
-                            else "failed"
-                        ),
-                        reason=result.summary or str((result.error or {}).get("message") or "Worker did not complete."),
-                        failure_kind=(
-                            "context_missing" if result.status == ResultStatus.NEED_CONTEXT
-                            else "upstream_worker_failed" if result.status == ResultStatus.BLOCKED
-                            else "completion_report_missing"
-                        ),
-                    )
-            try:
-                # Program rules validate shape and route flow. They do not infer
-                # business completion from summary text, list length, or values.
-                self.directory.validate_result(result, task_type=task.task_type)
-                if result.completion:
-                    decision = flow_decision(
-                        result.status,
-                        result.completion,
-                        output_type=result.output_type,
-                        retryable=bool((result.error or {}).get("retryable")),
-                    )
-                    result.status = decision.result_status
-                    result.metadata.update({
-                        "semantic_satisfied": decision.semantic_satisfied,
-                        "should_freeze": decision.should_freeze,
-                        "reusable": decision.reusable,
-                        "replan_recommended": decision.replan_recommended,
-                        "failure_kind": decision.failure_kind,
-                        "freeze_reason": decision.freeze_reason,
-                    })
-            except WorkerContractViolation as exc:
-                result = GraphWorkerResult(
-                    task_id=task.task_id,
-                    agent_id=task.assigned_agent,
-                    status=ResultStatus.FAILED,
-                    output_type=task.expected_output_type,
-                    data=None,
-                    error={
-                        "code": "worker_output_contract_failure",
-                        "message": str(exc),
-                        "component": task.assigned_agent,
-                        "retryable": False,
-                    },
-                    focus_refs=task.focus_refs,
-                    summary=(
-                        "Worker 返回结果不符合公开输出合同。"
-                        if language != "en"
-                        else "The Worker result does not satisfy its public output contract."
-                    ),
-                    warnings=[str(exc)],
-                    metadata={"completion_contract": dict(task.completion_contract or {})},
-                    completion=(
-                        non_success_completion_report(
-                            task,
-                            execution_status="failed",
-                            reason=str(exc),
-                            failure_kind="worker_output_contract_failure",
-                        )
-                        if task_contract is not None
-                        else {}
-                    ),
-                )
-
-        result.metadata.setdefault("duration_ms", round((time.perf_counter() - started) * 1000, 2))
-        result.metadata.setdefault(
-            "dependency_wait_ms",
-            round(float(task.metadata.get("dependency_wait_ms") or 0.0), 3),
+        contracts = [CapabilityContract.from_dict(item) for item in task.contracts]
+        contract_reports = self.contract_validator.validate(
+            contracts=contracts,
+            produced_slots=set(produced),
+            result_status=result.status.value,
+            result_payload=result.data,
+            evidence_refs=[ref.node_id for ref in result.evidence_refs] or [f"worker_result:{task.task_id}"],
         )
+        result.status, result.completion, satisfied = canonicalize_completion_report(
+            task,
+            result_status=result.status,
+            completion=result.completion,
+            contract_reports=contract_reports,
+            produced_slots=produced,
+            result_data=result.data,
+        )
+        if satisfied:
+            # Contract validation is authoritative. Clear stale local errors or
+            # limitations left by an unnecessary Tool-DAG replan.
+            result.error = None
+            result.missing_items = []
+            result.warnings = [
+                item for item in result.warnings
+                if not str(item).startswith((
+                    "worker_local_handling_exhausted",
+                    "worker_private_tool_exhausted",
+                ))
+            ]
+            if "未能完成" in result.summary or "failed" in result.summary.lower():
+                result.summary = "Worker已完成合同要求的信息槽位。"
+        decision = flow_decision(
+            result.status,
+            result.completion,
+            output_type=result.output_type,
+            retryable=bool((result.error or {}).get("retryable")),
+        )
+        result.status = decision.result_status
+        result.metadata.update({
+            "semantic_satisfied": decision.semantic_satisfied,
+            "should_freeze": decision.should_freeze,
+            "reusable": decision.reusable,
+            "replan_recommended": decision.replan_recommended,
+            "failure_kind": decision.failure_kind,
+            "freeze_reason": decision.freeze_reason,
+        })
+
+        escalation = escalation_from_worker_result(task, result)
+        if escalation is not None:
+            # Worker-local recovery is already exhausted at this point. Preserve
+            # whether the owning Worker considers a MainAgent-level retry useful
+            # before replacing the public error with the safe escalation contract.
+            result.metadata["worker_escalation_retryable"] = bool(
+                (result.error or {}).get("retryable")
+            )
+            # Private Tool/LLM details stay private. MainAgent receives only this
+            # capability-level error contract, never raw arguments or traces.
+            result.error = escalation.to_dict()
+            result.metadata["worker_escalation"] = escalation.to_dict()
+
+        result.metadata["duration_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
         llm_timing = get_llm_execution_timing(task.run_id, task.task_id)
         tool_timing = get_tool_execution_timing(task.run_id, task.task_id)
-        result.metadata.setdefault("llm_execution_timing", llm_timing)
-        result.metadata.setdefault("tool_execution_timing", tool_timing)
-        result.metadata.setdefault(
-            "unattributed_worker_execution_ms",
-            round(
-                max(
-                    0.0,
-                    float(result.metadata.get("duration_ms") or 0.0)
-                    - float(llm_timing.get("provider_transport_ms_sum") or 0.0)
-                    - float(tool_timing.get("wall_duration_ms") or 0.0),
-                ),
-                3,
-            ),
-        )
+        result.metadata["llm_execution_timing"] = llm_timing
+        result.metadata["tool_execution_timing"] = tool_timing
+        result.metadata["unattributed_worker_execution_ms"] = round(max(
+            0.0,
+            float(result.metadata["duration_ms"])
+            - float(llm_timing.get("provider_transport_ms_sum") or 0.0)
+            - float(tool_timing.get("wall_duration_ms") or 0.0),
+        ), 3)
+
         publish_agent_message(
             output_dir=output_dir,
             user_id=task.user_id,
@@ -413,176 +407,26 @@ class SpecialistRuntime:
             payload={
                 "status": result.status.value,
                 "output_type": result.output_type,
-                "payload_schema": result.payload_schema,
-                "payload_version": result.payload_version,
                 "summary": result.summary[:500],
-                "completion_status": str(result.completion.get("completion_status") or ""),
+                "boundary_id": task.boundary_id,
+                "produced_information_slots": produced,
                 "expected_task_completed": bool(result.completion.get("expected_task_completed")),
             },
-            payload_schema="worker_result_available.v1",
+            payload_schema="capability_worker_result_available.v1",
             context_refs=[ref.to_dict() for ref in result.focus_refs[:20]],
             artifact_refs=list(result.artifact_refs[:20]),
             source_refs=[ref.to_dict() for ref in result.evidence_refs[:20]],
             warnings=list(result.warnings[:10]),
             error=dict(result.error or {}),
-            metadata={"worker_id": task.worker_id, "task_type": task.task_type},
+            metadata={"worker_id": task.worker_id, "boundary_id": task.boundary_id},
         )
         task.status = (
-            TaskStatus.COMPLETED
-            if result.status in {ResultStatus.COMPLETED, ResultStatus.PROPOSAL_READY}
-            else TaskStatus.PARTIAL
-            if result.status == ResultStatus.PARTIAL
-            else TaskStatus.WAITING_CONTEXT
-            if result.status == ResultStatus.NEED_CONTEXT
+            TaskStatus.COMPLETED if result.status in {ResultStatus.COMPLETED, ResultStatus.PROPOSAL_READY}
+            else TaskStatus.PARTIAL if result.status == ResultStatus.PARTIAL
+            else TaskStatus.WAITING_CONTEXT if result.status == ResultStatus.NEED_CONTEXT
             else TaskStatus.FAILED
         )
         return result
 
-    def _run_evidence(
-        self,
-        task: GraphAgentTask,
-        query: str,
-        output_dir: str | Path,
-        db_path: str | Path | None,
-        default_top_k: int,
-    ) -> GraphWorkerResult:
-        card = self.directory.get(task.worker_id or task.assigned_agent)
-        return run_evidence(
-            self.worker_tool_dag_runtime,
-            task,
-            query,
-            output_dir,
-            db_path,
-            default_top_k,
-            worker_prompt=card.private_worker_prompt,
-            allowed_tool_names=card.private_tools_for(task.task_type),
-        )
 
-    def _run_entity_analysis(
-        self,
-        task: GraphAgentTask,
-        dependency_results: dict[str, dict[str, Any]],
-        resolved_inputs: dict[str, Any],
-        language: str,
-    ) -> GraphWorkerResult:
-        return run_entity_analysis(
-            self.llm_service,
-            task,
-            dependency_results,
-            resolved_inputs=resolved_inputs,
-            language=language,
-        )
-
-    def _run_internal_system(
-        self,
-        task: GraphAgentTask,
-        output_dir: str | Path,
-        db_path: str | Path | None,
-        default_top_k: int,
-    ) -> GraphWorkerResult:
-        return run_internal_system(
-            self.worker_tool_executor,
-            task,
-            output_dir,
-            db_path,
-            default_top_k,
-            provider=self.provider,
-        )
-
-    def _run_graph_context(
-        self,
-        task: GraphAgentTask,
-        resolved_inputs: dict[str, Any],
-        output_dir: str | Path,
-        db_path: str | Path | None,
-    ) -> GraphWorkerResult:
-        return run_graph_context(
-            self.worker_tool_executor,
-            task,
-            output_dir,
-            db_path,
-            resolved_inputs=resolved_inputs,
-        )
-
-    def _run_graph_impact(
-        self,
-        task: GraphAgentTask,
-        dependency_results: dict[str, dict[str, Any]],
-        resolved_inputs: dict[str, Any],
-    ) -> GraphWorkerResult:
-        return run_graph_impact(
-            self.impact_service, task, dependency_results, resolved_inputs
-        )
-
-    def _run_risk(
-        self,
-        task: GraphAgentTask,
-        dependency_results: dict[str, dict[str, Any]],
-        resolved_inputs: dict[str, Any],
-        output_dir: str | Path,
-        db_path: str | Path | None,
-        language: str,
-    ) -> GraphWorkerResult:
-        card = self.directory.get(task.worker_id or task.assigned_agent)
-        return run_risk(
-            self.llm_service,
-            self.worker_tool_dag_runtime,
-            task,
-            dependency_results,
-            output_dir,
-            db_path,
-            resolved_inputs=resolved_inputs,
-            worker_prompt=card.private_worker_prompt,
-            allowed_tool_names=card.private_tools_for(task.task_type),
-            language=language,
-        )
-
-    def _run_strategy_guard(
-        self,
-        task: GraphAgentTask,
-        *,
-        current_user_request: str,
-        dependency_results: dict[str, dict[str, Any]],
-        output_dir: str | Path,
-        db_path: str | Path | None,
-        default_top_k: int,
-        language: str,
-        execution_context: dict[str, Any] | None,
-    ) -> GraphWorkerResult:
-        return run_strategy_guard(
-            self.llm_service,
-            task,
-            current_user_request=current_user_request,
-            dependency_results=dependency_results,
-            output_dir=output_dir,
-            db_path=db_path,
-            default_top_k=default_top_k,
-            language=language,
-            execution_context=execution_context,
-        )
-
-    def _run_report_writer(
-        self,
-        task: GraphAgentTask,
-        dependency_results: dict[str, dict[str, Any]],
-        resolved_inputs: dict[str, Any],
-        language: str,
-    ) -> GraphWorkerResult:
-        return run_report_writer(
-            self.llm_service,
-            task,
-            dependency_results,
-            language,
-            resolved_inputs=resolved_inputs,
-        )
-
-    def _run_diagnostic(self, task: GraphAgentTask) -> GraphWorkerResult:
-        return run_diagnostic(self.provider, task)
-
-
-__all__ = [
-    "SpecialistRuntime",
-    "_dependency_results",
-    "_refs_from_dependencies",
-    "_safe",
-]
+__all__ = ["SpecialistRuntime", "_dependency_results", "_refs_from_dependencies", "_safe"]

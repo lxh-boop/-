@@ -144,6 +144,3 @@ def execute_confirmed_plan_v2(
     _publish_approval_result(result_summary_payload(result), intent=intent, result=result)
     return result
 
-
-def execute_confirmed_plan_legacy_dict(*args: Any, **kwargs: Any) -> dict[str, Any]:
-    return execute_confirmed_plan_v2(*args, **kwargs).to_legacy_dict()

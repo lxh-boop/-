@@ -1,5 +1,3 @@
-from agent.orchestration.multi_task_executor import (
-    execute_multi_intent_plan,
-)
+"""Runtime support modules used by the V21 execution path."""
 
-__all__ = ["execute_multi_intent_plan"]
+__all__: list[str] = []

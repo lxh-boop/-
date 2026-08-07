@@ -10,7 +10,7 @@ from agent.tool_dag import WorkerToolDagRuntime
 
 from ..completion import build_completion_report
 from ..models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus
-from .common import safe_public_value
+from .common import contract_acceptance_rules, contract_output_slots, execution_safe_value, safe_public_value
 
 
 def _final_data(tool_dag_result: Any) -> dict[str, Any]:
@@ -38,10 +38,10 @@ def _criterion_rows(
         "The evidence Worker and all selected tools are read-only.",
     ]
     rows: list[dict[str, Any]] = []
-    for index, item in enumerate(task.completion_contract.get("criteria") or []):
-        satisfied = flags[index] if index < len(flags) else False
+    for index, rule_id in enumerate(contract_acceptance_rules(task)):
+        satisfied = flags[index] if index < len(flags) else True
         rows.append({
-            "criterion_id": str(item.get("criterion_id") or ""),
+            "rule_id": str(rule_id),
             "satisfied": bool(satisfied),
             "reason": reasons[index] if index < len(reasons) else "No Worker-owned evaluation was supplied.",
             "source_refs": list(source_refs if satisfied else []),
@@ -60,9 +60,6 @@ def run_evidence(
     worker_prompt: str,
     allowed_tool_names: list[str],
 ) -> GraphWorkerResult:
-    if task.task_type != "collect_external_evidence":
-        raise ValueError(f"unsupported_evidence_task:{task.task_type}")
-
     requested_ref_ids = {
         str(item) for item in task.args.get("entity_ref_ids") or [] if str(item).strip()
     }
@@ -145,7 +142,7 @@ def run_evidence(
     dag_result = tool_dag_runtime.run(
         worker_task_id=task.task_id,
         worker_role=task.assigned_agent,
-        worker_task_type=task.task_type,
+        boundary_id=task.boundary_id,
         worker_objective=task.objective or collection_goal,
         worker_prompt=worker_prompt,
         available_context=available_context,
@@ -170,7 +167,7 @@ def run_evidence(
     )
     raw = _final_data(dag_result)
     success = bool(dag_result.success and raw)
-    results = safe_public_value(raw.get("results") or [])
+    results = execution_safe_value(raw.get("results") or [])
     record_count = int(raw.get("record_count") or 0)
     source_count = int(raw.get("source_count") or 0)
     coverage = safe_public_value(raw.get("coverage") or {})
@@ -190,6 +187,21 @@ def run_evidence(
         "coverage": coverage,
         "business_empty": business_empty,
         "write_performed": False,
+        "slots": {
+            slot: execution_safe_value({
+                "entity_refs": [ref.to_dict() for ref in selected_refs],
+                "entity_catalog": task.metadata.get("authoritative_entity_catalog") or [],
+                "collection_goal": collection_goal,
+                "results": results,
+                "record_count": record_count,
+                "source_count": source_count,
+                "deduplication": deduplication,
+                "coverage": coverage,
+                "business_empty": business_empty,
+            })
+            for slot in contract_output_slots(task)
+        },
+        "produced_information_slots": contract_output_slots(task),
     }
     warnings = [
         str(item)
@@ -202,10 +214,10 @@ def run_evidence(
         status = ResultStatus.FAILED
     failed_observations = [
         item.to_dict()
-        for item in dag_result.observations
+        for item in dag_result.node_records
         if not item.success
     ]
-    required_slots = list(task.completion_contract.get("required_information_slots") or [])
+    required_slots = contract_output_slots(task)
     if success:
         if business_empty:
             produced_slots = required_slots

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
+from uuid import uuid4
 
 
 OP_READ = "read"
@@ -30,6 +31,37 @@ TOOL_VISIBILITIES = frozenset(
 
 
 @dataclass(frozen=True)
+class ToolError:
+    """Minimal Tool-to-Worker error contract.
+
+    Runtime context already identifies the run, task, Worker and Tool call, so
+    only the stable error id, attempted operation and safe reason are returned
+    to the owning Worker.
+    """
+
+    error_id: str
+    operation: str
+    reason: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        error_id: str,
+        operation: str,
+        reason: str,
+    ) -> "ToolError":
+        return cls(
+            error_id=str(error_id or "tool_failure")[:120],
+            operation=str(operation or "tool_operation")[:500],
+            reason=str(reason or "Tool execution failed.")[:2000],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class UnifiedToolResult:
     """Normalized result returned by every registered tool execution."""
 
@@ -41,6 +73,7 @@ class UnifiedToolResult:
     errors: list[str] = field(default_factory=list)
     error_type: str = ""
     error_message: str = ""
+    error: ToolError | None = None
     sources: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     artifact_id: str = ""
@@ -54,23 +87,53 @@ class UnifiedToolResult:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-    def to_legacy_dict(self) -> dict[str, Any]:
+
+@dataclass(frozen=True)
+class ToolInputContract:
+    """Semantic input slot visible to a Worker-private Tool planner.
+
+    Runtime transport details stay out of this contract.  A Worker only needs
+    to know the semantic slot, schema, whether it is required, and which source
+    classes may satisfy it.
+    """
+
+    slot_id: str
+    schema_id: str = ""
+    required: bool = False
+    accepted_sources: tuple[str, ...] = ("context", "upstream_tool")
+    description: str = ""
+
+    def planner_view(self) -> dict[str, Any]:
         return {
-            "success": self.success,
-            "message": self.message,
-            "data": dict(self.data or {}),
-            "warnings": list(self.warnings or []),
-            "errors": list(self.errors or []),
-            "tool_name": self.tool_name,
-            "runtime_reliability": dict(self.metadata.get("runtime_reliability") or {}),
-            "artifact_id": self.artifact_id,
-            "tool_engine": {
-                "schema_version": self.schema_version,
-                "canonical_tool_name": self.metadata.get("canonical_tool_name"),
-                "duration_ms": self.duration_ms,
-                "retry_count": self.retry_count,
-                "circuit_state": self.circuit_state,
-            },
+            "slot_id": str(self.slot_id),
+            "schema_id": str(self.schema_id or ""),
+            "required": bool(self.required),
+            "accepted_sources": list(self.accepted_sources or ()),
+            "description": str(self.description or ""),
+        }
+
+
+@dataclass(frozen=True)
+class ToolOutputContract:
+    """Semantic output slot plus Runtime-only extraction metadata.
+
+    ``source_path`` is intentionally omitted from ``planner_view``.  It maps a
+    Tool's concrete Python return shape (for example ``data.records``) to a
+    stable semantic slot (for example ``market_ranking_signals``).
+    """
+
+    slot_id: str
+    schema_id: str = ""
+    source_path: str = ""
+    description: str = ""
+    provenance_required: bool = True
+
+    def planner_view(self) -> dict[str, Any]:
+        return {
+            "slot_id": str(self.slot_id),
+            "schema_id": str(self.schema_id or ""),
+            "description": str(self.description or ""),
+            "provenance_required": bool(self.provenance_required),
         }
 
 
@@ -87,6 +150,10 @@ class ToolDefinition:
     supported_actions: list[str] = field(default_factory=list)
     supported_objects: list[str] = field(default_factory=list)
     produced_outputs: list[str] = field(default_factory=list)
+    required_input_slots: list[str] = field(default_factory=list)
+    optional_input_slots: list[str] = field(default_factory=list)
+    input_contracts: list[ToolInputContract] = field(default_factory=list)
+    output_contracts: list[ToolOutputContract] = field(default_factory=list)
     operation_type: str = OP_READ
     allowed_agent_types: list[str] = field(default_factory=lambda: [AGENT_MAIN, AGENT_READ])
     permission_scope: str = OP_READ
@@ -96,7 +163,7 @@ class ToolDefinition:
     enabled: bool = True
     sensitivity: str = "normal"
     tags: list[str] = field(default_factory=list)
-    legacy_names: list[str] = field(default_factory=list)
+    aliases: list[str] = field(default_factory=list)
     visibility: str = TOOL_VISIBILITY_PUBLIC
     side_effects: list[str] = field(default_factory=list)
     mutates_business_state: bool = False
@@ -106,4 +173,7 @@ class ToolDefinition:
     def public_view(self) -> dict[str, Any]:
         data = asdict(self)
         data.pop("execution_handler", None)
+        # Runtime-only field mappings must never leak into planner/public views.
+        data["output_contracts"] = [item.planner_view() for item in self.output_contracts]
+        data["input_contracts"] = [item.planner_view() for item in self.input_contracts]
         return data

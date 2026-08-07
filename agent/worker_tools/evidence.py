@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 import hashlib
 
-from agent.collaboration.agent_directory import EVIDENCE_COLLECTOR
+from agent.collaboration.worker_directory import EVIDENCE_COLLECTOR
 from agent.graph.contracts import GraphNodeKind, GraphRef, refs_from
 from agent.graph.provider_adapter import GraphProviderAdapter
 from agent.services.evidence_service import EvidenceService

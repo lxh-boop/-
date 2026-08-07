@@ -1,157 +1,125 @@
-"""Retrieve auditable financial-graph relations without business interpretation."""
+"""Execute W03 graph-relation retrieval through its private Tool DAG.
+
+The Worker sees only SlotBinder-materialized inputs. Tool compatibility is
+resolved from required input slots; entity count is never used as a task type.
+"""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
-from agent.graph.contracts import GraphNodeKind, GraphRef, refs_from
-from agent.graph.impact_service import GraphImpactService
+from agent.tool_dag import WorkerToolDagRuntime
 
-from ..models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus
-from .common import refs_from_dependencies, safe_public_value
-
-
-def _unique_refs(refs: list[GraphRef]) -> list[GraphRef]:
-    return refs_from([ref.to_dict() for ref in refs])
+from ..completion import runtime_completion_report
+from ..models import GraphAgentTask, GraphWorkerResult, ResultStatus
+from .common import contract_acceptance_rules, contract_output_slots, execution_safe_value
 
 
-def _direct_refs(
-    task: GraphAgentTask,
-    *,
-    arg_name: str,
-    allowed_roles: set[str],
-) -> list[GraphRef]:
-    requested_ids = {
-        str(item).strip()
-        for item in task.args.get(arg_name) or []
-        if str(item).strip()
-    }
-    candidates = task.focus_refs + task.context_refs
-    if requested_ids:
-        return [ref for ref in candidates if ref.node_id in requested_ids]
-    return [ref for ref in candidates if str(ref.role or "") in allowed_roles]
+def _publish_slots(task: GraphAgentTask, dag_result: Any) -> tuple[dict[str, Any], list[str], list[str]]:
+    wanted = set(contract_output_slots(task))
+    slots: dict[str, Any] = {}
+    warnings: list[str] = []
+    for tool_result in list(getattr(dag_result, "final_results", []) or []):
+        data = dict(getattr(tool_result, "data", {}) or {})
+        tool_slots = data.get("slots") if isinstance(data.get("slots"), dict) else {}
+        for slot_id, value in tool_slots.items():
+            if slot_id in wanted:
+                slots[str(slot_id)] = execution_safe_value(value)
+        warnings.extend(str(item) for item in getattr(tool_result, "warnings", []) or [] if str(item))
+        warnings.extend(str(item) for item in getattr(tool_result, "errors", []) or [] if str(item))
+    produced = [slot for slot in contract_output_slots(task) if slot in slots]
+    missing = [slot for slot in contract_output_slots(task) if slot not in slots]
+    return slots, produced, list(dict.fromkeys([*warnings, *missing]))
 
 
 def run_graph_impact(
-    impact_service: GraphImpactService,
+    tool_dag_runtime: WorkerToolDagRuntime,
     task: GraphAgentTask,
-    dependency_results: dict[str, dict[str, Any]],
-    resolved_inputs: dict[str, Any] | None = None,
+    *,
+    resolved_inputs: dict[str, Any] | None,
+    worker_prompt: str,
+    allowed_tool_names: list[str],
+    output_dir: str | Path,
+    db_path: str | Path | None,
 ) -> GraphWorkerResult:
-    if task.task_type != "retrieve_financial_relations":
-        raise ValueError(f"unsupported_relation_task:{task.task_type}")
-
-    source_task_ids = task.input_task_ids("source_graph_context")
-    target_task_ids = task.input_task_ids("target_graph_context")
-
-    source_refs = _direct_refs(
-        task,
-        arg_name="source_ref_ids",
-        allowed_roles={"source", "cause", "event"},
-    )
-    target_refs = _direct_refs(
-        task,
-        arg_name="target_ref_ids",
-        allowed_roles={"target", "impact_target", "portfolio", "holding"},
-    )
-
-    if source_task_ids:
-        source_refs.extend(
-            refs_from_dependencies(
-                {
-                    task_id: dependency_results[task_id]
-                    for task_id in source_task_ids
-                    if task_id in dependency_results
-                },
-                kinds={GraphNodeKind.EVIDENCE, GraphNodeKind.ASSERTION, GraphNodeKind.OBJECT},
-            )
-        )
-    if target_task_ids:
-        target_refs.extend(
-            refs_from_dependencies(
-                {
-                    task_id: dependency_results[task_id]
-                    for task_id in target_task_ids
-                    if task_id in dependency_results
-                },
-                kinds={GraphNodeKind.EVIDENCE, GraphNodeKind.ASSERTION, GraphNodeKind.OBJECT},
-            )
-        )
-
-    source_refs = _unique_refs(source_refs)
-    target_refs = _unique_refs(target_refs)
-    missing: list[MissingContextItem] = []
-    if not source_refs:
-        missing.append(
-            MissingContextItem(
-                key="source_graph_context",
-                description="缺少关系查找的来源图对象集合。",
-                expected_format="source_ref_ids 或声明的上游图上下文",
-                searched_sources=["task refs", "task.args.source_ref_ids", "declared upstream results"],
-            )
-        )
-    if not target_refs:
-        missing.append(
-            MissingContextItem(
-                key="target_graph_context",
-                description="缺少关系查找的目标图对象集合。",
-                expected_format="target_ref_ids 或声明的上游图上下文",
-                searched_sources=["task refs", "task.args.target_ref_ids", "declared upstream results"],
-            )
-        )
-    if missing:
-        return GraphWorkerResult(
-            task_id=task.task_id,
-            agent_id=task.assigned_agent,
-            status=ResultStatus.NEED_CONTEXT,
-            output_type="GraphRelationResult",
-            data=None,
-            error=None,
-            focus_refs=task.focus_refs,
-            summary="金融图关系查找缺少来源或目标图上下文。",
-            missing_items=missing,
-        )
-
-    paths = impact_service.find_relation_paths(
-        source_refs=source_refs,
-        target_refs=target_refs,
-        as_of_time=task.as_of_time,
-    )
-    summary = impact_service.summarize_relations(paths)
-    payload = {
-        "source_task_ids": source_task_ids,
-        "target_task_ids": target_task_ids,
-        "source_refs": [ref.to_dict() for ref in source_refs],
-        "target_refs": [ref.to_dict() for ref in target_refs],
-        "relation_paths": [path.to_dict() for path in paths],
-        "relation_summary": safe_public_value(summary),
+    available_context = {
+        str(key): execution_safe_value(value)
+        for key, value in dict(resolved_inputs or {}).items()
+        if value is not None
     }
-    return GraphWorkerResult(
+    required_outputs = contract_output_slots(task)
+    dag_result = tool_dag_runtime.run(
+        worker_task_id=task.task_id,
+        worker_role=task.assigned_agent,
+        boundary_id=task.boundary_id,
+        worker_objective=task.objective,
+        worker_prompt=worker_prompt,
+        available_context=available_context,
+        required_output_keys=required_outputs,
+        completion_criteria=contract_acceptance_rules(task),
+        allowed_tool_names=list(allowed_tool_names),
+        execution_context={
+            "user_id": task.user_id,
+            "conversation_id": task.session_id,
+            "session_id": task.session_id,
+            "run_id": task.run_id,
+            "task_id": task.task_id,
+            "agent_role": task.assigned_agent,
+            "output_dir": output_dir,
+            "db_path": db_path,
+        },
+        read_only=True,
+        max_replans=1,
+    )
+    slots, produced, warnings = _publish_slots(task, dag_result)
+    success = bool(dag_result.success and len(produced) == len(required_outputs))
+    status = ResultStatus.COMPLETED if success else ResultStatus.PARTIAL if produced else ResultStatus.FAILED
+    data = {
+        "slots": slots,
+        "produced_information_slots": produced,
+        "missing_information_slots": [slot for slot in required_outputs if slot not in produced],
+        "business_empty": bool(produced and all(
+            isinstance(value, dict) and value.get("business_empty") is True
+            for value in slots.values()
+        )),
+    }
+    result = GraphWorkerResult(
         task_id=task.task_id,
         agent_id=task.assigned_agent,
-        status=ResultStatus.COMPLETED,
-        output_type="GraphRelationResult",
-        payload_schema="graph_relation_result.v1",
-        payload=payload,
-        data=payload,
-        error=None,
-        focus_refs=[*source_refs, *target_refs],
+        status=status,
+        output_type="CapabilityResult",
+        payload_schema="capability_result.v1",
+        payload=data if produced else None,
+        data=data if produced else None,
+        error=None if produced else {
+            "code": "graph_relation_tool_dag_failed",
+            "message": "W03 private Tool DAG did not publish the promised relation slots.",
+            "component": task.assigned_agent,
+            "retryable": True,
+        },
+        focus_refs=task.focus_refs,
         summary=(
-            f"已找到 {len(paths)} 条可追踪金融图关系路径。"
-            if paths
-            else "当前金融图中未找到符合条件的关系路径。"
+            "已通过W03私有Tool DAG读取图关系信息。"
+            if produced else "图关系读取未产生合同承诺的Slot。"
         ),
-        findings=[{"kind": "financial_relation_paths", **safe_public_value(summary)}],
-        graph_path_refs=paths,
-        evidence_refs=[ref for ref in source_refs if ref.node_kind == GraphNodeKind.EVIDENCE],
-        confidence=max((path.confidence for path in paths), default=0.0),
-        warnings=[] if paths else ["business_result_empty:no_financial_relation_path"],
+        findings=[{"kind": "capability_slots", "slots": produced}],
+        confidence=1.0 if success else 0.6 if produced else 0.0,
+        warnings=warnings,
         metadata={
-            "relation_retrieval_only": True,
-            "business_interpretation": False,
-            "business_result_empty": not bool(paths),
+            "boundary_id": task.boundary_id,
+            "tool_dag_task_count": len(getattr(getattr(dag_result, "plan", None), "tasks", []) or []),
+            "produced_information_slots": produced,
         },
     )
+    result.completion = runtime_completion_report(
+        task,
+        result_status=result.status,
+        output_type=result.output_type,
+        data=result.data,
+        error=result.error,
+    )
+    return result
 
 
 __all__ = ["run_graph_impact"]
