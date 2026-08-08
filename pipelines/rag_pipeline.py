@@ -8,6 +8,7 @@ from typing import Any
 from database.repositories import NewsRepository
 from pipelines.schemas import PipelineContext, PipelineStatus, RAGPipelineResult
 from rag.hybrid_retriever import HybridRetriever
+from rag.index_store import load_hybrid_index
 from rag.retrieval_logger import RetrievalLogger
 from rag.schemas import RagChunk
 from scoring.schemas import ModelPredictionSignal, NewsEvidenceSignal
@@ -109,13 +110,41 @@ def run_rag_pipeline(
             retrieval_ids=[],
         )
 
-    chunk_objects = [chunk if isinstance(chunk, RagChunk) else RagChunk.from_mapping(chunk) for chunk in (chunks if chunks is not None else _load_chunks(context))]
-    retriever = (retriever or HybridRetriever()).build_index(chunk_objects)
+    warnings: list[str] = []
+    retrieval_backend = ""
+    if retriever is not None:
+        if chunks is not None:
+            chunk_objects = [
+                chunk if isinstance(chunk, RagChunk) else RagChunk.from_mapping(chunk)
+                for chunk in chunks
+            ]
+            retriever = retriever.build_index(chunk_objects)
+        retrieval_backend = "injected_retriever"
+    elif chunks is not None:
+        chunk_objects = [
+            chunk if isinstance(chunk, RagChunk) else RagChunk.from_mapping(chunk)
+            for chunk in chunks
+        ]
+        retriever = HybridRetriever().build_index(chunk_objects)
+        retrieval_backend = "in_memory_explicit_chunks"
+    else:
+        output_root = Path(context.output_dir or "outputs")
+        index_dir = output_root / "rag_indexes"
+        try:
+            retriever = load_hybrid_index(index_dir)
+            retrieval_backend = "persisted_production_index"
+        except Exception as exc:
+            # Compatibility fallback keeps old installations usable, but records
+            # that the production persisted index was unavailable.
+            chunk_objects = _load_chunks(context)
+            retriever = HybridRetriever().build_index(chunk_objects)
+            retrieval_backend = "in_memory_db_fallback"
+            warnings.append(f"persisted RAG index unavailable; used DB fallback: {exc}")
+
     logger = RetrievalLogger(context.db_path)
     evidence: list[NewsEvidenceSignal] = []
     retrieval_ids: list[str] = []
     errors: list[str] = []
-    warnings: list[str] = []
     worker_count = _resolve_rag_workers(max_workers, len(predictions))
 
     if worker_count <= 1:
@@ -165,7 +194,7 @@ def run_rag_pipeline(
     status = PipelineStatus.FAILED if errors and not retrieval_ids else PipelineStatus.SUCCESS
     return RAGPipelineResult(
         status=status,
-        message=f"Retrieved {len(evidence)} RAG evidence items.",
+        message=f"Retrieved {len(evidence)} RAG evidence items via {retrieval_backend}.",
         input_count=len(predictions),
         output_count=len(evidence),
         errors=errors,

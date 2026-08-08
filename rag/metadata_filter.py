@@ -46,8 +46,11 @@ def metadata_matches(
         if str(filter_obj.stock_name) not in text:
             return False
 
-    if filter_obj.industry and filter_obj.industry not in {item.industry, meta.get("industry")}:
-        return False
+    if filter_obj.industry:
+        industries = {str(item.industry or ""), str(meta.get("industry") or "")}
+        industries.update(str(v) for v in ensure_list(meta.get("industries")) if str(v).strip())
+        if str(filter_obj.industry) not in industries:
+            return False
 
     if filter_obj.concept:
         concepts = [str(v) for v in ensure_list(meta.get("concept") or meta.get("concepts"))]

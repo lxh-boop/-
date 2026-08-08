@@ -21,6 +21,27 @@ def split_chinese_sentences(text: str) -> list[str]:
     return parts or [text]
 
 
+def _split_oversize_text(text: str, max_chars: int, overlap_chars: int) -> list[str]:
+    text = clean_text(text)
+    if not text:
+        return []
+    limit = max(1, int(max_chars))
+    overlap = max(0, min(int(overlap_chars), limit - 1))
+    if len(text) <= limit:
+        return [text]
+    step = max(1, limit - overlap)
+    pieces: list[str] = []
+    start = 0
+    while start < len(text):
+        piece = clean_text(text[start : start + limit])
+        if piece:
+            pieces.append(piece)
+        if start + limit >= len(text):
+            break
+        start += step
+    return pieces
+
+
 def build_sentence_chunks(
     sentences: list[str],
     max_chars: int = 700,
@@ -32,23 +53,47 @@ def build_sentence_chunks(
         sentence = clean_text(sentence)
         if not sentence:
             continue
-        if current and len(current) + len(sentence) > max_chars:
-            chunks.append(current)
-            current = current[-overlap_chars:] if overlap_chars > 0 else ""
-        current = clean_text(f"{current}{sentence}")
+        sentence_parts = _split_oversize_text(sentence, max_chars=max_chars, overlap_chars=overlap_chars)
+        for part in sentence_parts:
+            if current and len(current) + len(part) > max_chars:
+                chunks.append(current)
+                current = current[-overlap_chars:] if overlap_chars > 0 else ""
+            current = clean_text(f"{current}{part}")
+            if len(current) >= max_chars:
+                chunks.append(current[:max_chars])
+                current = current[max(0, max_chars - overlap_chars) :] if overlap_chars > 0 else ""
     if current:
         chunks.append(current)
-    return chunks
+    # Defensive invariant: no active RAG chunk may exceed the configured limit.
+    normalized: list[str] = []
+    for chunk in chunks:
+        normalized.extend(_split_oversize_text(chunk, max_chars=max_chars, overlap_chars=overlap_chars))
+    return normalized
 
 
 def _base_metadata(item: dict[str, Any]) -> dict[str, Any]:
     stock_codes = item.get("stock_codes", item.get("stock_code", []))
+    normalized_codes = [
+        str(code).split(".")[0].zfill(6)
+        for code in ensure_list(stock_codes)
+        if str(code or "").strip()
+    ]
+    entities = item.get("entities") or []
+    if not isinstance(entities, list):
+        entities = ensure_list(entities)
+    title = str(item.get("title") or "")
     return {
-        "news_id": str(item.get("news_id") or stable_id(item.get("title"), item.get("publish_time"), prefix="news_")),
+        "news_id": str(item.get("news_id") or stable_id(title, item.get("publish_time"), prefix="news_")),
+        "title": title,
         "source": str(item.get("source") or ""),
         "publish_time": str(item.get("publish_time") or ""),
         "trade_date": str(item.get("trade_date") or ""),
-        "stock_codes": [str(code).split(".")[0].zfill(6) for code in ensure_list(stock_codes)],
+        "stock_codes": list(dict.fromkeys(normalized_codes)),
+        "entities": [
+            dict(entity) if isinstance(entity, dict) else {"type": "entity", "name": str(entity)}
+            for entity in entities
+            if entity not in [None, ""]
+        ],
         "industry": str(item.get("industry") or ""),
         "event_type": str(item.get("event_type") or ""),
         "is_announcement": bool(item.get("is_announcement")),
@@ -73,10 +118,12 @@ def _make_chunk(
         news_id=news_id,
         chunk_index=chunk_index,
         chunk_text=clean_text(chunk_text),
+        title=meta["title"],
         source=meta["source"],
         publish_time=meta["publish_time"],
         trade_date=meta["trade_date"],
         stock_codes=meta["stock_codes"],
+        entities=meta["entities"],
         industry=meta["industry"],
         event_type=meta["event_type"],
         is_announcement=meta["is_announcement"],
@@ -85,7 +132,16 @@ def _make_chunk(
         section_title=section_title,
         importance_score=meta["importance_score"],
         retention_level=meta["retention_level"],
-        metadata={"title": str(item.get("title") or ""), **dict(item.get("metadata") or {})},
+        metadata={
+            "title": meta["title"],
+            "stock_codes": meta["stock_codes"],
+            "entities": meta["entities"],
+            "industry": meta["industry"],
+            "event_type": meta["event_type"],
+            "publish_time": meta["publish_time"],
+            "source": meta["source"],
+            **dict(item.get("metadata") or {}),
+        },
     )
 
 

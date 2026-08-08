@@ -73,6 +73,26 @@ def expected_signal_date(now: datetime | None = None) -> str:
     return value.strftime("%Y-%m-%d")
 
 
+def _public_data_state(latest_job: dict[str, Any], expected: str) -> dict[str, Any]:
+    public = dict(latest_job.get("public_task_status") or {})
+    meta = dict(public.get("metadata") or {})
+    same_trade_date = str(latest_job.get("trade_date") or "") == str(expected or "")
+    ready = bool(meta.get("public_data_ready")) if same_trade_date else False
+    healthy = bool(meta.get("public_data_healthy")) if same_trade_date else False
+    return {
+        "same_trade_date": same_trade_date,
+        "ready": ready,
+        "healthy": healthy,
+        "status": str(public.get("status") or "unknown"),
+        "ordinary_news_status": str(meta.get("ordinary_news_status") or "unknown"),
+        "ordinary_news_listing_rows": int(meta.get("ordinary_news_listing_rows") or 0),
+        "ordinary_news_full_text_written": int(meta.get("ordinary_news_full_text_written") or 0),
+        "latest_news_publish_time": str(meta.get("news_latest_publish_time") or ""),
+        "rag_bm25_index_path": str(meta.get("rag_bm25_index_path") or ""),
+        "rag_dense_index_path": str(meta.get("rag_dense_index_path") or ""),
+    }
+
+
 def _scheduler_config() -> dict[str, Any]:
     config = load_local_config()
     return {
@@ -90,7 +110,9 @@ def _should_catch_up(config: dict[str, Any], now: datetime | None = None) -> boo
     now = now or _now()
     expected = expected_signal_date(now)
     actual = read_ranking_signal_date()
-    if actual == expected:
+    latest_job = load_latest_job_status(".")
+    public_state = _public_data_state(latest_job, expected)
+    if actual == expected and public_state["healthy"]:
         return False
 
     expected_date = datetime.strptime(expected, "%Y-%m-%d").date()
@@ -265,15 +287,18 @@ def shutdown_runtime_scheduler() -> None:
         _save_runtime_file(runtime)
 
 
-def scheduler_public_status() -> dict[str, Any]:
+def scheduler_public_status(root: str | Path = ".") -> dict[str, Any]:
     config = _scheduler_config()
-    latest_job = load_latest_job_status(".")
-    runtime = _load_runtime_file()
+    latest_job = load_latest_job_status(root)
+    runtime = _load_runtime_file(root)
     scheduler = _SCHEDULER
     cron_job = scheduler.get_job(SCHEDULER_JOB_ID) if scheduler else None
     next_run = getattr(cron_job, "next_run_time", None)
     expected = expected_signal_date()
-    signal_date = read_ranking_signal_date()
+    signal_date = read_ranking_signal_date(Path(root) / "outputs")
+    public_state = _public_data_state(latest_job, expected)
+    market_stale = bool(expected and signal_date != expected)
+    public_stale = not bool(public_state["healthy"])
 
     return {
         "enabled": bool(config["enabled"]),
@@ -286,7 +311,16 @@ def scheduler_public_status() -> dict[str, Any]:
         "next_run_time": _iso(next_run),
         "expected_signal_date": expected,
         "latest_signal_date": signal_date,
-        "stale": bool(expected and signal_date != expected),
+        "market_stale": market_stale,
+        "public_data_ready": bool(public_state["ready"]),
+        "public_data_healthy": bool(public_state["healthy"]),
+        "public_data_status": str(public_state["status"]),
+        "ordinary_news_status": str(public_state["ordinary_news_status"]),
+        "ordinary_news_listing_rows": int(public_state["ordinary_news_listing_rows"]),
+        "ordinary_news_full_text_written": int(public_state["ordinary_news_full_text_written"]),
+        "latest_news_publish_time": str(public_state["latest_news_publish_time"]),
+        "news_stale": public_stale,
+        "stale": bool(market_stale or public_stale),
         "last_started_at": str(runtime.get("last_started_at") or latest_job.get("started_at") or ""),
         "last_finished_at": str(runtime.get("last_finished_at") or latest_job.get("finished_at") or ""),
         "last_trade_date": str(runtime.get("last_trade_date") or latest_job.get("trade_date") or ""),

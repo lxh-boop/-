@@ -4,14 +4,15 @@ import csv
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable
 
-from config import AGENT_QUANT_DB_PATH
+from config import AGENT_QUANT_DB_PATH, NEWS_EVENT_LOOKBACK_DAYS
 from database.repositories import NewsRepository
 from scheduler.job_lock import JobLock, JobLockError
 from scheduler.job_state import run_recorded_step, save_job_status
@@ -22,6 +23,7 @@ from scheduler.user_job_runner import get_active_user_ids, run_user_daily_job
 
 PUBLIC_MARKER_DIR = Path("runtime") / "jobs" / "public_tasks"
 SCHEDULER_LOG_DIR = Path("logs") / "scheduler"
+PUBLIC_TASK_VERSION = "news_rag_fulltext_v5_daily_pipeline"
 
 
 def _csv_signal_date(path: str | Path) -> str:
@@ -170,7 +172,13 @@ def _public_already_done(trade_date: str, root: str | Path = ".") -> bool:
         return False
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return data.get("status") == SchedulerStatus.SUCCESS
+        return (
+            data.get("status") == SchedulerStatus.SUCCESS
+            and data.get("public_task_version") == PUBLIC_TASK_VERSION
+            and data.get("news_refresh_attempted") is True
+            and data.get("public_data_ready") is True
+            and data.get("public_data_healthy") is True
+        )
     except Exception:
         return False
 
@@ -201,6 +209,250 @@ def _count_news(db_path: str | Path | None) -> tuple[int, int]:
         return 0, 0
 
 
+def _latest_news_publish_time(db_path: str | Path | None) -> str:
+    """Read the newest news timestamp without mutating SQLite."""
+
+    path = Path(db_path or AGENT_QUANT_DB_PATH)
+    if not path.exists():
+        return ""
+    try:
+        uri = path.resolve().as_uri() + "?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            row = conn.execute(
+                """
+                SELECT MAX(
+                    CASE
+                        WHEN TRIM(COALESCE(publish_time, '')) <> '' THEN publish_time
+                        ELSE trade_date
+                    END
+                )
+                FROM news_event
+                """
+            ).fetchone()
+        return str((row or [""])[0] or "")
+    except Exception:
+        return ""
+
+
+def _resolve_news_refresh_range(
+    trade_date: str,
+    db_path: str | Path | None,
+) -> tuple[str, str, str]:
+    """Catch up from the current corpus head, with one-day overlap for updates."""
+
+    end_day = parse_date(trade_date)
+    latest = _latest_news_publish_time(db_path)
+    if latest:
+        try:
+            latest_day = parse_date(latest[:10])
+            start_day = min(end_day, latest_day - timedelta(days=1))
+        except Exception:
+            start_day = end_day - timedelta(days=max(1, int(NEWS_EVENT_LOOKBACK_DAYS)))
+    else:
+        start_day = end_day - timedelta(days=max(1, int(NEWS_EVENT_LOOKBACK_DAYS)))
+    return start_day.strftime("%Y-%m-%d"), end_day.strftime("%Y-%m-%d"), latest
+
+
+def _resolved_output_path(root: str | Path, output_dir: str | Path) -> Path:
+    path = Path(output_dir)
+    return path if path.is_absolute() else Path(root).resolve() / path
+
+
+def run_news_refresh_and_rebuild(
+    *,
+    trade_date: str,
+    output_dir: str | Path = "outputs",
+    db_path: str | Path | None = AGENT_QUANT_DB_PATH,
+    root: str | Path = ".",
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Run one full-text-first public ingestion, then rebuild production RAG indexes once.
+
+    The public step fetches metadata, acquires/validates article bodies before active DB persistence,
+    removes legacy title-only RAG rows, writes structured chunk metadata, and finally rebuilds BM25/Dense.
+    Kronos/DFT model inputs remain K-line/model features only.
+    """
+
+    project_root = Path(root).resolve()
+    resolved_db = Path(db_path or AGENT_QUANT_DB_PATH)
+    if not resolved_db.is_absolute():
+        resolved_db = project_root / resolved_db
+    resolved_output = _resolved_output_path(project_root, output_dir)
+    start_date, end_date, latest_before = _resolve_news_refresh_range(trade_date, resolved_db)
+    before_events, before_chunks = _count_news(resolved_db)
+
+    if dry_run:
+        return {
+            "status": SchedulerStatus.SKIPPED,
+            "metadata": {
+                "refresh_attempted": False,
+                "dry_run": True,
+                "start_date": start_date,
+                "end_date": end_date,
+                "latest_news_before": latest_before,
+                "news_event_count_before": before_events,
+                "news_chunk_count_before": before_chunks,
+            },
+        }
+
+    script = project_root / "scripts" / "refresh_news_rag_fulltext.py"
+    if not script.exists():
+        raise FileNotFoundError(f"full-text news/RAG refresh script not found: {script}")
+
+    from data_tushare import get_token
+    from local_config import load_local_config
+
+    local_config = load_local_config()
+    timeout_seconds = max(1, int(local_config.get("scheduler_news_refresh_timeout_seconds") or 7200))
+    full_text_workers = max(1, min(16, int(local_config.get("scheduler_news_full_text_workers") or 6)))
+    full_text_timeout = max(5, int(local_config.get("scheduler_news_full_text_timeout_seconds") or 15))
+    full_text_retries = max(0, min(5, int(local_config.get("scheduler_news_full_text_retries") or 1)))
+    token = str(get_token() or "").strip()
+
+    report_dir = project_root / "runtime" / "jobs" / "news_rag_refresh"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / f"news_rag_refresh_{trade_date.replace('-', '')}.json"
+
+    log_dir = project_root / SCHEDULER_LOG_DIR
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stdout_path = log_dir / f"news_rag_refresh_{stamp}.out.log"
+    stderr_path = log_dir / f"news_rag_refresh_{stamp}.err.log"
+
+    command = [
+        sys.executable,
+        str(script),
+        "--db-path",
+        str(resolved_db),
+        "--output-dir",
+        str(resolved_output),
+        "--start-date",
+        start_date,
+        "--end-date",
+        end_date,
+        "--workers",
+        str(full_text_workers),
+        "--timeout",
+        str(full_text_timeout),
+        "--retries",
+        str(full_text_retries),
+        "--report-path",
+        str(report_path),
+    ]
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "1"
+    environment["PYTHONIOENCODING"] = "utf-8"
+    if token:
+        # Keep credentials out of command arguments and scheduler state/logs.
+        environment["TUSHARE_TOKEN"] = token
+
+    with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+        completed = subprocess.run(
+            command,
+            cwd=str(project_root),
+            env=environment,
+            stdout=stdout,
+            stderr=stderr,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"news/RAG refresh failed with return code {completed.returncode}; see {stderr_path}"
+        )
+
+    after_events, after_chunks = _count_news(resolved_db)
+    latest_after = _latest_news_publish_time(resolved_db)
+    if not latest_after:
+        raise RuntimeError("news_refresh_business_empty: no news_event records after refresh")
+
+    try:
+        latest_after_day = parse_date(latest_after[:10])
+        end_day = parse_date(end_date)
+        max_staleness_days = max(7, int(NEWS_EVENT_LOOKBACK_DAYS))
+        if (end_day - latest_after_day).days > max_staleness_days:
+            raise RuntimeError(
+                "news_refresh_stale_after_attempt: "
+                f"requested={start_date}..{end_date}, latest_db_news={latest_after}, "
+                f"max_staleness_days={max_staleness_days}"
+            )
+    except ValueError:
+        raise RuntimeError(f"news_refresh_invalid_latest_timestamp: {latest_after}")
+
+    report_payload: dict[str, Any] = {}
+    if report_path.exists():
+        try:
+            loaded = json.loads(report_path.read_text(encoding="utf-8-sig"))
+            if isinstance(loaded, dict):
+                report_payload = loaded
+        except Exception:
+            report_payload = {}
+    ingestion_meta = dict(report_payload.get("ingestion") or {})
+
+    index_dir = resolved_output / "rag_indexes"
+    bm25_path = index_dir / "news_bm25.pkl"
+    dense_path = index_dir / "news_dense.pkl"
+    missing = [path.name for path in (bm25_path, dense_path) if not path.exists()]
+    if missing:
+        raise RuntimeError(f"rag_index_rebuild_missing_output: {', '.join(missing)}")
+
+    ordinary_status = str(ingestion_meta.get("ordinary_news_status") or "unknown")
+    ordinary_listing_rows = int(ingestion_meta.get("ordinary_news_listing_rows") or 0)
+    ordinary_full_text_written = int(ingestion_meta.get("ordinary_news_full_text_written") or 0)
+    source_diagnostics = dict(ingestion_meta.get("source_diagnostics") or {})
+    warnings: list[str] = []
+    step_status = SchedulerStatus.SUCCESS
+    if ordinary_status in {"provider_failed", "partial"}:
+        step_status = SchedulerStatus.PARTIAL_SUCCESS
+        warnings.append(
+            "ordinary_news_provider_degraded: "
+            f"status={ordinary_status}, listing_rows={ordinary_listing_rows}, "
+            f"full_text_written={ordinary_full_text_written}"
+        )
+    elif ordinary_status == "business_empty":
+        warnings.append(
+            "ordinary_news_business_result_empty: provider calls completed but no ordinary stock-news rows "
+            f"matched {start_date}..{end_date}."
+        )
+    elif ordinary_status not in {"success", "not_attempted"}:
+        warnings.append(f"ordinary_news_status_unknown:{ordinary_status}")
+
+    return {
+        "status": step_status,
+        "warnings": warnings,
+        "metadata": {
+            "refresh_attempted": True,
+            "start_date": start_date,
+            "end_date": end_date,
+            "latest_news_before": latest_before,
+            "latest_news_after": latest_after,
+            "news_event_count_before": before_events,
+            "news_event_count_after": after_events,
+            "news_chunk_count_before": before_chunks,
+            "news_chunk_count_after": after_chunks,
+            "full_text_only_policy": True,
+            "full_text_articles_written": int(ingestion_meta.get("full_text_articles_written") or 0),
+            "ordinary_news_status": ordinary_status,
+            "ordinary_news_listing_rows": ordinary_listing_rows,
+            "ordinary_news_full_text_written": ordinary_full_text_written,
+            "announcement_full_text_written": int(ingestion_meta.get("announcement_full_text_written") or 0),
+            "source_diagnostics": source_diagnostics,
+            "title_only_events_deleted": int(ingestion_meta.get("title_only_events_deleted") or 0),
+            "title_only_chunks_deleted": int(ingestion_meta.get("title_only_chunks_deleted") or 0),
+            "structured_chunks_updated": int(ingestion_meta.get("structured_chunks_updated") or 0),
+            "bm25_index_path": str(bm25_path),
+            "dense_index_path": str(dense_path),
+            "bm25_index_mtime_ns": bm25_path.stat().st_mtime_ns,
+            "dense_index_mtime_ns": dense_path.stat().st_mtime_ns,
+            "report_path": str(report_path),
+            "stdout_log": str(stdout_path),
+            "stderr_log": str(stderr_path),
+            "public_data_ready": True,
+            "public_data_healthy": step_status == SchedulerStatus.SUCCESS,
+        },
+    }
+
+
 def run_public_daily_tasks(
     trade_date: str,
     output_dir: str | Path = "outputs",
@@ -222,41 +474,74 @@ def run_public_daily_tasks(
         and not force
         and marker_dates_are_current
     ):
+        marker_meta: dict[str, Any] = {}
+        try:
+            marker_meta = json.loads(_public_marker_path(trade_date, root).read_text(encoding="utf-8"))
+        except Exception:
+            marker_meta = {}
         return {
             "status": SchedulerStatus.SKIPPED,
             "warnings": [f"public tasks already completed for {trade_date}."],
             "metadata": {
+                **marker_meta,
                 "public_task_once": True,
-                "signal_date": source_signal_date,
+                "signal_date": source_signal_date or str(marker_meta.get("signal_date") or ""),
             },
         }
 
     ranking_path = _copy_ranking_to_shared(output_dir, dry_run=dry_run)
     news_event_count = 0
     news_chunk_count = 0
+    news_refresh: dict[str, Any] = {}
     if skip_training:
         warnings.append("training/model refresh skipped by scheduler option.")
     if skip_news:
-        warnings.append("news download/ingestion skipped by scheduler option.")
+        warnings.append("news download/ingestion and RAG index refresh skipped by scheduler option.")
     else:
+        news_refresh = run_news_refresh_and_rebuild(
+            trade_date=trade_date,
+            output_dir=output_dir,
+            db_path=db_path,
+            root=root,
+            dry_run=dry_run,
+        )
+        warnings.extend(list(news_refresh.get("warnings") or []))
         news_event_count, news_chunk_count = _count_news(db_path)
         if news_event_count == 0:
-            warnings.append("no news_event records found; scoring will keep news_adjustment_score neutral.")
+            warnings.append("news refresh completed but no news_event records exist; scoring will keep news adjustment neutral.")
 
+    refresh_meta = news_refresh.get("metadata") or {}
+    public_status = str(news_refresh.get("status") or SchedulerStatus.SUCCESS) if not skip_news else SchedulerStatus.SUCCESS
+    if public_status not in {SchedulerStatus.SUCCESS, SchedulerStatus.PARTIAL_SUCCESS}:
+        public_status = SchedulerStatus.SUCCESS
     payload = {
-        "status": SchedulerStatus.SUCCESS,
+        "status": public_status,
+        "public_task_version": PUBLIC_TASK_VERSION,
         "trade_date": trade_date,
         "ranking_output_path": ranking_path,
         "signal_date": source_signal_date,
+        "news_refresh_attempted": bool(refresh_meta.get("refresh_attempted")),
+        "news_refresh_start_date": str(refresh_meta.get("start_date") or ""),
+        "news_refresh_end_date": str(refresh_meta.get("end_date") or ""),
+        "news_latest_publish_time": str(refresh_meta.get("latest_news_after") or _latest_news_publish_time(db_path)),
         "news_event_count": news_event_count,
         "news_chunk_count": news_chunk_count,
+        "rag_bm25_index_path": str(refresh_meta.get("bm25_index_path") or ""),
+        "rag_dense_index_path": str(refresh_meta.get("dense_index_path") or ""),
+        "news_refresh_report_path": str(refresh_meta.get("report_path") or ""),
+        "ordinary_news_status": str(refresh_meta.get("ordinary_news_status") or ("skipped" if skip_news else "unknown")),
+        "ordinary_news_listing_rows": int(refresh_meta.get("ordinary_news_listing_rows") or 0),
+        "ordinary_news_full_text_written": int(refresh_meta.get("ordinary_news_full_text_written") or 0),
+        "announcement_full_text_written": int(refresh_meta.get("announcement_full_text_written") or 0),
+        "public_data_ready": bool(refresh_meta.get("public_data_ready", skip_news)),
+        "public_data_healthy": bool(refresh_meta.get("public_data_healthy", skip_news)),
         "dry_run": dry_run,
         "finished_at": now_text(),
     }
     if not dry_run:
         _write_public_marker(trade_date, payload, root)
     return {
-        "status": SchedulerStatus.SUCCESS,
+        "status": public_status,
         "warnings": warnings,
         "metadata": payload,
     }
@@ -361,6 +646,7 @@ def run_scheduled_daily_update(
                 root=root,
             )
             job.public_task_status = public_result
+            public_step_status = str(public_result.get("status") or SchedulerStatus.SUCCESS)
             meta = public_result.get("metadata") or {}
             job.ranking_output_path = str(meta.get("ranking_output_path") or "")
             job.news_count = int(meta.get("news_event_count") or 0)
@@ -402,6 +688,8 @@ def run_scheduled_daily_update(
             failed_users = [uid for uid, item in user_results.items() if item.get("status") == SchedulerStatus.FAILED]
             if failed_users:
                 job.overall_status = SchedulerStatus.PARTIAL_SUCCESS if len(failed_users) < len(user_results) else SchedulerStatus.FAILED
+            elif public_step_status == SchedulerStatus.PARTIAL_SUCCESS:
+                job.overall_status = SchedulerStatus.PARTIAL_SUCCESS
             else:
                 job.overall_status = SchedulerStatus.SUCCESS
     except JobLockError as exc:

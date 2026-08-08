@@ -188,18 +188,35 @@ def load_scheduler_status_summary(root="."):
     try:
         from scheduler.runtime_scheduler import scheduler_public_status
 
-        status = scheduler_public_status()
+        status = scheduler_public_status(root=root)
+        try:
+            from scheduler.job_state import load_latest_job_status
+
+            latest_job = load_latest_job_status(root)
+        except Exception:
+            latest_job = {}
         return {
             "is_available": True,
-            "overall_status": status.get("last_status", "unknown"),
-            "trade_date": status.get("last_trade_date", ""),
-            "finished_at": status.get("last_finished_at", ""),
+            "overall_status": status.get("last_status", latest_job.get("overall_status", "unknown")),
+            "trade_date": status.get("last_trade_date", latest_job.get("trade_date", "")),
+            "finished_at": status.get("last_finished_at", latest_job.get("finished_at", "")),
             "next_run_time": status.get("next_run_time", ""),
             "runtime_running": status.get("runtime_running", False),
             "job_registered": status.get("job_registered", False),
             "latest_signal_date": status.get("latest_signal_date", ""),
             "expected_signal_date": status.get("expected_signal_date", ""),
             "stale": status.get("stale", False),
+            "market_stale": status.get("market_stale", False),
+            "news_stale": status.get("news_stale", False),
+            "public_data_ready": status.get("public_data_ready", False),
+            "public_data_healthy": status.get("public_data_healthy", False),
+            "ordinary_news_status": status.get("ordinary_news_status", "unknown"),
+            "ordinary_news_listing_rows": status.get("ordinary_news_listing_rows", 0),
+            "ordinary_news_full_text_written": status.get("ordinary_news_full_text_written", 0),
+            "latest_news_publish_time": status.get("latest_news_publish_time", ""),
+            "recommendation_count": int(latest_job.get("recommendation_count") or 0),
+            "paper_order_count": int(latest_job.get("paper_order_count") or 0),
+            "position_count": int(latest_job.get("position_count") or 0),
             "last_error": status.get("last_error", ""),
         }
     except Exception:

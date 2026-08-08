@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from urllib.parse import quote
 
 import pandas as pd
+import requests
 
 import config as data_config
 from data_tushare import init_tushare_pro, ts_code_to_code
@@ -24,7 +28,13 @@ AKSHARE_NOTICE_MAX_DAYS = int(getattr(data_config, "AKSHARE_NOTICE_MAX_DAYS", 10
 AKSHARE_STOCK_NEWS_MAX_CODES = int(getattr(data_config, "AKSHARE_STOCK_NEWS_MAX_CODES", 300))
 AKSHARE_REQUEST_SLEEP_SECONDS = float(getattr(data_config, "AKSHARE_REQUEST_SLEEP_SECONDS", 0.05))
 AKSHARE_FETCH_WORKERS = int(getattr(data_config, "AKSHARE_FETCH_WORKERS", 4))
+EASTMONEY_STOCK_NEWS_MAX_PAGES = int(getattr(data_config, "EASTMONEY_STOCK_NEWS_MAX_PAGES", 3))
+EASTMONEY_STOCK_NEWS_PAGE_SIZE = int(getattr(data_config, "EASTMONEY_STOCK_NEWS_PAGE_SIZE", 100))
+EASTMONEY_STOCK_NEWS_TIMEOUT_SECONDS = float(getattr(data_config, "EASTMONEY_STOCK_NEWS_TIMEOUT_SECONDS", 12.0))
 
+
+
+_STOCK_ENTITY_METADATA_RUNTIME_CACHE: dict[str, dict[str, str]] = {}
 
 EVENT_COLUMNS = [
     "date",
@@ -131,21 +141,49 @@ def _fetch_akshare_stock_news_frames(
     ak,
     stock_pool: dict,
     codes: list[str],
-) -> list[pd.DataFrame]:
+    *,
+    start_date: str = "",
+    end_date: str = "",
+) -> tuple[list[pd.DataFrame], dict[str, object]]:
     worker_count = _resolve_akshare_fetch_workers(len(codes))
+    diagnostics: dict[str, object] = {
+        "codes_attempted": len(codes),
+        "codes_with_rows": 0,
+        "codes_business_empty": 0,
+        "codes_provider_failed": 0,
+        "rows_raw": 0,
+        "rows_in_range": 0,
+        "akshare_primary_success_codes": 0,
+        "eastmoney_fallback_success_codes": 0,
+        "eastmoney_name_fallback_success_codes": 0,
+        "error_samples": [],
+    }
 
-    def fetch_one(index: int, code: str) -> tuple[int, pd.DataFrame | None, str | None]:
+    def fetch_one(index: int, code: str) -> tuple[int, pd.DataFrame | None, dict[str, object]]:
         normalized_code = str(code).zfill(6)
+        stock_name = str(stock_pool.get(normalized_code, "") or "")
         try:
-            raw = _call_akshare_stock_news(ak, normalized_code)
+            raw, status = _call_akshare_stock_news(
+                ak,
+                normalized_code,
+                stock_name=stock_name,
+                start_date=start_date,
+                end_date=end_date,
+            )
             if raw is None or raw.empty:
-                return index, None, None
+                return index, None, status
             data = raw.copy()
             data["code"] = normalized_code
-            data["name"] = stock_pool.get(normalized_code, "")
-            return index, data, None
+            data["name"] = stock_name
+            return index, data, status
         except Exception as e:
-            return index, None, f"[News] AkShare stock news skipped for {normalized_code}: {e}"
+            return index, None, {
+                "status": "provider_failed",
+                "provider": "akshare_eastmoney",
+                "error": f"{type(e).__name__}: {e}",
+                "raw_rows": 0,
+                "in_range_rows": 0,
+            }
         finally:
             _sleep_after_akshare_request()
 
@@ -158,21 +196,62 @@ def _fetch_akshare_stock_news_frames(
                 executor.submit(fetch_one, index, code): index
                 for index, code in enumerate(codes)
             }
+            completed = 0
             for future in as_completed(future_map):
                 rows.append(future.result())
+                completed += 1
+                if completed == len(codes) or completed % 25 == 0:
+                    print(f"[News] ordinary stock news progress: {completed}/{len(codes)} codes", flush=True)
 
     frames_by_index: dict[int, pd.DataFrame] = {}
-    errors = 0
-    for index, data, error in rows:
-        if error:
-            errors += 1
-            if errors <= 5:
-                print(error)
-            continue
-        if data is not None and not data.empty:
-            frames_by_index[index] = data
+    error_samples: list[str] = []
+    for index, data, status in rows:
+        diagnostics["rows_raw"] = int(diagnostics["rows_raw"]) + int(status.get("raw_rows") or 0)
+        diagnostics["rows_in_range"] = int(diagnostics["rows_in_range"]) + int(status.get("in_range_rows") or 0)
+        provider = str(status.get("provider") or "")
+        if provider == "akshare":
+            diagnostics["akshare_primary_success_codes"] = int(diagnostics["akshare_primary_success_codes"]) + 1
+        elif provider == "eastmoney_direct":
+            diagnostics["eastmoney_fallback_success_codes"] = int(diagnostics["eastmoney_fallback_success_codes"]) + 1
+        elif provider == "eastmoney_name":
+            diagnostics["eastmoney_name_fallback_success_codes"] = int(diagnostics["eastmoney_name_fallback_success_codes"]) + 1
 
-    return [frames_by_index[index] for index in range(len(codes)) if index in frames_by_index]
+        code_status = str(status.get("status") or "")
+        if code_status == "provider_failed":
+            diagnostics["codes_provider_failed"] = int(diagnostics["codes_provider_failed"]) + 1
+            error = str(status.get("error") or "").strip()
+            if error and len(error_samples) < 8:
+                error_samples.append(error[:500])
+            continue
+        if data is None or data.empty:
+            diagnostics["codes_business_empty"] = int(diagnostics["codes_business_empty"]) + 1
+            continue
+        diagnostics["codes_with_rows"] = int(diagnostics["codes_with_rows"]) + 1
+        frames_by_index[index] = data
+
+    diagnostics["error_samples"] = error_samples
+    attempted = max(1, int(diagnostics["codes_attempted"]))
+    failed = int(diagnostics["codes_provider_failed"])
+    with_rows = int(diagnostics["codes_with_rows"])
+    failure_ratio = failed / attempted
+    diagnostics["provider_failure_ratio"] = round(failure_ratio, 4)
+    if with_rows > 0 and failure_ratio <= 0.10:
+        diagnostics["status"] = "success"
+    elif with_rows > 0:
+        diagnostics["status"] = "partial"
+    elif failure_ratio >= 0.80:
+        diagnostics["status"] = "provider_failed"
+    else:
+        diagnostics["status"] = "business_empty"
+
+    print(
+        "[News] ordinary stock news summary: "
+        f"status={diagnostics['status']} attempted={diagnostics['codes_attempted']} "
+        f"codes_with_rows={diagnostics['codes_with_rows']} rows_in_range={diagnostics['rows_in_range']} "
+        f"provider_failed={diagnostics['codes_provider_failed']}",
+        flush=True,
+    )
+    return [frames_by_index[index] for index in range(len(codes)) if index in frames_by_index], diagnostics
 
 
 def normalize_event_records(
@@ -297,7 +376,7 @@ def normalize_event_records(
     if "url" not in data.columns and "pdf_url" in data.columns:
         data["url"] = data["pdf_url"]
     elif "url" not in data.columns:
-        url_col = _first_existing_column(data, ["新闻链接", "公告链接", "链接"])
+        url_col = _first_existing_column(data, ["新闻链接", "公告链接", "网址", "链接"])
         if url_col is not None:
             data["url"] = data[url_col]
         else:
@@ -446,43 +525,379 @@ def fetch_akshare_announcements(
         return pd.DataFrame(columns=EVENT_COLUMNS)
 
 
-def _call_akshare_stock_news(ak, code: str) -> pd.DataFrame:
+
+def _eastmoney_http_get(url: str, *, params: dict, headers: dict, timeout: float):
+    """Use AKShare's current curl_cffi transport when available, then requests fallback."""
+    try:
+        from curl_cffi import requests as curl_requests  # type: ignore
+
+        return curl_requests.get(url, params=params, headers=headers, timeout=timeout)
+    except Exception as curl_error:
+        try:
+            return requests.get(url, params=params, headers=headers, timeout=timeout)
+        except Exception as requests_error:
+            raise RuntimeError(
+                f"eastmoney_http_failed:curl={type(curl_error).__name__}:{curl_error}; "
+                f"requests={type(requests_error).__name__}:{requests_error}"
+            ) from requests_error
+
+
+def _eastmoney_jsonp_rows(
+    keyword: str,
+    *,
+    page_index: int,
+    page_size: int,
+) -> list[dict]:
+    callback = f"jQuery3510{int(time.time() * 1000)}{page_index}"
+    inner_param = {
+        "uid": "",
+        "keyword": str(keyword),
+        "type": ["cmsArticleWebOld"],
+        "client": "web",
+        "clientType": "web",
+        "clientVersion": "curr",
+        "param": {
+            "cmsArticleWebOld": {
+                "searchScope": "default",
+                "sort": "default",
+                "pageIndex": int(page_index),
+                "pageSize": int(page_size),
+                "preTag": "<em>",
+                "postTag": "</em>",
+            }
+        },
+    }
+    url = "https://search-api-web.eastmoney.com/search/jsonp"
+    params = {
+        "cb": callback,
+        "param": json.dumps(inner_param, ensure_ascii=False),
+        "_": str(int(time.time() * 1000)),
+    }
+    headers = {
+        "Accept": "*/*",
+        "Referer": f"https://so.eastmoney.com/news/s?keyword={quote(str(keyword), safe='')}",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0 Safari/537.36"
+        ),
+    }
+    response = _eastmoney_http_get(
+        url,
+        params=params,
+        headers=headers,
+        timeout=max(3.0, EASTMONEY_STOCK_NEWS_TIMEOUT_SECONDS),
+    )
+    if hasattr(response, "raise_for_status"):
+        response.raise_for_status()
+    text = str(getattr(response, "text", "") or "").strip()
+    left = text.find("(")
+    right = text.rfind(")")
+    if left < 0 or right <= left:
+        raise ValueError("eastmoney_stock_news_invalid_jsonp")
+    data_json = json.loads(text[left + 1:right])
+    result = data_json.get("result") or {}
+    rows = result.get("cmsArticleWebOld") or []
+    return list(rows) if isinstance(rows, list) else []
+
+
+def _direct_eastmoney_stock_news(
+    keyword: str,
+    *,
+    canonical_code: str,
+    start_date: str = "",
+    end_date: str = "",
+) -> pd.DataFrame:
+    """Direct Eastmoney compatibility path with pagination and date filtering.
+
+    Search snippets are not treated as full article bodies. The caller keeps them
+    as ``summary`` and the full-text ingestion layer fetches each article URL.
+    """
+    frames: list[pd.DataFrame] = []
+    max_pages = max(1, min(10, int(EASTMONEY_STOCK_NEWS_MAX_PAGES)))
+    page_size = max(10, min(100, int(EASTMONEY_STOCK_NEWS_PAGE_SIZE)))
+    start_dt = pd.to_datetime(start_date, errors="coerce") if start_date else pd.NaT
+    end_dt = pd.to_datetime(end_date, errors="coerce") if end_date else pd.NaT
+
+    found_in_range = False
+    for page_index in range(1, max_pages + 1):
+        rows = _eastmoney_jsonp_rows(keyword, page_index=page_index, page_size=page_size)
+        if not rows:
+            break
+        frame = pd.DataFrame(rows)
+        if "code" in frame.columns:
+            frame["新闻链接"] = "http://finance.eastmoney.com/a/" + frame["code"].astype(str) + ".html"
+        else:
+            frame["新闻链接"] = ""
+        frame.rename(
+            columns={
+                "date": "发布时间",
+                "mediaName": "文章来源",
+                "title": "新闻标题",
+                "content": "新闻内容",
+            },
+            inplace=True,
+        )
+        frame["关键词"] = str(canonical_code).zfill(6)
+        for col in ["新闻标题", "新闻内容"]:
+            if col not in frame.columns:
+                frame[col] = ""
+            frame[col] = (
+                frame[col].astype(str)
+                .str.replace("<em>", "", regex=False)
+                .str.replace("</em>", "", regex=False)
+                .str.replace("\u3000", "", regex=False)
+                .str.replace("\r\n", " ", regex=False)
+            )
+        for col in ["发布时间", "文章来源", "新闻链接"]:
+            if col not in frame.columns:
+                frame[col] = ""
+        frames.append(frame[["关键词", "新闻标题", "新闻内容", "发布时间", "文章来源", "新闻链接"]])
+
+        # Eastmoney/AKShare may return fewer rows than the requested page size.
+        # Do not treat a short page as end-of-pagination; that was the failure mode
+        # that could miss recent rows on Windows. Stop only after the requested
+        # window has been seen and the next page no longer overlaps it.
+        dates = pd.to_datetime(frame["发布时间"], errors="coerce")
+        if not pd.isna(start_dt) or not pd.isna(end_dt):
+            page_mask = pd.Series(True, index=frame.index)
+            if not pd.isna(start_dt):
+                page_mask &= dates >= start_dt.normalize()
+            if not pd.isna(end_dt):
+                page_mask &= dates <= (end_dt.normalize() + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1))
+            page_has_in_range = bool(page_mask.fillna(False).any())
+            if page_has_in_range:
+                found_in_range = True
+            elif found_in_range:
+                break
+
+    if not frames:
+        return pd.DataFrame()
+    data = pd.concat(frames, ignore_index=True)
+    data = data.drop_duplicates(subset=["新闻标题", "发布时间", "文章来源", "新闻链接"], keep="first")
+    if not pd.isna(start_dt) or not pd.isna(end_dt):
+        dates = pd.to_datetime(data["发布时间"], errors="coerce")
+        mask = pd.Series(True, index=data.index)
+        if not pd.isna(start_dt):
+            mask &= dates >= start_dt.normalize()
+        if not pd.isna(end_dt):
+            mask &= dates <= (end_dt.normalize() + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1))
+        data = data[mask].copy()
+    return data.reset_index(drop=True)
+
+
+def _fetch_stock_entity_metadata_eastmoney(code: str) -> dict[str, str]:
+    normalized = str(code).zfill(6)
+    market_code = 1 if normalized.startswith("6") else 0
+    url = "https://push2.eastmoney.com/api/qt/stock/get"
+    params = {"fields": "f57,f58,f127", "secid": f"{market_code}.{normalized}"}
+    response = requests.get(url, params=params, timeout=8)
+    response.raise_for_status()
+    data = (response.json() or {}).get("data") or {}
+    return {
+        "stock_code": normalized,
+        "stock_name": str(data.get("f58") or ""),
+        "full_name": "",
+        "industry": str(data.get("f127") or ""),
+    }
+
+
+def fetch_stock_entity_metadata(
+    token: str | None,
+    codes: list[str],
+) -> dict[str, dict[str, str]]:
+    """Resolve stock name/full-name/industry with Tushare then Eastmoney fallback."""
+    normalized_codes = list(dict.fromkeys(str(code).zfill(6) for code in codes if str(code).strip()))
+    result: dict[str, dict[str, str]] = {
+        code: dict(_STOCK_ENTITY_METADATA_RUNTIME_CACHE[code])
+        for code in normalized_codes
+        if code in _STOCK_ENTITY_METADATA_RUNTIME_CACHE
+    }
+    unresolved = [
+        code for code in normalized_codes
+        if code not in result or not str(result[code].get("industry") or "").strip()
+    ]
+    if token and unresolved:
+        try:
+            pro = init_tushare_pro(token)
+            basic = pro.stock_basic(
+                exchange="",
+                list_status="L",
+                fields="symbol,name,industry,fullname",
+            )
+            if basic is not None and not basic.empty:
+                basic = basic.copy()
+                basic["symbol"] = basic["symbol"].astype(str).str.zfill(6)
+                wanted = basic[basic["symbol"].isin(set(unresolved))]
+                for row in wanted.to_dict(orient="records"):
+                    code = str(row.get("symbol") or "").zfill(6)
+                    result[code] = {
+                        "stock_code": code,
+                        "stock_name": str(row.get("name") or ""),
+                        "full_name": str(row.get("fullname") or ""),
+                        "industry": str(row.get("industry") or ""),
+                    }
+        except Exception as exc:
+            print(f"[News] Tushare stock metadata skipped: {exc}")
+
+    missing = [
+        code for code in normalized_codes
+        if code not in result or not str(result[code].get("industry") or "").strip()
+    ]
+    if missing:
+        workers = max(1, min(_resolve_akshare_fetch_workers(len(missing)), 8))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_map = {executor.submit(_fetch_stock_entity_metadata_eastmoney, code): code for code in missing}
+            for future in as_completed(future_map):
+                code = future_map[future]
+                try:
+                    row = future.result()
+                except Exception as exc:
+                    print(f"[News] Eastmoney stock metadata skipped for {code}: {exc}")
+                    continue
+                current = result.get(code) or {"stock_code": code, "stock_name": "", "full_name": "", "industry": ""}
+                for key in ("stock_name", "full_name", "industry"):
+                    if not str(current.get(key) or "").strip() and str(row.get(key) or "").strip():
+                        current[key] = str(row.get(key) or "")
+                result[code] = current
+    for code, row in result.items():
+        _STOCK_ENTITY_METADATA_RUNTIME_CACHE[code] = dict(row)
+    return result
+
+
+def _call_akshare_stock_news(
+    ak,
+    code: str,
+    *,
+    stock_name: str = "",
+    start_date: str = "",
+    end_date: str = "",
+) -> tuple[pd.DataFrame, dict[str, object]]:
     last_error: Exception | None = None
+    # Keep AKShare first for API compatibility. If upstream parsing breaks or
+    # the returned rows do not cover the requested date, use the same Eastmoney
+    # search endpoint directly.
     for kwargs in [{"stock": code}, {"symbol": code}]:
         try:
-            return ak.stock_news_em(**kwargs)
-        except TypeError as e:
-            last_error = e
-        except Exception:
-            raise
+            raw = ak.stock_news_em(**kwargs)
+            if raw is not None and not raw.empty:
+                candidate = raw.copy()
+                time_col = _first_existing_column(candidate, ["发布时间", "publish_time", "date", "datetime"])
+                if time_col is not None and start_date and end_date:
+                    dates = pd.to_datetime(candidate[time_col], errors="coerce")
+                    start_dt = pd.to_datetime(start_date, errors="coerce")
+                    end_dt = pd.to_datetime(end_date, errors="coerce")
+                    in_range = candidate[(dates >= start_dt.normalize()) & (dates <= end_dt.normalize() + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1))].copy()
+                else:
+                    in_range = candidate
+                if not in_range.empty:
+                    return in_range, {
+                        "status": "success",
+                        "provider": "akshare",
+                        "raw_rows": int(len(candidate)),
+                        "in_range_rows": int(len(in_range)),
+                    }
+        except TypeError as exc:
+            last_error = exc
+            continue
+        except Exception as exc:
+            last_error = exc
+            break
+
+    direct_errors: list[str] = []
     try:
-        return ak.stock_news_em(code)
-    except Exception as e:
-        if last_error:
-            raise last_error
-        raise e
+        direct = _direct_eastmoney_stock_news(
+            code,
+            canonical_code=code,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        if not direct.empty:
+            return direct, {
+                "status": "success",
+                "provider": "eastmoney_direct",
+                "raw_rows": int(len(direct)),
+                "in_range_rows": int(len(direct)),
+                "akshare_error": str(last_error or ""),
+            }
+    except Exception as exc:
+        direct_errors.append(f"code:{type(exc).__name__}:{exc}")
+
+    if stock_name:
+        try:
+            by_name = _direct_eastmoney_stock_news(
+                stock_name,
+                canonical_code=code,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if not by_name.empty:
+                return by_name, {
+                    "status": "success",
+                    "provider": "eastmoney_name",
+                    "raw_rows": int(len(by_name)),
+                    "in_range_rows": int(len(by_name)),
+                    "akshare_error": str(last_error or ""),
+                }
+        except Exception as exc:
+            direct_errors.append(f"name:{type(exc).__name__}:{exc}")
+
+    if direct_errors and last_error is not None:
+        return pd.DataFrame(), {
+            "status": "provider_failed",
+            "provider": "akshare_eastmoney",
+            "raw_rows": 0,
+            "in_range_rows": 0,
+            "error": f"akshare={type(last_error).__name__}:{last_error}; {'; '.join(direct_errors)}",
+        }
+    return pd.DataFrame(), {
+        "status": "business_empty",
+        "provider": "akshare_eastmoney",
+        "raw_rows": 0,
+        "in_range_rows": 0,
+        "error": "; ".join(direct_errors),
+    }
 
 
 def fetch_akshare_stock_news(
     stock_pool: dict | None,
     start_date: str,
     end_date: str,
-) -> pd.DataFrame:
+    *,
+    return_status: bool = False,
+):
+    empty = pd.DataFrame(columns=EVENT_COLUMNS)
+    base_status: dict[str, object] = {
+        "status": "skipped",
+        "codes_attempted": 0,
+        "codes_with_rows": 0,
+        "codes_business_empty": 0,
+        "codes_provider_failed": 0,
+        "rows_raw": 0,
+        "rows_in_range": 0,
+        "error_samples": [],
+    }
     if not AKSHARE_FETCH_STOCK_NEWS:
-        return pd.DataFrame(columns=EVENT_COLUMNS)
-
+        return (empty, base_status) if return_status else empty
     if not stock_pool:
-        return pd.DataFrame(columns=EVENT_COLUMNS)
+        base_status["status"] = "business_empty"
+        return (empty, base_status) if return_status else empty
 
     ak = _import_akshare()
     if ak is None:
-        return pd.DataFrame(columns=EVENT_COLUMNS)
+        base_status["status"] = "provider_failed"
+        base_status["error_samples"] = ["akshare_import_failed"]
+        return (empty, base_status) if return_status else empty
 
     codes = list(stock_pool.keys())[: max(1, AKSHARE_STOCK_NEWS_MAX_CODES)]
-    frames = _fetch_akshare_stock_news_frames(ak, stock_pool, codes)
-
+    frames, status = _fetch_akshare_stock_news_frames(
+        ak,
+        stock_pool,
+        codes,
+        start_date=start_date,
+        end_date=end_date,
+    )
     if not frames:
-        return pd.DataFrame(columns=EVENT_COLUMNS)
+        return (empty, status) if return_status else empty
 
     data = pd.concat(frames, ignore_index=True)
     data = normalize_event_records(
@@ -490,7 +905,18 @@ def fetch_akshare_stock_news(
         stock_pool=stock_pool,
         source="akshare_stock_news_em",
     )
-    return _date_in_range(data, start_date=start_date, end_date=end_date)
+    # Eastmoney search result "新闻内容" is a search snippet, not the canonical article body.
+    # Keep it as summary and force the full-text ingestion layer to fetch the article URL.
+    if not data.empty:
+        snippet = data["content"].fillna("").astype(str)
+        summary = data["summary"].fillna("").astype(str)
+        data["summary"] = summary.where(summary.str.strip().ne(""), snippet)
+        data["content"] = ""
+    data = _date_in_range(data, start_date=start_date, end_date=end_date)
+    status["rows_in_range"] = int(len(data))
+    if len(data) > 0 and status.get("status") == "business_empty":
+        status["status"] = "success"
+    return (data, status) if return_status else data
 
 
 def refresh_news_event_cache(
@@ -544,12 +970,14 @@ def refresh_news_event_cache(
                 ann_df = ak_ann_df
 
         if news_df.empty:
-            ak_news_df = fetch_akshare_stock_news(
+            ak_news_df, ordinary_status = fetch_akshare_stock_news(
                 stock_pool=stock_pool,
                 start_date=start,
                 end_date=end,
+                return_status=True,
             )
             status["akshare_news_rows_fetched"] = int(len(ak_news_df))
+            status["ordinary_news_status"] = ordinary_status
             if not ak_news_df.empty:
                 news_df = ak_news_df
 

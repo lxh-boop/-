@@ -371,8 +371,20 @@ def sync_event_cache_to_agent_db(
     start_date: str | None = None,
     end_date: str | None = None,
     events: pd.DataFrame | None = None,
+    full_text_only: bool = False,
+    allow_legacy_cache_sync: bool = False,
 ) -> NewsSyncResult:
     raw_events = events if events is not None else load_event_cache(stock_pool=stock_pool)
+    if events is None and not allow_legacy_cache_sync:
+        return NewsSyncResult(
+            input_rows=0 if raw_events is None else len(raw_events),
+            filtered_rows=0,
+            fetch_status={
+                "status": "skipped",
+                "reason": "legacy_cache_sync_disabled_fulltext_first",
+            },
+            db_path=str(db_path or ""),
+        )
     if raw_events is None or raw_events.empty:
         return NewsSyncResult(db_path=str(db_path or ""), input_rows=0)
 
@@ -390,6 +402,24 @@ def sync_event_cache_to_agent_db(
     data["title"] = data["title"].fillna("").astype(str).str.strip()
     data = data[data["title"].ne("")].copy()
     data = data.drop_duplicates(subset=["date", "code", "title"], keep="last")
+    if full_text_only:
+        levels = [
+            classify_content_level(row.get("title"), row.get("summary"), row.get("content"))
+            for row in data.to_dict(orient="records")
+        ]
+        data = data.assign(_content_level=levels)
+        data = data[data["_content_level"].eq("full_text")].drop(columns=["_content_level"]).copy()
+        if data.empty:
+            return NewsSyncResult(
+                input_rows=len(raw_events),
+                filtered_rows=0,
+                cache_rows=len(raw_events),
+                fetch_status={
+                    "status": "business_empty",
+                    "reason": "no_validated_full_text_rows",
+                },
+                db_path=str(db_path or ""),
+            )
 
     calendar = _trading_calendar(data, output_dir=output_dir)
     event_rows = 0
