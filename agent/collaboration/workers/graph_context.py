@@ -1,4 +1,9 @@
-"""Execute W08 non-trading database-write tasks."""
+"""Execute W08 non-trading database-write tasks.
+
+W08 selects the concrete graph-write operation from Runtime-materialized input
+semantics, not from legacy output-slot names. Successful results are published
+only through ``data["slots"]``.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +18,7 @@ from agent.worker_tools import (
 )
 
 from ..models import GraphAgentTask, GraphWorkerResult, MemoryUpdate, MissingContextItem, ResultStatus
-from .common import contract_output_slots, safe_public_value
+from .common import materialize_promised_slots, safe_public_value
 
 
 def _tool_context(task: GraphAgentTask, output_dir: str | Path, db_path: str | Path | None) -> dict[str, Any]:
@@ -29,35 +34,61 @@ def _tool_context(task: GraphAgentTask, output_dir: str | Path, db_path: str | P
     }
 
 
-def _payload_for_role(resolved_inputs: dict[str, Any] | None, role: str) -> dict[str, Any]:
-    value = dict(resolved_inputs or {}).get(role)
+def _direct_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, list):
-        value = value[0] if value else None
-    if not isinstance(value, dict):
-        return {}
-    payload = value.get("payload", value.get("data"))
-    return dict(payload or {}) if isinstance(payload, dict) else {}
+        value = value[0] if len(value) == 1 else None
+    return dict(value) if isinstance(value, dict) else {}
 
 
-def _missing(task: GraphAgentTask, output_type: str, role: str, description: str) -> GraphWorkerResult:
+def _select_write_input(
+    task: GraphAgentTask,
+    resolved_inputs: dict[str, Any] | None,
+) -> tuple[str, str, dict[str, Any]]:
+    """Return ``(kind, slot_id, value)`` from materialized runtime inputs."""
+
+    resolved = dict(resolved_inputs or {})
+    explicit_kind = str(task.args.get("graph_context_kind") or "").strip().lower()
+    evidence: list[tuple[str, dict[str, Any]]] = []
+    portfolio: list[tuple[str, dict[str, Any]]] = []
+    for slot_id, raw in resolved.items():
+        value = _direct_dict(raw)
+        if not value:
+            continue
+        semantic = str(slot_id).lower()
+        if "evidence" in semantic:
+            evidence.append((str(slot_id), value))
+        if any(token in semantic for token in ("portfolio", "position")):
+            portfolio.append((str(slot_id), value))
+
+    if explicit_kind in {"evidence", "evidence_graph_context"} and evidence:
+        return "evidence", evidence[0][0], evidence[0][1]
+    if explicit_kind in {"portfolio", "portfolio_graph_context"} and portfolio:
+        return "portfolio", portfolio[0][0], portfolio[0][1]
+    if evidence and not portfolio:
+        return "evidence", evidence[0][0], evidence[0][1]
+    if portfolio and not evidence:
+        return "portfolio", portfolio[0][0], portfolio[0][1]
+    if evidence and portfolio:
+        raise ValueError("graph_context_write_input_ambiguous")
+    return "", "", {}
+
+
+def _missing(task: GraphAgentTask, role: str, description: str) -> GraphWorkerResult:
     return GraphWorkerResult(
         task_id=task.task_id,
         agent_id=task.assigned_agent,
         status=ResultStatus.NEED_CONTEXT,
-        output_type=output_type,
-        payload=None,
+        output_type="GraphContextResult",
         data=None,
         error=None,
         focus_refs=task.focus_refs,
         summary=description,
-        missing_items=[
-            MissingContextItem(
-                key=role,
-                description=description,
-                expected_format="声明的上游强类型 WorkerResult",
-                searched_sources=["declared upstream inputs"],
-            )
-        ],
+        missing_items=[MissingContextItem(
+            key=role,
+            description=description,
+            expected_format="Runtime materialized semantic slot",
+            searched_sources=["RunSlotStore", "resolved_input_bindings"],
+        )],
     )
 
 
@@ -69,23 +100,14 @@ def run_graph_context(
     *,
     resolved_inputs: dict[str, Any] | None = None,
 ) -> GraphWorkerResult:
-    output_slots = set(contract_output_slots(task))
-    if "portfolio_graph_context" in output_slots:
-        portfolio_state = _payload_for_role(resolved_inputs, "current_portfolio_state")
-        if not portfolio_state:
-            return _missing(
-                task,
-                "PortfolioGraphContextResult",
-                "portfolio_state",
-                "缺少需要写入数据库的权威组合状态。",
-            )
+    kind, source_slot_id, source_value = _select_write_input(task, resolved_inputs)
+    if not source_value:
+        return _missing(task, "graph_context_input", "缺少可写入图上下文的权威结构化输入。")
+
+    if kind == "portfolio":
         tool_result = tool_executor.execute(
             DATABASE_WRITE_PORTFOLIO_GRAPH_CONTEXT,
-            {
-                "portfolio_state": portfolio_state,
-                "user_id": task.user_id,
-                "as_of_time": task.as_of_time,
-            },
+            {"portfolio_state": source_value, "user_id": task.user_id, "as_of_time": task.as_of_time},
             context=_tool_context(task, output_dir, db_path),
             agent_type=task.assigned_agent,
         )
@@ -111,54 +133,44 @@ def run_graph_context(
             raise ValueError("portfolio_ref_missing_after_database_write")
         portfolio_ref = GraphRef.from_dict(portfolio_ref_raw)
         holding_refs = refs_from(raw.get("holding_refs") or [])
-        source_task_ids = task.input_task_ids("current_portfolio_state")
         payload = {
             "portfolio_ref": portfolio_ref.to_dict(),
             "holding_refs": [ref.to_dict() for ref in holding_refs],
             "unresolved_positions": safe_public_value(raw.get("unresolved_positions") or []),
             "write_summary": safe_public_value(raw.get("graph_write") or {}),
-            "source_task_ids": source_task_ids,
+            "source_slot_id": source_slot_id,
+            "source_task_ids": task.input_task_ids(source_slot_id),
         }
+        slots = materialize_promised_slots(task, payload)
         produced_refs = [portfolio_ref, *holding_refs]
+        partial = bool(raw.get("unresolved_positions"))
         return GraphWorkerResult(
             task_id=task.task_id,
             agent_id=task.assigned_agent,
-            status=ResultStatus.PARTIAL if raw.get("unresolved_positions") else ResultStatus.COMPLETED,
+            status=ResultStatus.PARTIAL if partial else ResultStatus.COMPLETED,
             output_type="PortfolioGraphContextResult",
-            payload_schema="portfolio_graph_context_result.v1",
-            payload=payload,
-            data=payload,
+            data={**payload, "slots": slots},
             error=None,
             focus_refs=[portfolio_ref],
             summary="已将组合图上下文写入数据库。",
-            confidence=1.0 if not raw.get("unresolved_positions") else 0.75,
-            warnings=["portfolio_contains_unresolved_positions"] if raw.get("unresolved_positions") else [],
-            memory_updates=[
-                MemoryUpdate(
-                    key="active_graph_refs",
-                    value=[ref.to_dict() for ref in produced_refs],
-                    value_type="graph_ref_list",
-                    source_ref=task.task_id,
-                    confirmed=True,
-                    confidence=1.0,
-                    summary="数据库写入后生成的组合图引用。",
-                )
-            ],
+            confidence=0.75 if partial else 1.0,
+            warnings=["portfolio_contains_unresolved_positions"] if partial else [],
+            memory_updates=[MemoryUpdate(
+                key="active_graph_refs",
+                value=[ref.to_dict() for ref in produced_refs],
+                value_type="graph_ref_list",
+                source_ref=task.task_id,
+                confirmed=True,
+                confidence=1.0,
+                summary="数据库写入后生成的组合图引用。",
+            )],
             metadata={"produced_refs": [ref.to_dict() for ref in produced_refs], "database_write": True},
         )
 
-    if "evidence_graph_context" in output_slots:
-        collection = _payload_for_role(resolved_inputs, "entity_external_evidence")
-        if not collection:
-            return _missing(
-                task,
-                "EvidenceGraphContextResult",
-                "evidence_collection",
-                "缺少需要写入数据库的外部证据集合。",
-            )
+    if kind == "evidence":
         tool_result = tool_executor.execute(
             DATABASE_WRITE_EVIDENCE_GRAPH_CONTEXT,
-            {"evidence_collection": collection},
+            {"evidence_collection": source_value},
             context=_tool_context(task, output_dir, db_path),
             agent_type=task.assigned_agent,
         )
@@ -170,41 +182,38 @@ def run_graph_context(
             "written_record_count": int(raw.get("written_record_count") or 0),
             "failed_record_count": int(raw.get("failed_record_count") or 0),
             "write_results": safe_public_value(raw.get("ingestion_results") or []),
-            "source_task_ids": task.input_task_ids("entity_external_evidence"),
+            "source_slot_id": source_slot_id,
+            "source_task_ids": task.input_task_ids(source_slot_id),
         }
+        slots = materialize_promised_slots(task, payload) if evidence_refs or success else {}
+        status = (
+            ResultStatus.COMPLETED
+            if success and not payload["failed_record_count"]
+            else ResultStatus.PARTIAL
+            if evidence_refs
+            else ResultStatus.FAILED
+        )
         return GraphWorkerResult(
             task_id=task.task_id,
             agent_id=task.assigned_agent,
-            status=(
-                ResultStatus.COMPLETED
-                if success and not payload["failed_record_count"]
-                else ResultStatus.PARTIAL
-                if evidence_refs
-                else ResultStatus.FAILED
-            ),
+            status=status,
             output_type="EvidenceGraphContextResult",
-            payload_schema="evidence_graph_context_result.v1",
-            payload=payload if evidence_refs or success else None,
-            data=payload if evidence_refs or success else None,
-            error=(
-                None
-                if evidence_refs or success
-                else {
-                    "code": tool_result.error_type or "evidence_graph_write_failed",
-                    "message": tool_result.error_message or tool_result.message,
-                    "component": tool_result.tool_name,
-                    "retryable": True,
-                }
-            ),
+            data={**payload, "slots": slots} if evidence_refs or success else None,
+            error=(None if evidence_refs or success else {
+                "code": tool_result.error_type or "evidence_graph_write_failed",
+                "message": tool_result.error_message or tool_result.message,
+                "component": tool_result.tool_name,
+                "retryable": True,
+            }),
             focus_refs=evidence_refs,
             evidence_refs=evidence_refs,
-            summary=f"已将 {payload['written_record_count']} 条证据写入数据库。" if evidence_refs or success else "证据图上下文写入数据库失败。",
-            confidence=1.0 if success and not payload["failed_record_count"] else 0.7 if evidence_refs else 0.0,
+            summary=(f"已将 {payload['written_record_count']} 条证据写入数据库。" if evidence_refs or success else "证据图上下文写入数据库失败。"),
+            confidence=1.0 if status == ResultStatus.COMPLETED else 0.7 if evidence_refs else 0.0,
             warnings=["partial_evidence_graph_write"] if payload["failed_record_count"] else [],
             metadata={"produced_refs": [ref.to_dict() for ref in evidence_refs], "database_write": True},
         )
 
-    raise ValueError(f"unsupported_database_write_contract:{sorted(output_slots)}")
+    raise ValueError(f"unsupported_database_write_input:{kind}")
 
 
 __all__ = ["run_graph_context"]

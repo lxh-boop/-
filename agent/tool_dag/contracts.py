@@ -171,7 +171,6 @@ _TOOL_RESULT_REF_SCHEMA: dict[str, Any] = {
     "properties": {
         "from_tool_task_id": {"type": "string"},
         "output_slot": {"type": "string"},
-        "data_key": {"type": "string"},
     },
     "required": ["from_tool_task_id"],
     "additionalProperties": False,

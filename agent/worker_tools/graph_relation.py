@@ -16,6 +16,8 @@ from agent.tool_runtime import (
     OP_READ,
     TOOL_VISIBILITY_WORKER_PRIVATE,
     ToolDefinition,
+    ToolInputContract,
+    ToolOutputContract,
     description,
     result_schema,
     schema,
@@ -205,6 +207,20 @@ def build_graph_relation_tool_definitions(
             produced_outputs=common_outputs,
             required_input_slots=["authoritative_entity_refs"],
             optional_input_slots=["as_of_time"],
+            input_contracts=[
+                ToolInputContract(slot_id="authoritative_entity_refs", required=True),
+                ToolInputContract(slot_id="as_of_time", required=False),
+            ],
+            output_contracts=[
+                ToolOutputContract(
+                    slot_id="financial_relation_paths",
+                    source_path="data.slots.financial_relation_paths",
+                ),
+                ToolOutputContract(
+                    slot_id="graph_relation_facts",
+                    source_path="data.slots.graph_relation_facts",
+                ),
+            ],
             operation_type=OP_READ,
             allowed_agent_types=[GRAPH_RELATION_RETRIEVER],
             permission_scope=OP_READ,
@@ -240,6 +256,21 @@ def build_graph_relation_tool_definitions(
             produced_outputs=common_outputs,
             required_input_slots=["source_entity_refs", "target_entity_refs"],
             optional_input_slots=["as_of_time"],
+            input_contracts=[
+                ToolInputContract(slot_id="source_entity_refs", required=True),
+                ToolInputContract(slot_id="target_entity_refs", required=True),
+                ToolInputContract(slot_id="as_of_time", required=False),
+            ],
+            output_contracts=[
+                ToolOutputContract(
+                    slot_id="financial_relation_paths",
+                    source_path="data.slots.financial_relation_paths",
+                ),
+                ToolOutputContract(
+                    slot_id="graph_relation_facts",
+                    source_path="data.slots.graph_relation_facts",
+                ),
+            ],
             operation_type=OP_READ,
             allowed_agent_types=[GRAPH_RELATION_RETRIEVER],
             permission_scope=OP_READ,

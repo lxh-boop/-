@@ -16,9 +16,16 @@ _EFFECT_ORDER = {"read": 0, "proposal": 1, "write": 2}
 
 
 class WorkerDescriptionCatalog:
-    def __init__(self, directory: CapabilityWorkerDirectory, capability_registry: Any) -> None:
+    def __init__(
+        self,
+        directory: CapabilityWorkerDirectory,
+        capability_registry: Any,
+        *,
+        worker_tool_directory: Any | None = None,
+    ) -> None:
         self.directory = directory
         self.capability_registry = capability_registry
+        self.worker_tool_directory = worker_tool_directory
 
     @staticmethod
     def _mode_limit(request_mode: str) -> str:
@@ -39,8 +46,10 @@ class WorkerDescriptionCatalog:
             if not self._eligible(card, request_mode):
                 continue
             boundaries = []
-            input_slots: list[str] = []
-            output_slots: list[str] = []
+            input_patterns: list[str] = []
+            output_patterns: list[str] = []
+            input_examples: list[str] = []
+            output_examples: list[str] = []
             for boundary_id in card.supported_boundary_ids:
                 boundary = self.capability_registry.get_boundary(boundary_id)
                 row = boundary.safe_for_main_agent()
@@ -49,8 +58,17 @@ class WorkerDescriptionCatalog:
                     for rule_id in boundary.allowed_acceptance_rule_ids
                 }
                 boundaries.append(row)
-                input_slots.extend(boundary.accepted_input_slots)
-                output_slots.extend(boundary.produced_output_slots)
+                input_patterns.extend(boundary.accepted_input_patterns)
+                output_patterns.extend(boundary.produced_output_patterns)
+                input_examples.extend(boundary.input_slot_examples)
+                output_examples.extend(boundary.output_slot_examples)
+            private_tool_output_slots: list[str] = []
+            if self.worker_tool_directory is not None and list(card.private_tool_ids or []):
+                private_tool_output_slots = self.worker_tool_directory.semantic_output_slots(
+                    card.agent_id,
+                    tool_names=list(card.private_tool_ids),
+                )
+                output_examples.extend(private_tool_output_slots)
             rows.append({
                 "worker_id": card.worker_id,
                 "public_role": card.role,
@@ -64,43 +82,19 @@ class WorkerDescriptionCatalog:
                 "limitations": list(card.limitations),
                 "escalation_policy": card.escalation_policy,
                 "execution_mode": card.execution_mode,
+                "output_publication_mode": card.output_publication_mode,
                 "effect_limit": card.max_effect_level,
                 "supported_boundary_ids": list(card.supported_boundary_ids),
-                "accepted_input_slots": list(dict.fromkeys(input_slots)),
-                "produced_output_slots": list(dict.fromkeys(output_slots)),
+                "accepted_input_patterns": list(dict.fromkeys(input_patterns)),
+                "produced_output_patterns": list(dict.fromkeys(output_patterns)),
+                "input_slot_examples": list(dict.fromkeys(input_examples)),
+                "output_slot_examples": list(dict.fromkeys(output_examples)),
+                "private_tool_semantic_outputs": list(private_tool_output_slots),
                 "supported_boundaries": boundaries,
                 "private_tool_details_visible_to_main_agent": False,
             })
         return rows
 
-    # Compatibility helpers for older diagnostics/tests. They no longer define
-    # the runtime planning sequence.
-    def summaries(self, *, request_mode: str) -> list[dict[str, Any]]:
-        return [
-            {
-                "worker_id": row["worker_id"],
-                "short_description": row["short_description"],
-                "delegation_description": row["delegation_description"],
-                "delegate_when": row["delegate_when"],
-                "capability_tags": row["capability_tags"],
-                "supported_boundary_ids": row["supported_boundary_ids"],
-                "accepted_input_slots": row["accepted_input_slots"],
-                "produced_output_slots": row["produced_output_slots"],
-                "effect_limit": row["effect_limit"],
-            }
-            for row in self.descriptions(request_mode=request_mode)
-        ]
-
-    def load_details(self, worker_ids: list[str], *, request_mode: str) -> list[dict[str, Any]]:
-        wanted = {str(item or "").strip().upper() for item in worker_ids if str(item or "").strip()}
-        return [
-            row for row in self.descriptions(request_mode=request_mode)
-            if row["worker_id"] in wanted
-        ]
 
 
-# Backward import compatibility only. The runtime itself uses
-# WorkerDescriptionCatalog and performs upfront full-description loading.
-ProgressiveWorkerCatalog = WorkerDescriptionCatalog
-
-__all__ = ["WorkerDescriptionCatalog", "ProgressiveWorkerCatalog"]
+__all__ = ["WorkerDescriptionCatalog"]

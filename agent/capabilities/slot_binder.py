@@ -108,6 +108,8 @@ class SlotBinder:
                         producer_task_id=producer_task_id,
                         producer_contract_id=str(selected.get("producer_contract_id") or ""),
                         entity_scope=required_input.entity_scope,
+                        required_paths=list(required_input.required_paths),
+                        optional_paths=list(required_input.optional_paths),
                     )
                     bindings[task.task_id].append(binding)
                     if producer_task_id and producer_task_id not in dependencies[task.task_id]:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 from uuid import uuid4
 
 
@@ -92,15 +92,17 @@ class UnifiedToolResult:
 class ToolInputContract:
     """Semantic input slot visible to a Worker-private Tool planner.
 
-    Runtime transport details stay out of this contract.  A Worker only needs
-    to know the semantic slot, schema, whether it is required, and which source
-    classes may satisfy it.
+    Runtime transport details stay out of this contract. A Tool declares only
+    its own input name/type requirements; it never names a concrete producer.
+    ``cardinality="many"`` means the DAG must bind a non-empty list of semantic
+    values. In that case ``schema_id`` describes each list element.
     """
 
     slot_id: str
     schema_id: str = ""
     required: bool = False
     accepted_sources: tuple[str, ...] = ("context", "upstream_tool")
+    cardinality: Literal["one", "many"] = "one"
     description: str = ""
 
     def planner_view(self) -> dict[str, Any]:
@@ -109,6 +111,7 @@ class ToolInputContract:
             "schema_id": str(self.schema_id or ""),
             "required": bool(self.required),
             "accepted_sources": list(self.accepted_sources or ()),
+            "cardinality": str(self.cardinality),
             "description": str(self.description or ""),
         }
 

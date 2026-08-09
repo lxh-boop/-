@@ -173,14 +173,13 @@ def runtime_completion_report(
 ) -> dict[str, Any]:
     del output_type
     success = result_status in {ResultStatus.COMPLETED, ResultStatus.PROPOSAL_READY}
-    explicit_slots = []
-    if isinstance(data, dict):
-        explicit_slots = [
-            str(item) for item in data.get("produced_information_slots") or [] if str(item)
+    produced: list[str] = []
+    if isinstance(data, dict) and isinstance(data.get("slots"), dict):
+        produced = [
+            str(slot_id)
+            for slot_id, value in data["slots"].items()
+            if str(slot_id) and value is not None
         ]
-        if not explicit_slots and isinstance(data.get("slots"), dict):
-            explicit_slots = [str(key) for key in data["slots"]]
-    produced = explicit_slots or (_output_slots(task) if success else [])
     business_empty = bool(isinstance(data, dict) and (data.get("business_empty") is True or data.get("found") is False))
     return build_completion_report(
         task,

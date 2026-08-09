@@ -1,8 +1,8 @@
 """Hybrid LLM + atomic-tool W04 Risk Analyst.
 
-The Tool DAG calculates structured risk facts. The LLM Worker interprets those
-facts into PortfolioRiskResult under prompt/schema constraints. Both stages are
-READ and never generate or execute a proposal.
+W04 consumes only Runtime-materialized capability slots.  Its private Tool DAG
+produces deterministic risk facts; the LLM interprets those facts.  Successful
+Worker outputs are published only through ``data["slots"]``.
 """
 
 from __future__ import annotations
@@ -15,16 +15,10 @@ from core.llm import LLMService
 
 from agent.tool_dag import WorkerToolDagRuntime
 
-from ..completion import validate_completion_report
 from ..models import GraphAgentTask, GraphWorkerResult, ResultStatus
-from ..worker_contracts import (
-    array_schema,
-    completion_report_schema,
-    object_schema,
-    string_schema,
-    validate_schema,
-)
-from .common import safe_public_value
+from ..worker_contracts import array_schema, object_schema, string_schema, validate_schema
+from .common import materialize_promised_slots, safe_public_value
+from .structured_output import generate_json_with_local_structural_repair
 
 
 def _risk_output_schema() -> dict[str, Any]:
@@ -64,7 +58,6 @@ def _risk_output_schema() -> dict[str, Any]:
             "records": array_schema(risk_item),
             "risk_constraints": array_schema(constraint),
             "source_tool_result_refs": array_schema(string_schema(min_length=1), min_items=1),
-            "completion_report": completion_report_schema(),
         },
         required=[
             "portfolio_task_ids",
@@ -72,7 +65,6 @@ def _risk_output_schema() -> dict[str, Any]:
             "records",
             "risk_constraints",
             "source_tool_result_refs",
-            "completion_report",
         ],
         additional_properties=False,
     )
@@ -84,6 +76,48 @@ def _final_facts(dag_result: Any) -> tuple[dict[str, Any], list[str]]:
         if "risk_facts" in data:
             return data, [f"tool_result:{task_id}" for task_id in dag_result.final_output_task_ids]
     return {}, []
+
+
+def _portfolio_context(
+    task: GraphAgentTask,
+    resolved_inputs: dict[str, Any] | None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Build the private risk-tool context from direct Runtime Slot values.
+
+    This deliberately does not understand old Worker envelopes such as
+    ``{"payload": ...}``.  Runtime projection already materializes the Slot value.
+    """
+
+    resolved = dict(resolved_inputs or {})
+    state: dict[str, Any] = {}
+    positions: list[dict[str, Any]] | None = None
+    source_task_ids: list[str] = []
+
+    for slot_id, value in resolved.items():
+        for task_id in task.input_task_ids(str(slot_id)):
+            if task_id not in source_task_ids:
+                source_task_ids.append(task_id)
+        if isinstance(value, list) and "position" in str(slot_id).lower():
+            positions = [dict(item) for item in value if isinstance(item, dict)]
+            continue
+        if not isinstance(value, dict):
+            continue
+        lowered = str(slot_id).lower()
+        if not state and any(token in lowered for token in ("portfolio", "account", "state")):
+            state = dict(value)
+        if positions is None:
+            rows = value.get("positions") or value.get("display_positions") or value.get("holdings")
+            if isinstance(rows, list):
+                positions = [dict(item) for item in rows if isinstance(item, dict)]
+
+    if not state:
+        # Risk is a portfolio-specific capability. If the contract uses a new
+        # semantic key, accept the first structured Slot rather than requiring a
+        # hard-coded business slot id.
+        state = next((dict(value) for value in resolved.values() if isinstance(value, dict)), {})
+    if positions is not None:
+        state["positions"] = positions
+    return state, source_task_ids
 
 
 def run_risk(
@@ -98,16 +132,7 @@ def run_risk(
     allowed_tool_names: list[str],
     language: str = "zh",
 ) -> GraphWorkerResult:
-    resolved = dict(resolved_inputs or {})
-    portfolio_binding = resolved.get("portfolio_state")
-    if isinstance(portfolio_binding, list):
-        portfolio_binding = portfolio_binding[0] if portfolio_binding else {}
-    portfolio_payload = (
-        dict(portfolio_binding.get("payload") or {})
-        if isinstance(portfolio_binding, dict)
-        else {}
-    )
-    portfolio_task_ids = task.input_task_ids("portfolio_state")
+    portfolio_payload, portfolio_task_ids = _portfolio_context(task, resolved_inputs)
     if not portfolio_payload:
         return GraphWorkerResult(
             task_id=task.task_id,
@@ -177,75 +202,65 @@ def run_risk(
         str(item) for item in facts.get("source_refs") or [] if str(item)
     }
 
+    output_schema = _risk_output_schema()
+
     def validate(payload: dict[str, Any]) -> None:
-        validate_schema(payload, _risk_output_schema())
+        validate_schema(payload, output_schema)
         risk_ids = {
             str(item.get("risk_id") or "")
             for item in payload.get("records") or []
             if isinstance(item, dict)
         }
         for item in payload.get("records") or []:
-            unknown = sorted(
-                set(str(ref) for ref in item.get("source_refs") or []) - allowed_source_refs
-            )
+            unknown = sorted(set(str(ref) for ref in item.get("source_refs") or []) - allowed_source_refs)
             if unknown:
                 raise RuntimeError("risk_unknown_source_refs:" + ",".join(unknown))
         for item in payload.get("risk_constraints") or []:
-            unknown = sorted(
-                set(str(ref) for ref in item.get("source_risk_ids") or []) - risk_ids
-            )
+            unknown = sorted(set(str(ref) for ref in item.get("source_risk_ids") or []) - risk_ids)
             if unknown:
                 raise RuntimeError("risk_constraint_unknown_risk_ids:" + ",".join(unknown))
-        validate_completion_report(
-            dict(payload.get("completion_report") or {}),
-            dict(task.completion_contract or {}),
-            path="$.completion_report",
-        )
 
-    payload = llm_service.generate_json(
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是 W04 Risk Analyst。你只基于 atomic_risk_facts 形成组合层风险分析和风险约束。"
+                "不得重新查询业务状态，不得补造风险事实，不得生成具体买卖动作或 Proposal。"
+                "每条 risk item 必须引用 allowed_source_refs；每条 risk constraint 必须引用已输出的 risk_id。"
+                "完成度与合同验收由Runtime负责。严格输出 risk_output_schema 对应 JSON。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "risk_question": str(task.args.get("risk_question") or task.objective or ""),
+                    "portfolio_task_ids": portfolio_task_ids,
+                    "atomic_risk_facts": safe_public_value(facts),
+                    "allowed_source_refs": sorted(allowed_source_refs),
+                    "reply_language": "en" if language == "en" else "zh",
+                    "risk_output_schema": output_schema,
+                },
+                ensure_ascii=False,
+                default=str,
+            ),
+        },
+    ]
+    payload = generate_json_with_local_structural_repair(
+        llm_service,
         stage="graph_risk_analyst",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "你是 W04 Risk Analyst。你只基于 atomic_risk_facts 形成组合层风险分析和风险约束。"
-                    "不得重新查询业务状态，不得补造风险事实，不得生成具体买卖动作或 Proposal。"
-                    "风险分析和约束是当前 Run 内的 READ 结果。每条 risk item 必须引用 allowed_source_refs；"
-                    "每条 risk constraint 必须引用已输出的 risk_id。逐项对照 completion_contract 返回"
-                    "completion_report，report_source 必须为 llm。程序仅检查 Schema、引用和流程，"
-                    "风险含义由你基于结构化事实判断。严格输出 risk_output_schema 对应 JSON。"
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "risk_question": str(task.args.get("risk_question") or task.objective or ""),
-                        "portfolio_task_ids": portfolio_task_ids,
-                        "atomic_risk_facts": safe_public_value(facts),
-                        "allowed_source_refs": sorted(allowed_source_refs),
-                        "completion_contract": dict(task.completion_contract or {}),
-                        "reply_language": "en" if language == "en" else "zh",
-                        "risk_output_schema": _risk_output_schema(),
-                    },
-                    ensure_ascii=False,
-                    default=str,
-                ),
-            },
-        ],
-        max_output_tokens=3200,
-        validator=validate,
         operation=task.boundary_id,
-        repair_mode="targeted",
-        disable_thinking=False,
-        repair_guidance=(
-            "只修复 JSON Schema、risk/source 引用和 completion_report。不得修改原子风险事实或生成 Proposal。"
-        ),
+        messages=messages,
+        output_schema=output_schema,
+        validator=validate,
+        immutable_repair_context={"allowed_source_refs": sorted(allowed_source_refs)},
+        repair_guidance="Repair only JSON shape and risk/source references; never invent risk facts or proposals.",
+        primary_max_output_tokens=3200,
+        repair_max_output_tokens=1800,
+        primary_disable_thinking=False,
     )
-    completion = dict(payload.get("completion_report") or {})
-    completed = bool(completion.get("expected_task_completed"))
-    result_status = ResultStatus.COMPLETED if completed else ResultStatus.PARTIAL
-    data = {
+
+    risk_bundle = {
         "portfolio_task_ids": [str(item) for item in payload.get("portfolio_task_ids") or portfolio_task_ids],
         "risk_analysis": safe_public_value(payload.get("risk_analysis") or {}),
         "records": safe_public_value(payload.get("records") or []),
@@ -254,25 +269,24 @@ def run_risk(
         "access_mode": "read",
         "persistent_write_performed": False,
     }
+    slots = materialize_promised_slots(task, risk_bundle)
+    data = {**risk_bundle, "slots": slots}
     return GraphWorkerResult(
         task_id=task.task_id,
         agent_id=task.assigned_agent,
-        status=result_status,
+        status=ResultStatus.COMPLETED,
         output_type="PortfolioRiskResult",
         data=data,
         error=None,
         focus_refs=task.focus_refs,
-        summary=str((data.get("risk_analysis") or {}).get("summary") or "已完成组合风险分析。"),
-        findings=[
-            {
-                "kind": "portfolio_risk",
-                "risk_item_count": len(data.get("records") or []),
-                "constraint_count": len(data.get("risk_constraints") or []),
-            }
-        ],
-        confidence=0.9 if completed else 0.6,
-        warnings=[str(item) for item in (data.get("risk_analysis") or {}).get("limitations") or []],
-        completion=completion,
+        summary=str((risk_bundle.get("risk_analysis") or {}).get("summary") or "已完成组合风险分析。"),
+        findings=[{
+            "kind": "portfolio_risk",
+            "risk_item_count": len(risk_bundle.get("records") or []),
+            "constraint_count": len(risk_bundle.get("risk_constraints") or []),
+        }],
+        confidence=0.9,
+        warnings=[str(item) for item in (risk_bundle.get("risk_analysis") or {}).get("limitations") or []],
         metadata={
             "tool_dag_used": True,
             "tool_task_count": len(dag_result.plan.tasks),

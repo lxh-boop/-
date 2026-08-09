@@ -15,13 +15,13 @@ from agent.capabilities import (
 )
 from agent.collaboration.completion import canonicalize_completion_report
 from agent.collaboration.models import GraphAgentTask, ResultStatus
-from agent.collaboration.worker_catalog import ProgressiveWorkerCatalog
+from agent.collaboration.worker_catalog import WorkerDescriptionCatalog
 from agent.collaboration.worker_directory import CapabilityWorkerDirectory, GRAPH_RELATION_RETRIEVER
 from agent.collaboration.workers.entity_analysis import _resolved_items as entity_resolved_items
 from agent.collaboration.workers.report_writer import _terminal_inputs as report_terminal_inputs
 from agent.tool_dag.executor import ToolDagExecutor
 from agent.tool_dag.contracts import ToolDagPlan, ToolDagTask
-from agent.tool_runtime import ToolDefinition, ToolRegistry, UnifiedToolResult
+from agent.tool_runtime import ToolDefinition, ToolInputContract, ToolOutputContract, ToolRegistry, UnifiedToolResult
 from agent.tool_runtime.contracts import OP_READ, TOOL_VISIBILITY_WORKER_PRIVATE
 from agent.worker_tools.registry import WorkerToolDirectory
 from agent.collaboration.workers.slot_inputs import contract_input_slot_ids, contract_required_slot_ids
@@ -45,11 +45,20 @@ def _tool(name: str, required: list[str], produced: list[str]) -> ToolDefinition
         name=name,
         display_name=name,
         description=_description(name),
-        input_schema={"type": "object", "properties": {}},
+        input_schema={
+            "type": "object",
+            "properties": {slot: {} for slot in required},
+            "required": list(required),
+        },
         output_schema={"type": "object"},
-        execution_handler=lambda args, context: {},
+        execution_handler=lambda args, context: {
+            "success": True,
+            "data": {slot: {} for slot in produced},
+        },
         produced_outputs=produced,
         required_input_slots=required,
+        input_contracts=[ToolInputContract(slot_id=slot, required=True) for slot in required],
+        output_contracts=[ToolOutputContract(slot_id=slot, source_path=f"data.{slot}") for slot in produced],
         operation_type=OP_READ,
         allowed_agent_types=[GRAPH_RELATION_RETRIEVER],
         visibility=TOOL_VISIBILITY_WORKER_PRIVATE,
@@ -72,20 +81,16 @@ def _graph_task(worker_id: str = "W03") -> CapabilityTask:
     )
 
 
-def test_worker_catalog_is_progressive() -> None:
+def test_worker_catalog_exposes_upfront_descriptions() -> None:
     directory = CapabilityWorkerDirectory()
-    catalog = ProgressiveWorkerCatalog(directory, CapabilityRegistry())
-    summaries = catalog.summaries(request_mode="analysis")
-    assert {row["worker_id"] for row in summaries} == {"W01", "W02", "W03", "W04", "W06", "W07", "W09"}
-    w03 = next(row for row in summaries if row["worker_id"] == "W03")
+    catalog = WorkerDescriptionCatalog(directory, CapabilityRegistry())
+    descriptions = catalog.descriptions(request_mode="analysis")
+    assert {row["worker_id"] for row in descriptions} == {"W01", "W02", "W03", "W04", "W06", "W07", "W09"}
+    w03 = next(row for row in descriptions if row["worker_id"] == "W03")
     assert "short_description" in w03
-    assert "full_description" not in w03
+    assert w03["full_description"]
     assert "private_tool_ids" not in w03
-    details = catalog.load_details(["W03"], request_mode="analysis")
-    assert [row["worker_id"] for row in details] == ["W03"]
-    assert details[0]["full_description"]
-    assert "private_tool_ids" not in details[0]
-    assert details[0]["private_tool_details_visible_to_main_agent"] is False
+    assert w03["private_tool_details_visible_to_main_agent"] is False
 
 
 def test_main_agent_selects_worker_runtime_only_validates() -> None:
@@ -104,23 +109,19 @@ def test_main_agent_selects_worker_runtime_only_validates() -> None:
         )
 
 
-def test_tool_catalog_summary_then_selected_details() -> None:
+def test_tool_catalog_exposes_worker_private_tools_without_prebinding_sources() -> None:
     directory = WorkerToolDirectory(ToolRegistry([
         _tool("graph.neighborhood", ["authoritative_entity_refs"], ["graph_relation_facts"]),
         _tool("graph.paths", ["source_entity_refs", "target_entity_refs"], ["financial_relation_paths"]),
     ]))
-    compatible = directory.compatible_tool_names(
-        GRAPH_RELATION_RETRIEVER,
-        available_context_keys={"authoritative_entity_refs"},
-    )
-    assert compatible == ["graph.neighborhood"]
-    summaries = directory.summary_catalog(GRAPH_RELATION_RETRIEVER, tool_names=compatible)
-    assert "input_schema" not in summaries[0]
+    candidates = directory.candidate_tool_names(GRAPH_RELATION_RETRIEVER)
+    assert candidates == ["graph.neighborhood", "graph.paths"]
+    summaries = directory.summary_catalog(GRAPH_RELATION_RETRIEVER, tool_names=candidates)
+    assert all("input_schema" not in row for row in summaries)
     assert summaries[0]["required_input_slots"] == ["authoritative_entity_refs"]
-    details = directory.load_details(GRAPH_RELATION_RETRIEVER, ["graph.neighborhood"])
-    assert [row["tool_id"] for row in details] == ["graph.neighborhood"]
-    assert "input_schema" in details[0]
-    assert "graph.paths" not in {row["tool_id"] for row in details}
+    details = directory.load_details(GRAPH_RELATION_RETRIEVER, candidates)
+    assert [row["tool_id"] for row in details] == ["graph.neighborhood", "graph.paths"]
+    assert all("input_schema" in row for row in details)
 
 
 def test_nested_slot_publication_satisfies_tool_node_contract() -> None:

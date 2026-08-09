@@ -14,6 +14,8 @@ from agent.tool_runtime import (
     OP_READ,
     TOOL_VISIBILITY_WORKER_PRIVATE,
     ToolDefinition,
+    ToolInputContract,
+    ToolOutputContract,
     description,
     result_schema,
     schema,
@@ -83,6 +85,19 @@ def build_risk_tool_definitions() -> list[ToolDefinition]:
                     for index, row in enumerate(rows)
                 ],
                 "business_empty": not bool(rows),
+                "risk_fact_fragment": {
+                    "fact_type": "concentration",
+                    "facts": {
+                        "position_count": len(rows),
+                        "position_market_value": total,
+                        "largest_position_weight": sorted_weights[0] if sorted_weights else 0.0,
+                        "top3_weight": sum(sorted_weights[:3]),
+                        "herfindahl_index": sum(weight * weight for weight in weights),
+                    },
+                    "source_refs": ["upstream_portfolio_state"],
+                    "limitations": [],
+                    "business_empty": not bool(rows),
+                },
             },
             "warnings": [],
             "errors": [],
@@ -109,6 +124,13 @@ def build_risk_tool_definitions() -> list[ToolDefinition]:
                 "account_risk_facts": facts,
                 "as_of_time": str(root.get("as_of_time") or account.get("as_of_time") or ""),
                 "business_empty": not bool(root),
+                "risk_fact_fragment": {
+                    "fact_type": "account",
+                    "facts": facts,
+                    "source_refs": ["upstream_account_snapshot"],
+                    "limitations": [],
+                    "business_empty": not bool(root),
+                },
             },
             "warnings": [],
             "errors": [],
@@ -144,6 +166,18 @@ def build_risk_tool_definitions() -> list[ToolDefinition]:
                 "unresolved_industry_count": unresolved,
                 "position_count": len(rows),
                 "business_empty": not bool(rows),
+                "risk_fact_fragment": {
+                    "fact_type": "exposure",
+                    "facts": {
+                        "industry_exposure": normalize(by_industry),
+                        "market_exposure": normalize(by_market),
+                        "unresolved_industry_count": unresolved,
+                        "position_count": len(rows),
+                    },
+                    "source_refs": ["upstream_portfolio_positions"],
+                    "limitations": (["industry_metadata_incomplete"] if unresolved else []),
+                    "business_empty": not bool(rows),
+                },
             },
             "warnings": (["industry_metadata_incomplete"] if unresolved else []),
             "errors": [],
@@ -154,21 +188,23 @@ def build_risk_tool_definitions() -> list[ToolDefinition]:
         del context
         collections = arguments.get("collections") or []
         if not isinstance(collections, list):
-            collections = [collections]
+            raise ValueError("risk_fact_collections_list_required")
         facts: list[dict[str, Any]] = []
         source_refs: list[str] = []
         limitations: list[str] = []
         successful = 0
         for item in collections:
             if not isinstance(item, dict):
-                continue
-            data = item.get("data") if isinstance(item.get("data"), dict) else item
-            success = bool(item.get("success", True))
-            if success:
-                successful += 1
-                facts.append(dict(data or {}))
-            source_refs.extend(str(src.get("source_id") or "") for src in item.get("sources") or [] if isinstance(src, dict))
-            limitations.extend(str(w) for w in item.get("warnings") or [])
+                raise ValueError("risk_fact_fragment_semantic_payload_required")
+            successful += 1
+            fact_payload = item.get("facts") if isinstance(item.get("facts"), dict) else {}
+            facts.append({
+                "fact_type": str(item.get("fact_type") or "unknown"),
+                **dict(fact_payload),
+                "business_empty": bool(item.get("business_empty", False)),
+            })
+            source_refs.extend(str(src) for src in item.get("source_refs") or [] if str(src))
+            limitations.extend(str(w) for w in item.get("limitations") or [] if str(w))
         return {
             "success": successful > 0,
             "message": "Risk facts finalized." if successful else "No risk fact tool completed.",
@@ -213,6 +249,17 @@ def build_risk_tool_definitions() -> list[ToolDefinition]:
             output_schema=result_schema(["largest_position_weight", "top3_weight", "herfindahl_index"]),
             execution_handler=concentration,
             produced_outputs=["largest_position_weight", "top3_weight", "herfindahl_index"],
+            input_contracts=[ToolInputContract(slot_id="portfolio_state", required=True)],
+            output_contracts=[
+                ToolOutputContract(slot_id="largest_position_weight", source_path="data.largest_position_weight"),
+                ToolOutputContract(slot_id="top3_weight", source_path="data.top3_weight"),
+                ToolOutputContract(slot_id="herfindahl_index", source_path="data.herfindahl_index"),
+                ToolOutputContract(
+                    slot_id="concentration_risk_fragment",
+                    schema_id="RiskFactFragment.v1",
+                    source_path="data.risk_fact_fragment",
+                ),
+            ],
             idempotency="pure_transform",
             tags=["risk", "concentration", "atomic", "read_only"],
             **common,
@@ -231,6 +278,16 @@ def build_risk_tool_definitions() -> list[ToolDefinition]:
             output_schema=result_schema(["account_risk_facts", "as_of_time"]),
             execution_handler=account_risk,
             produced_outputs=["account_risk_facts", "as_of_time"],
+            input_contracts=[ToolInputContract(slot_id="portfolio_state", required=True)],
+            output_contracts=[
+                ToolOutputContract(slot_id="account_risk_facts", source_path="data.account_risk_facts"),
+                ToolOutputContract(slot_id="as_of_time", source_path="data.as_of_time"),
+                ToolOutputContract(
+                    slot_id="account_risk_fragment",
+                    schema_id="RiskFactFragment.v1",
+                    source_path="data.risk_fact_fragment",
+                ),
+            ],
             idempotency="read_only",
             tags=["risk", "account", "atomic", "read_only"],
             **common,
@@ -249,6 +306,17 @@ def build_risk_tool_definitions() -> list[ToolDefinition]:
             output_schema=result_schema(["industry_exposure", "market_exposure", "unresolved_industry_count"]),
             execution_handler=exposure,
             produced_outputs=["industry_exposure", "market_exposure", "unresolved_industry_count"],
+            input_contracts=[ToolInputContract(slot_id="portfolio_state", required=True)],
+            output_contracts=[
+                ToolOutputContract(slot_id="industry_exposure", source_path="data.industry_exposure"),
+                ToolOutputContract(slot_id="market_exposure", source_path="data.market_exposure"),
+                ToolOutputContract(slot_id="unresolved_industry_count", source_path="data.unresolved_industry_count"),
+                ToolOutputContract(
+                    slot_id="exposure_risk_fragment",
+                    schema_id="RiskFactFragment.v1",
+                    source_path="data.risk_fact_fragment",
+                ),
+            ],
             idempotency="pure_transform",
             tags=["risk", "exposure", "atomic", "read_only"],
             **common,
@@ -267,6 +335,21 @@ def build_risk_tool_definitions() -> list[ToolDefinition]:
             output_schema=result_schema(["risk_facts", "source_refs", "limitations"]),
             execution_handler=finalize,
             produced_outputs=["risk_facts", "source_refs", "limitations"],
+            input_contracts=[
+                ToolInputContract(
+                    slot_id="collections",
+                    schema_id="RiskFactFragment.v1",
+                    required=True,
+                    accepted_sources=("upstream_tool",),
+                    cardinality="many",
+                    description="One or more risk-fact fragments selected by the Tool DAG.",
+                )
+            ],
+            output_contracts=[
+                ToolOutputContract(slot_id="risk_facts", source_path="data.risk_facts"),
+                ToolOutputContract(slot_id="source_refs", source_path="data.source_refs"),
+                ToolOutputContract(slot_id="limitations", source_path="data.limitations"),
+            ],
             idempotency="pure_transform",
             tags=["risk", "finalizer", "atomic", "read_only"],
             **common,

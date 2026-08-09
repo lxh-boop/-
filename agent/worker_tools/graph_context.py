@@ -14,6 +14,8 @@ from agent.tool_runtime import (
     OP_SYSTEM,
     TOOL_VISIBILITY_WORKER_PRIVATE,
     ToolDefinition,
+    ToolInputContract,
+    ToolOutputContract,
     description,
     result_schema,
     schema,
@@ -22,8 +24,6 @@ from agent.tool_runtime import (
 
 DATABASE_WRITE_PORTFOLIO_GRAPH_CONTEXT = "database.write_portfolio_graph_context"
 DATABASE_WRITE_EVIDENCE_GRAPH_CONTEXT = "database.write_evidence_graph_context"
-# Compatibility alias for older imports; the registered tool uses the new name.
-GRAPH_PORTFOLIO_MATERIALIZE_SNAPSHOT = DATABASE_WRITE_PORTFOLIO_GRAPH_CONTEXT
 
 
 def build_graph_context_tool_definitions(
@@ -81,6 +81,14 @@ def build_graph_context_tool_definitions(
             supported_actions=["write_portfolio_graph_context"],
             supported_objects=["portfolio_graph_context"],
             produced_outputs=["portfolio_graph_context"],
+            input_contracts=[
+                ToolInputContract(slot_id="portfolio_state", required=True),
+                ToolInputContract(slot_id="user_id", required=True),
+                ToolInputContract(slot_id="as_of_time", required=False),
+            ],
+            output_contracts=[
+                ToolOutputContract(slot_id="portfolio_graph_context", source_path="data"),
+            ],
             operation_type=OP_SYSTEM,
             allowed_agent_types=[DATABASE_WRITER],
             permission_scope=OP_SYSTEM,
@@ -110,6 +118,12 @@ def build_graph_context_tool_definitions(
             supported_actions=["write_evidence_graph_context"],
             supported_objects=["evidence_graph_context"],
             produced_outputs=["evidence_graph_context"],
+            input_contracts=[
+                ToolInputContract(slot_id="evidence_collection", required=True),
+            ],
+            output_contracts=[
+                ToolOutputContract(slot_id="evidence_graph_context", source_path="data"),
+            ],
             operation_type=OP_SYSTEM,
             allowed_agent_types=[DATABASE_WRITER],
             permission_scope=OP_SYSTEM,
@@ -125,7 +139,6 @@ def build_graph_context_tool_definitions(
 
 __all__ = [
     "DATABASE_WRITE_EVIDENCE_GRAPH_CONTEXT",
-    "GRAPH_PORTFOLIO_MATERIALIZE_SNAPSHOT",
     "DATABASE_WRITE_PORTFOLIO_GRAPH_CONTEXT",
     "build_graph_context_tool_definitions",
 ]

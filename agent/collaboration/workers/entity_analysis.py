@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-import inspect
 import json
 from typing import Any
 
 from core.llm import LLMService
-from core.llm.contracts import LLMJSONError, extract_json_object
+from core.llm.contracts import LLMJSONError
 from core.llm.prompt_compaction import compact_json_dumps, schema_for_prompt
 
 from ..completion import build_completion_report
 from ..models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus
 from ..worker_contracts import array_schema, object_schema, string_schema, validate_schema
-from .common import execution_safe_value, safe_public_value
+from .common import execution_safe_value, materialize_promised_slots, safe_public_value
 from .slot_inputs import contract_input_slot_ids, slot_envelopes
+from .structured_output import generate_json_with_local_structural_repair
 
 
 _CLAIM_LIST_FIELDS = ("facts", "analysis", "uncertainties")
@@ -226,112 +226,6 @@ def _authoritative_entity_catalog(
     return rows
 
 
-def _generate_text_no_thinking(
-    llm_service: LLMService,
-    *,
-    stage: str,
-    messages: list[dict[str, Any]],
-    max_output_tokens: int,
-    operation: str,
-) -> str:
-    """Call generate_text while disabling model thinking when supported.
-
-    V22.0.1 keeps compatibility with older LLMService builds by discovering the
-    optional ``disable_thinking`` argument at runtime instead of requiring a core
-    LLM service replacement.
-    """
-
-    kwargs: dict[str, Any] = {
-        "stage": stage,
-        "messages": messages,
-        "max_output_tokens": max_output_tokens,
-        "temperature": 0.0,
-        "operation": operation,
-    }
-    try:
-        if "disable_thinking" in inspect.signature(llm_service.generate_text).parameters:
-            kwargs["disable_thinking"] = True
-    except (TypeError, ValueError):
-        pass
-    return str(llm_service.generate_text(**kwargs) or "")
-
-
-def _generate_entity_analysis_json(
-    llm_service: LLMService,
-    *,
-    messages: list[dict[str, Any]],
-    output_schema: dict[str, Any],
-    validate: Any,
-    allowed_source_task_ids: list[str],
-    operation: str,
-) -> dict[str, Any]:
-    """Generate W09 business JSON with one Worker-local structural repair.
-
-    The repair request intentionally does not include the original evidence or
-    user task. It receives only the first model output, the validation error, the
-    business schema, and the already-authorized source task ids. This prevents
-    schema repair from becoming a second full business-analysis pass.
-    """
-
-    primary_text = _generate_text_no_thinking(
-        llm_service,
-        stage="graph_entity_analysis",
-        messages=messages,
-        max_output_tokens=_MAX_PRIMARY_OUTPUT_TOKENS,
-        operation=operation,
-    )
-    try:
-        primary = extract_json_object(primary_text)
-        validate(primary)
-        return primary
-    except Exception as primary_exc:
-        repair_request = {
-            "task": "repair_existing_json_only",
-            "instruction": (
-                "Repair only the JSON syntax/shape of invalid_output. Preserve existing claims. "
-                "Do not redo the analysis, do not add facts or sources, and do not infer missing content. "
-                "If a field was truncated and cannot be recovered from invalid_output, use the smallest valid empty value allowed by the schema."
-            ),
-            "validation_error": {
-                "type": type(primary_exc).__name__,
-                "message": str(primary_exc)[:2000],
-            },
-            "allowed_source_task_ids": allowed_source_task_ids,
-            "output_schema": schema_for_prompt(output_schema),
-            "invalid_output": primary_text[:_MAX_REPAIR_INPUT_CHARS],
-        }
-        repair_messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a JSON structural repair function. Never perform business reasoning. "
-                    "Return exactly one complete JSON object and nothing else."
-                ),
-            },
-            {
-                "role": "user",
-                "content": compact_json_dumps(repair_request),
-            },
-        ]
-        repaired_text = _generate_text_no_thinking(
-            llm_service,
-            stage="graph_entity_analysis",
-            messages=repair_messages,
-            max_output_tokens=_MAX_REPAIR_OUTPUT_TOKENS,
-            operation="schema_repair_structural_only",
-        )
-        try:
-            repaired = extract_json_object(repaired_text)
-            validate(repaired)
-            return repaired
-        except Exception as repair_exc:
-            raise LLMJSONError(
-                "W09 local structured-output recovery exhausted: "
-                f"primary={type(primary_exc).__name__}:{str(primary_exc)[:800]}; "
-                f"repair={type(repair_exc).__name__}:{str(repair_exc)[:800]}"
-            ) from repair_exc
-
-
 def run_entity_analysis(
     llm_service: LLMService,
     task: GraphAgentTask,
@@ -475,13 +369,23 @@ def run_entity_analysis(
         },
     ]
     try:
-        analysis = _generate_entity_analysis_json(
+        analysis = generate_json_with_local_structural_repair(
             llm_service,
+            stage="graph_entity_analysis",
+            operation=task.boundary_id,
             messages=generation_messages,
             output_schema=output_schema,
-            validate=validate,
-            allowed_source_task_ids=sorted(known_source_task_ids),
-            operation=task.boundary_id,
+            validator=validate,
+            immutable_repair_context={
+                "allowed_source_task_ids": sorted(known_source_task_ids),
+            },
+            repair_guidance=(
+                "Preserve existing claims and source_task_ids. Do not redo analysis or add facts/sources."
+            ),
+            primary_max_output_tokens=_MAX_PRIMARY_OUTPUT_TOKENS,
+            repair_max_output_tokens=_MAX_REPAIR_OUTPUT_TOKENS,
+            max_invalid_output_chars=_MAX_REPAIR_INPUT_CHARS,
+            primary_disable_thinking=True,
         )
     except LLMJSONError as exc:
         completion = build_completion_report(
@@ -524,21 +428,6 @@ def run_entity_analysis(
             },
         )
 
-    completion = build_completion_report(
-        task,
-        execution_status="succeeded",
-        contract_status="valid",
-        business_status="sufficient",
-        completion_status="completed",
-        expected_task_completed=True,
-        produced_information_slots=[
-            "entity_analysis",
-            "entity_analysis_uncertainty",
-        ],
-        limitations=[],
-        failure_kind="none",
-        report_source="runtime",
-    )
     authoritative_refs = _authoritative_entity_refs(task, evidence_items)
     entity_analysis_slot = {
         "entity_refs": authoritative_refs or execution_safe_value(analysis.get("entity_refs") or []),
@@ -549,20 +438,23 @@ def run_entity_analysis(
         "conclusion": str(analysis.get("conclusion") or ""),
         "source_task_ids": sorted(known_source_task_ids),
     }
+    slots = materialize_promised_slots(task, entity_analysis_slot)
+    completion = build_completion_report(
+        task,
+        execution_status="succeeded",
+        contract_status="valid",
+        business_status="sufficient",
+        completion_status="completed",
+        expected_task_completed=True,
+        produced_information_slots=list(slots),
+        limitations=[],
+        failure_kind="none",
+        report_source="runtime",
+    )
     payload = {
         **entity_analysis_slot,
-        "slots": {
-            "entity_analysis": entity_analysis_slot,
-            "entity_analysis_uncertainty": {
-                "entity_refs": entity_analysis_slot["entity_refs"],
-                "uncertainties": entity_analysis_slot["uncertainties"],
-                "source_task_ids": entity_analysis_slot["source_task_ids"],
-            },
-        },
-        "produced_information_slots": [
-            "entity_analysis",
-            "entity_analysis_uncertainty",
-        ],
+        "slots": slots,
+        "produced_information_slots": list(slots),
     }
     return GraphWorkerResult(
         task_id=task.task_id,

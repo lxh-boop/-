@@ -7,7 +7,12 @@ from agent.collaboration.workers.internal_system import run_internal_system
 from agent.collaboration.models import GraphAgentTask, ResultStatus
 from agent.tool_dag.planner import WorkerToolDagPlanner
 from agent.tool_dag.validation import ToolDagValidator
-from agent.tool_runtime import ToolDefinition, ToolRegistry
+from agent.tool_runtime import (
+    ToolDefinition,
+    ToolInputContract,
+    ToolOutputContract,
+    ToolRegistry,
+)
 from agent.tool_runtime.contracts import OP_READ, TOOL_VISIBILITY_WORKER_PRIVATE
 from agent.worker_tools.internal_system import (
     INTERNAL_ENTITY_RESOLVE_RANKED_SECURITY,
@@ -42,26 +47,30 @@ def _tool(name: str, required: list[str], produced: list[str]) -> ToolDefinition
         output_schema={"type": "object", "required_data_keys": []},
         execution_handler=lambda args, context: {"success": True, "data": {}},
         produced_outputs=produced,
-        required_input_slots=required,
+        input_contracts=[
+            ToolInputContract(slot_id=slot, required=True)
+            for slot in required
+        ],
+        output_contracts=[
+            ToolOutputContract(slot_id=slot, source_path="data")
+            for slot in produced
+        ],
         operation_type=OP_READ,
         allowed_agent_types=[PORTFOLIO_ANALYST],
         visibility=TOOL_VISIBILITY_WORKER_PRIVATE,
     )
 
 
-def test_private_tool_reachability_allows_worker_generated_identity_chain() -> None:
+def test_private_tool_catalog_does_not_prebind_tool_dependencies() -> None:
     directory = WorkerToolDirectory(ToolRegistry([
         _tool("ranking", [], ["market_ranking_signals"]),
         _tool("resolve", ["market_ranking_signals"], ["security_node_id", "selected_entity_ref"]),
         _tool("prediction", ["security_node_id"], ["entity_model_signals"]),
     ]))
 
-    assert directory.compatible_tool_names(
-        PORTFOLIO_ANALYST, available_context_keys={"top_k"}
-    ) == ["ranking"]
-    assert directory.reachable_tool_names(
-        PORTFOLIO_ANALYST, available_context_keys={"top_k"}
-    ) == ["ranking", "resolve", "prediction"]
+    assert directory.candidate_tool_names(PORTFOLIO_ANALYST) == [
+        "ranking", "resolve", "prediction"
+    ]
 
 
 def test_w02_private_planner_builds_ranking_resolve_prediction_dag() -> None:
@@ -131,7 +140,7 @@ def test_w02_private_planner_builds_ranking_resolve_prediction_dag() -> None:
         run_id="run",
         read_only=True,
     )
-    assert llm.stages == ["worker_tool_candidate_selection", "progressive_worker_tool_dag_planner"] or llm.stages == ["worker_tool_candidate_selection", "worker_private_tool_dag_planner"]
+    assert llm.stages == ["worker_private_tool_dag_planner"]
     assert [task.tool_name for task in plan.tasks] == ["ranking", "resolve", "prediction"]
     assert plan.tasks[1].inputs["market_ranking_signals"]["from_tool_task_id"] == "P01"
     assert plan.tasks[2].inputs["security_node_id"]["from_tool_task_id"] == "P02"
@@ -202,13 +211,12 @@ def test_real_w02_private_catalog_declares_rank_to_identity_bridge() -> None:
 
     definitions = build_internal_system_tool_definitions(FakeProvider())
     directory = WorkerToolDirectory(ToolRegistry(definitions))
-    reachable = directory.reachable_tool_names(
-        PORTFOLIO_ANALYST,
-        available_context_keys={"user_id", "top_k", "model_name", "trade_date", "holding_period", "as_of_time"},
-    )
-    assert INTERNAL_RANKING_GET_LATEST in reachable
-    assert INTERNAL_ENTITY_RESOLVE_RANKED_SECURITY in reachable
-    assert INTERNAL_PREDICTION_GET_STOCK in reachable
+    candidates = directory.candidate_tool_names(PORTFOLIO_ANALYST)
+    assert INTERNAL_RANKING_GET_LATEST in candidates
+    assert INTERNAL_ENTITY_RESOLVE_RANKED_SECURITY in candidates
+    assert INTERNAL_PREDICTION_GET_STOCK in candidates
     resolver = directory.registry.get(INTERNAL_ENTITY_RESOLVE_RANKED_SECURITY)
-    assert resolver.required_input_slots == ["market_ranking_signals"]
-    assert "security_node_id" in resolver.produced_outputs
+    assert [item.slot_id for item in resolver.input_contracts if item.required] == [
+        "market_ranking_signals"
+    ]
+    assert "security_node_id" in [item.slot_id for item in resolver.output_contracts]

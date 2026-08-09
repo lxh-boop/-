@@ -378,11 +378,45 @@ def build_internal_system_tool_definitions(
         }
 
     def get_portfolio(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-        return provider.read_portfolio_state(
+        raw = provider.read_portfolio_state(
             user_id=str(arguments.get("user_id") or context.get("user_id") or "default"),
             output_dir=_output_dir(context),
             db_path=context.get("db_path"),
         )
+        if raw.get("success") is not True:
+            return raw
+        portfolio = dict(raw.get("portfolio") or {})
+        positions = [
+            dict(item)
+            for item in (portfolio.get("active_positions") or portfolio.get("positions") or [])
+            if isinstance(item, dict)
+        ]
+        # Semantic state is deliberately separated from record-heavy position
+        # collections. Large diagnostic snapshots/orders are not duplicated into
+        # the Worker-to-Worker state Slot; dedicated Tools can expose them when a
+        # future capability actually requires those facts.
+        state = {
+            key: value
+            for key, value in portfolio.items()
+            if key not in {
+                "positions",
+                "active_positions",
+                "orders",
+                "portfolio_snapshot",
+                "calculation_trace",
+            }
+        }
+        return {
+            "success": True,
+            "message": str(raw.get("message") or "Portfolio state queried."),
+            "data": {
+                "portfolio_state": _jsonable(state),
+                "portfolio_positions": _jsonable(positions),
+            },
+            "warnings": list(raw.get("warnings") or []),
+            "errors": list(raw.get("errors") or []),
+            "sources": list(portfolio.get("sources") or []),
+        }
 
     def get_account(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         value = portfolio_service.get_account_summary(
@@ -393,11 +427,20 @@ def build_internal_system_tool_definitions(
         return {"success": True, "message": "Account state queried.", "data": _jsonable(value), "warnings": [], "errors": [], "sources": []}
 
     def get_profile(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-        return user_profile_service.get_user_profile(
+        raw = user_profile_service.get_user_profile(
             str(arguments.get("user_id") or context.get("user_id") or "default"),
             output_dir=_output_dir(context),
             db_path=context.get("db_path"),
         )
+        data = dict(raw.get("data") or {})
+        constraints = data.pop("constraints", {})
+        return {
+            **raw,
+            "data": {
+                "profile_state": _jsonable(data),
+                "constraints": _jsonable(constraints),
+            },
+        }
 
     specs = [
         {
@@ -528,6 +571,56 @@ def build_internal_system_tool_definitions(
                     description="Stored model quality and evaluation metrics.",
                 )
             ]
+        if tool_name == INTERNAL_BACKTEST_GET_SUMMARY:
+            return [], [
+                ToolOutputContract(
+                    slot_id="backtest_summary",
+                    source_path="data",
+                    description="Backtest facts and summary records.",
+                )
+            ]
+        if tool_name == INTERNAL_STRATEGY_GET_SELECTED:
+            return [], [
+                ToolOutputContract(
+                    slot_id="selected_strategy_state",
+                    source_path="data",
+                    description="Current selected-strategy read state.",
+                )
+            ]
+        if tool_name == INTERNAL_PORTFOLIO_GET_STATE:
+            return [], [
+                ToolOutputContract(
+                    slot_id="current_portfolio_state",
+                    source_path="data.portfolio_state",
+                    description="Authoritative current portfolio snapshot.",
+                ),
+                ToolOutputContract(
+                    slot_id="portfolio_positions",
+                    source_path="data.portfolio_positions",
+                    description="Current portfolio position records only.",
+                ),
+            ]
+        if tool_name == INTERNAL_ACCOUNT_GET_STATE:
+            return [], [
+                ToolOutputContract(
+                    slot_id="account_financial_state",
+                    source_path="data",
+                    description="Current account financial summary.",
+                )
+            ]
+        if tool_name == INTERNAL_USER_PROFILE_GET:
+            return [], [
+                ToolOutputContract(
+                    slot_id="user_profile_state",
+                    source_path="data.profile_state",
+                    description="Current user profile, risk assessment and investment goal.",
+                ),
+                ToolOutputContract(
+                    slot_id="user_constraints",
+                    source_path="data.constraints",
+                    description="Current explicit user constraints only.",
+                ),
+            ]
         return [], []
 
     common_properties = {
@@ -545,6 +638,19 @@ def build_internal_system_tool_definitions(
         required = list(spec["required"])
         outputs = list(spec["outputs"])
         input_contracts, output_contracts = io_contracts(str(spec["name"]))
+        declared_input_ids = {item.slot_id for item in input_contracts}
+        input_contracts = [
+            *input_contracts,
+            *[
+                ToolInputContract(
+                    slot_id=key,
+                    required=key in required,
+                    accepted_sources=("context", "upstream_tool"),
+                )
+                for key in common_properties
+                if key not in declared_input_ids
+            ],
+        ]
         definitions.append(
             ToolDefinition(
                 name=str(spec["name"]),

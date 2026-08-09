@@ -15,17 +15,16 @@ from typing import Any
 
 from core.llm import LLMService
 
-from ..completion import validate_completion_report
 from ..models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus
 from ..worker_contracts import (
     array_schema,
-    completion_report_schema,
     object_schema,
     string_schema,
     validate_schema,
 )
-from .common import execution_safe_value, safe_public_value
+from .common import execution_safe_value, materialize_promised_slots, safe_public_value
 from .slot_inputs import slot_envelopes
+from .structured_output import generate_json_with_local_structural_repair
 
 
 def _proposal_output_schema() -> dict[str, Any]:
@@ -49,7 +48,6 @@ def _proposal_output_schema() -> dict[str, Any]:
             ),
             "requires_approval": {"type": "boolean"},
             "execution_allowed": {"type": "boolean"},
-            "completion_report": completion_report_schema(),
         },
         required=[
             "action",
@@ -60,7 +58,6 @@ def _proposal_output_schema() -> dict[str, Any]:
             "missing_items",
             "requires_approval",
             "execution_allowed",
-            "completion_report",
         ],
         additional_properties=False,
     )
@@ -79,7 +76,7 @@ def run_strategy_guard(
     execution_context: dict[str, Any] | None,
 ) -> GraphWorkerResult:
     # These parameters remain in the stable Worker facade but are intentionally
-    # unused: a READ proposal must not invoke the legacy persistent proposal tool.
+    # unused: a READ proposal must not invoke a persistent proposal tool.
     del output_dir, db_path, default_top_k, execution_context
 
     input_envelopes = [
@@ -108,15 +105,8 @@ def run_strategy_guard(
                 raise RuntimeError("proposal_execution_allowed_must_be_false")
             if not isinstance(payload.get("proposal"), dict) or not payload.get("proposal"):
                 raise RuntimeError("proposal_payload_required")
-        validate_completion_report(
-            dict(payload.get("completion_report") or {}),
-            dict(task.completion_contract or {}),
-            path="$.completion_report",
-        )
 
-    payload = llm_service.generate_json(
-        stage="graph_strategy_guard",
-        messages=[
+    generation_messages = [
             {
                 "role": "system",
                 "content": (
@@ -125,8 +115,7 @@ def run_strategy_guard(
                     "分析、建议和待审批 Proposal 都属于 READ；不得调用写工具，不得保存 Proposal，不得修改账户、"
                     "持仓、策略、画像或配置，不得声称已经执行。只使用 structured_upstream_results 中的事实，"
                     "不得补造证券、持仓、风险、模型信号或约束。proposal_ready 时 requires_approval 必须为 true，"
-                    "execution_allowed 必须为 false。逐项对照 completion_contract 返回 completion_report，"
-                    "report_source 必须为 llm。规则只校验结构和引用，业务方案由你依据结构化输入完成。"
+                    "execution_allowed 必须为 false。Runtime负责完成度和合同验收。规则只校验结构和引用，业务方案由你依据结构化输入完成。"
                     "严格输出 proposal_output_schema 对应的 JSON，不要 Markdown。"
                 ),
             },
@@ -139,7 +128,6 @@ def run_strategy_guard(
                         "worker_args": safe_public_value(task.args),
                         "structured_input_slots": safe_dependencies,
                         "allowed_source_task_ids": sorted(allowed_source_ids),
-                        "completion_contract": dict(task.completion_contract or {}),
                         "proposal_persistence_policy": {
                             "access_mode": "read",
                             "scope": "current_run_only",
@@ -153,20 +141,29 @@ def run_strategy_guard(
                     default=str,
                 ),
             },
-        ],
-        max_output_tokens=3200,
-        validator=validate,
+        ]
+    payload = generate_json_with_local_structural_repair(
+        llm_service,
+        stage="graph_strategy_guard",
         operation=task.boundary_id,
-        repair_mode="targeted",
-        disable_thinking=False,
+        messages=generation_messages,
+        output_schema=_proposal_output_schema(),
+        validator=validate,
+        immutable_repair_context={
+            "allowed_source_task_ids": sorted(allowed_source_ids),
+            "requires_approval": True,
+            "execution_allowed": False,
+        },
         repair_guidance=(
-            "只修复 JSON Schema、source_task_ids、requires_approval/execution_allowed 和 completion_report。"
-            "不得新增上游没有的业务事实，不得转成写操作。"
+            "Only repair JSON shape, source_task_ids, requires_approval and execution_allowed. "
+            "Do not add upstream facts and do not turn the proposal into a write operation."
         ),
+        primary_max_output_tokens=3200,
+        repair_max_output_tokens=1800,
+        primary_disable_thinking=False,
     )
 
     action = str(payload.get("action") or "")
-    completion = dict(payload.get("completion_report") or {})
     if action == "need_context":
         missing = [
             MissingContextItem(
@@ -190,7 +187,6 @@ def run_strategy_guard(
             summary=str(payload.get("reason") or "生成方案前需要补充信息。"),
             missing_items=missing,
             limitations=[str(item) for item in payload.get("limitations") or []],
-            completion=completion,
         )
     if action == "blocked":
         return GraphWorkerResult(
@@ -208,28 +204,29 @@ def run_strategy_guard(
             focus_refs=task.focus_refs,
             summary=str(payload.get("reason") or "当前输入不能形成安全的待审批方案。"),
             warnings=[str(item) for item in payload.get("limitations") or []],
-            completion=completion,
         )
 
     proposal_id = f"run:{task.run_id}:proposal:{task.task_id}"
     proposal = safe_public_value(payload.get("proposal") or {})
+    proposal_slot = {
+        "proposal_id": proposal_id,
+        "plan_id": "",
+        "proposal": proposal,
+        "source_task_ids": [str(item) for item in payload.get("source_task_ids") or []],
+        "limitations": [str(item) for item in payload.get("limitations") or []],
+        "requires_approval": True,
+        "execution_allowed": False,
+        "access_mode": "read",
+        "scope": "current_run_only",
+        "persistent_write_performed": False,
+    }
+    slots = materialize_promised_slots(task, proposal_slot)
     return GraphWorkerResult(
         task_id=task.task_id,
         agent_id=task.assigned_agent,
         status=ResultStatus.PROPOSAL_READY,
         output_type="ReviewedProposal",
-        data={
-            "proposal_id": proposal_id,
-            "plan_id": "",
-            "proposal": proposal,
-            "source_task_ids": [str(item) for item in payload.get("source_task_ids") or []],
-            "limitations": [str(item) for item in payload.get("limitations") or []],
-            "requires_approval": True,
-            "execution_allowed": False,
-            "access_mode": "read",
-            "scope": "current_run_only",
-            "persistent_write_performed": False,
-        },
+        data={**proposal_slot, "slots": slots},
         error=None,
         focus_refs=task.focus_refs,
         summary=str(payload.get("reason") or "已生成当前 Run 内的待审批方案，尚未保存或执行。"),
@@ -249,5 +246,4 @@ def run_strategy_guard(
             "access_mode": "read",
             "persistent_write_performed": False,
         },
-        completion=completion,
     )

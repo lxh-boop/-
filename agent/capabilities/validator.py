@@ -5,6 +5,7 @@ from typing import Any
 from agent.collaboration.worker_contracts import WorkerContractViolation
 
 from .models import CapabilityTask
+from .semantic_slots import slot_matches_patterns, validate_slot_id
 
 
 _EFFECT_ORDER = {"read": 0, "proposal": 1, "write": 2}
@@ -128,17 +129,32 @@ class CapabilityPlanValidator:
 
                 input_slots = set(contract.input_slots())
                 output_slots = set(contract.output_slots())
-                unsupported_inputs = sorted(input_slots - set(boundary.accepted_input_slots))
-                unsupported_outputs = sorted(output_slots - set(boundary.produced_output_slots))
+                for slot_id in sorted(input_slots | output_slots):
+                    try:
+                        validate_slot_id(slot_id)
+                    except Exception as exc:
+                        raise WorkerContractViolation(
+                            "invalid_capability_semantic_slot",
+                            f"$.tasks[{index-1}].contracts[{cindex-1}]",
+                            str(slot_id),
+                        ) from exc
+                unsupported_inputs = sorted(
+                    slot for slot in input_slots
+                    if not slot_matches_patterns(slot, boundary.accepted_input_patterns)
+                )
+                unsupported_outputs = sorted(
+                    slot for slot in output_slots
+                    if not slot_matches_patterns(slot, boundary.produced_output_patterns)
+                )
                 if unsupported_inputs:
                     raise WorkerContractViolation(
-                        "capability_input_slot_outside_boundary",
+                        "capability_input_semantic_outside_boundary",
                         f"$.tasks[{index-1}].contracts[{cindex-1}].required_inputs",
                         ",".join(unsupported_inputs),
                     )
                 if unsupported_outputs:
                     raise WorkerContractViolation(
-                        "capability_output_slot_outside_boundary",
+                        "capability_output_semantic_outside_boundary",
                         f"$.tasks[{index-1}].contracts[{cindex-1}].promised_outputs",
                         ",".join(unsupported_outputs),
                     )

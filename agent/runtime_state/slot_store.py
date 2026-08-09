@@ -165,18 +165,14 @@ class RunSlotStore:
         if not values:
             return []
 
-        completion_slots = [
-            str(item)
-            for item in completion.get("produced_information_slots") or []
-            if str(item)
-        ]
-        declared_slots = [
-            str(item)
-            for item in data.get("produced_information_slots") or []
-            if str(item)
-        ]
-        produced = list(dict.fromkeys(completion_slots or declared_slots))
-        produced = [slot for slot in produced if slot in values and values.get(slot) is not None]
+        # Materialized data.slots is the single source of truth. Completion
+        # reports and expected outputs are declarations and never manufacture
+        # runtime data.
+        produced = list(dict.fromkeys(
+            str(slot_id)
+            for slot_id, value in values.items()
+            if str(slot_id) and value is not None
+        ))
         if not produced:
             return []
 
@@ -193,7 +189,9 @@ class RunSlotStore:
                 contract_by_slot[slot] = str(contract.get("contract_id") or "")
                 schema_by_slot[slot] = str(output.get("schema_id") or "")
 
-        allowed = set(contract_by_slot) or set(getattr(task, "expected_output_slots", []) or [])
+        allowed = set(contract_by_slot)
+        if not allowed:
+            return []
         for slot in produced:
             if allowed and slot not in allowed:
                 continue

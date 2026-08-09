@@ -29,6 +29,7 @@ from agent.capabilities import (
     SlotBinder,
     WorkerAssignmentValidator,
 )
+from agent.capabilities.semantic_slots import slot_matches_patterns
 
 from .models import GraphAgentTask, GraphWorkerResult, ResultStatus
 from .worker_catalog import WorkerDescriptionCatalog
@@ -44,11 +45,21 @@ class CoordinatorPlanningError(RuntimeError):
 class CoordinatorPlanner:
     """Interpret intent once, then generate one complete upfront Worker DAG."""
 
-    def __init__(self, directory: Any, *, llm_service: LLMService) -> None:
+    def __init__(
+        self,
+        directory: Any,
+        *,
+        llm_service: LLMService,
+        worker_tool_directory: Any | None = None,
+    ) -> None:
         self.directory = directory
         self.llm_service = llm_service
         self.registry = CapabilityRegistry()
-        self.worker_catalog = WorkerDescriptionCatalog(directory, self.registry)
+        self.worker_catalog = WorkerDescriptionCatalog(
+            directory,
+            self.registry,
+            worker_tool_directory=worker_tool_directory,
+        )
         self.validator = CapabilityPlanValidator(self.registry)
         self.slot_binder = SlotBinder()
         self.assignment_validator = WorkerAssignmentValidator(self.registry, directory)
@@ -214,13 +225,26 @@ class CoordinatorPlanner:
         return descriptions
 
     @staticmethod
-    def _worker_output_slots(worker: dict[str, Any]) -> set[str]:
-        return {
-            str(slot)
+    def _worker_output_patterns(worker: dict[str, Any]) -> list[str]:
+        return list(dict.fromkeys(
+            str(pattern)
             for boundary in worker.get("supported_boundaries") or []
-            for slot in boundary.get("produced_output_slots") or []
-            if str(slot)
-        }
+            for pattern in boundary.get("produced_output_patterns") or []
+            if str(pattern)
+        ))
+
+    @classmethod
+    def _worker_supports_output(cls, worker: dict[str, Any], slot_id: str) -> bool:
+        if not slot_matches_patterns(slot_id, cls._worker_output_patterns(worker)):
+            return False
+        if str(worker.get("output_publication_mode") or "worker_synthesized") == "private_tool_passthrough":
+            discoverable = {
+                str(item)
+                for item in worker.get("private_tool_semantic_outputs") or []
+                if str(item)
+            }
+            return slot_id in discoverable
+        return True
 
     def _select_worker_calls(
         self,
@@ -265,7 +289,10 @@ class CoordinatorPlanner:
                 desired_slots = {str(item) for item in raw.get("desired_output_slots") or [] if str(item)}
                 if not desired_slots:
                     raise WorkerContractViolation("worker_call_output_slots_required", f"$.worker_calls[{index}].desired_output_slots")
-                unsupported = desired_slots - self._worker_output_slots(worker_by_id[worker_id])
+                unsupported = {
+                    slot for slot in desired_slots
+                    if not self._worker_supports_output(worker_by_id[worker_id], slot)
+                }
                 if unsupported:
                     raise WorkerContractViolation("worker_call_output_outside_worker", f"$.worker_calls[{index}].desired_output_slots", ",".join(sorted(unsupported)))
             if intent_contract.get("requires_user_facing_response") and not any(
@@ -287,7 +314,7 @@ class CoordinatorPlanner:
                     "worker_id": "Wxx from worker_descriptions",
                     "objective": "该Worker在本轮承担的业务目标",
                     "covers_need_ids": ["N01"],
-                    "desired_output_slots": ["该Worker公开能力真实可产出的Slot"],
+                    "desired_output_slots": ["符合该Worker produced_output_patterns 的稳定语义Slot；已有能力优先复用output_slot_examples"],
                 }],
                 "selection_reason": "只解释canonical intent如何被这些Worker覆盖",
             },
@@ -301,7 +328,7 @@ class CoordinatorPlanner:
                     "role": "system",
                     "content": (
                         "你是MainAgent的Worker委派阶段。原始用户请求已经被唯一解释为canonical_intent_contract；禁止重新解释、扩大或缩小它。"
-                        "你现在一次性看到所有可用Worker的完整公开description。使用delegation_description、delegate_when、supported_boundaries和produced_output_slots，"
+                        "你现在一次性看到所有可用Worker的完整公开description。使用delegation_description、delegate_when、supported_boundaries、produced_output_patterns、output_slot_examples、output_publication_mode和private_tool_semantic_outputs。private_tool_semantic_outputs只公开该Worker可确定性产出的语义Slot，不暴露Tool身份或参数。"
                         "选择能够覆盖全部required need的最小充分Worker调用集合。每个required need必须由covers_need_ids显式覆盖。"
                         "需要自然语言最终交付的presentation need必须由能真实产出user_facing_report的Worker覆盖，但不要根据Worker编号硬编码。"
                         "不要选择Tool，不要生成DAG，不要输出私有Prompt。只输出JSON。"
@@ -454,8 +481,8 @@ class CoordinatorPlanner:
                     "business_parameters": {},
                     "contracts": [{
                         "description": "short obligation",
-                        "required_inputs": [{"slot_id": "registered input slot", "required": True, "cardinality": "one|many"}],
-                        "promised_outputs": [{"slot_id": "registered output slot", "provenance_required": True}],
+                        "required_inputs": [{"slot_id": "runtime semantic slot key", "required": True, "cardinality": "one|many", "required_paths": ["optional minimal.path", "records[*].field"]}],
+                        "promised_outputs": [{"slot_id": "runtime semantic slot key", "provenance_required": True, "required_paths": []}],
                         "acceptance_rule_ids": ["registered rule id"],
                         "forbidden_output_slots": [],
                         "criticality": "required|optional",
@@ -474,9 +501,9 @@ class CoordinatorPlanner:
                     "content": (
                         "你是MainAgent的Worker DAG生成阶段。canonical_intent_contract和selected_worker_calls已经是权威决定；"
                         "禁止重新解释原始用户请求，禁止增删WorkerCall。一次性生成完整Worker DAG的任务/CapabilityContract。"
-                        "每个WorkerCall的desired_output_slots必须由同一worker_id的任务真实承诺产出；依赖关系不要手写，Runtime会根据Slot生产/消费自动推导。"
+                        "每个WorkerCall的desired_output_slots必须由同一worker_id的任务真实承诺产出；Slot是开放的运行时语义Key，不是固定业务枚举。output_publication_mode=private_tool_passthrough时，desired_output_slots必须从private_tool_semantic_outputs选择；新增Tool的OutputContract会自动进入该列表，不需要中央Slot注册。output_publication_mode=worker_synthesized时，可创建匹配Boundary produced_output_patterns的新语义Key。生产者/消费者合同必须使用完全相同的Key。依赖关系不要手写，Runtime会根据Slot生产/消费自动推导。"
                         "不要输出goal_contract（它由程序从canonical intent和WorkerCall固定生成），不要输出Tool、私有Prompt、dependency_task_ids、GraphRef、模型、超时、重试。"
-                        "合同required_inputs只声明该任务实际不可缺少的输入。只输出JSON。"
+                        "合同required_inputs只声明该任务实际不可缺少的输入；当你明确知道下游只需要Slot中的少数字段时，用required_paths声明最小字段路径（支持records[*].field），不知道结构时留空，禁止猜字段。只输出JSON。"
                     ),
                 },
                 {"role": "user", "content": compact_json_dumps(user_payload)},
@@ -693,7 +720,7 @@ class CoordinatorPlanner:
         external: dict[str, list[dict[str, str]]] = {}
         for task in frozen:
             result = current_results.get(task.task_id)
-            produced = list((result.completion or {}).get("produced_information_slots") or task.expected_output_slots) if result else []
+            produced = list((result.completion or {}).get("produced_information_slots") or []) if result else []
             for slot in produced:
                 available_slots.add(str(slot))
                 external.setdefault(str(slot), []).append({

@@ -181,7 +181,11 @@ class AgentCollaborationCoordinator:
             directory=self.directory,
         )
         self.entry = MainEntryDecisionPlanner(llm_service=llm_service)
-        self.planner = CoordinatorPlanner(self.directory, llm_service=llm_service)
+        self.planner = CoordinatorPlanner(
+            self.directory,
+            llm_service=llm_service,
+            worker_tool_directory=self.specialist.worker_tool_directory,
+        )
 
     def close(self) -> None:
         self.store.close()
@@ -847,18 +851,18 @@ class AgentCollaborationCoordinator:
                 *(goal_contract.get("required_information_slots") or []),
             ] if str(item)
         }
-        requires_user_facing_report = "user_facing_report" in goal_slots
-        terminal_report_missing = bool(requires_user_facing_report and not report_content)
+        # Every normal Agent run owns a runtime-level N_FINAL requirement. A
+        # missing report is therefore a terminal contract failure; Worker
+        # summaries are audit material and must never become a second answer path.
+        terminal_report_missing = not bool(report_content)
         if report_content:
             answer = report_content
-        elif terminal_report_missing:
+        else:
             answer = (
                 "最终自然语言报告未生成，系统不会用Worker状态摘要冒充业务回答。"
                 if language != "en" else
                 "The final user-facing report was not generated; Worker status summaries are not used as the business answer."
             )
-        else:
-            answer = self._fallback_answer(results, language)
         statuses = [result.status for result in results.values()]
         need_context = [item for result in results.values() for item in result.missing_items if item.blocking]
         status_failed = sum(status in {ResultStatus.FAILED, ResultStatus.BLOCKED, ResultStatus.NOT_EXECUTED} for status in statuses)
@@ -1362,13 +1366,6 @@ class AgentCollaborationCoordinator:
                     })
                     pending.pop(task.task_id, None)
         return results, batches, timeline
-
-    @staticmethod
-    def _fallback_answer(results: dict[str, GraphWorkerResult], language: str) -> str:
-        summaries = [result.summary for result in results.values() if result.summary]
-        if summaries:
-            return "\n\n".join(summaries)
-        return "目前不能回答，相关数据链路尚未返回结果。" if language != "en" else "The system cannot answer because the required data path returned no result."
 
     @staticmethod
     def _empty_result(*, answer: str, success: bool, status: str, warnings: list[str] | None = None) -> dict[str, Any]:

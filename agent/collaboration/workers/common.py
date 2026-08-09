@@ -191,3 +191,27 @@ def contract_acceptance_rules(task: Any) -> list[str]:
             if value and value not in result:
                 result.append(value)
     return result
+
+
+def materialize_promised_slots(
+    task: Any,
+    value: Any,
+    *,
+    per_slot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Materialize every promised Worker output as a concrete runtime Slot.
+
+    ``data["slots"]`` is the single source of truth for Worker-produced
+    information.  There is intentionally no fallback from expected output names,
+    metadata, or completion reports.  ``per_slot`` can provide a specialized
+    value for a promised key; every other promised key receives ``value``.
+    """
+
+    promised = contract_output_slots(task)
+    overrides = dict(per_slot or {})
+    slots: dict[str, Any] = {}
+    for slot_id in promised:
+        slot_value = overrides.get(slot_id, value)
+        if slot_value is not None:
+            slots[slot_id] = slot_value
+    return slots

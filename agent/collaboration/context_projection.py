@@ -1,16 +1,22 @@
-"""DeepAgents-inspired Worker input projection middleware.
+"""Worker input projection from run-scoped semantic Slots.
 
-The runtime keeps orchestration metadata separate from execution context.  A
-Worker receives only CapabilityContract-bound slots, materialized from the
-run-scoped slot store.  Coordinator/audit summaries are never reused as Worker
-execution payloads.
+The coordinator never forwards WorkerResult payloads. SlotBinder provenance is
+followed exactly, required field paths are validated deterministically, and only
+the requested fields are materialized into the delegated Worker context.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
+from agent.capabilities.semantic_slots import (
+    SemanticSlotError,
+    estimate_json_chars,
+    estimate_tokens,
+    missing_required_paths,
+    project_paths,
+)
 from agent.runtime_state import RunSlotStore
 
 from .models import GraphAgentTask
@@ -23,16 +29,16 @@ class ProjectedWorkerInput:
     source_type: str
     producer_task_id: str = ""
     value_ref: str = ""
+    required_paths: list[str] = field(default_factory=list)
+    optional_paths: list[str] = field(default_factory=list)
+    raw_chars: int = 0
+    projected_chars: int = 0
+    raw_token_estimate: int = 0
+    projected_token_estimate: int = 0
 
 
 class WorkerInputProjectionMiddleware:
-    """Materialize contract-bound Worker inputs from authoritative runtime state.
-
-    This mirrors the context-isolation pattern used by Deep Agents: orchestration
-    context stays small while delegated workers receive the concrete context
-    required for their task.  No fallback to coordinator-visible WorkerResult
-    summaries is allowed.
-    """
+    """Resolve bound Slots and enforce per-task field requirements."""
 
     def __init__(self, slot_store: RunSlotStore) -> None:
         self.slot_store = slot_store
@@ -89,22 +95,44 @@ class WorkerInputProjectionMiddleware:
             source_type = str(binding.get("source_type") or "").strip()
             producer_task_id = str(binding.get("producer_task_id") or "").strip()
             output_slot_id = str(binding.get("output_slot_id") or slot_id).strip()
+            required_paths = list(dict.fromkeys(
+                str(item).strip()
+                for item in binding.get("required_paths") or []
+                if str(item).strip()
+            ))
+            optional_paths = list(dict.fromkeys(
+                str(item).strip()
+                for item in binding.get("optional_paths") or []
+                if str(item).strip()
+            ))
             value_ref = ""
 
             if source_type in {"runtime_context", "user_parameter"}:
-                value = runtime_values.get(slot_id)
+                raw_value = runtime_values.get(slot_id)
             elif source_type == "upstream_task":
                 record = self.slot_store.read_bound(
                     run_id=task.run_id,
                     task_id=producer_task_id,
                     slot_id=output_slot_id,
                 )
-                value = record.value if record is not None else None
+                raw_value = record.value if record is not None else None
                 value_ref = record.value_ref if record is not None else ""
+            else:
+                raw_value = None
+
+            if raw_value is not None:
+                missing = missing_required_paths(raw_value, required_paths)
+                if missing:
+                    raise SemanticSlotError(
+                        "slot_required_path_missing",
+                        slot_id=slot_id,
+                        detail=",".join(missing),
+                    )
+                paths = [*required_paths, *optional_paths]
+                value = project_paths(raw_value, paths) if paths else raw_value
             else:
                 value = None
 
-            # Multiple bindings to one consumer slot remain an ordered collection.
             if slot_id in resolved:
                 current = resolved[slot_id]
                 resolved[slot_id] = [*current, value] if isinstance(current, list) else [current, value]
@@ -117,6 +145,12 @@ class WorkerInputProjectionMiddleware:
                 source_type=source_type,
                 producer_task_id=producer_task_id,
                 value_ref=value_ref,
+                required_paths=required_paths,
+                optional_paths=optional_paths,
+                raw_chars=estimate_json_chars(raw_value),
+                projected_chars=estimate_json_chars(value),
+                raw_token_estimate=estimate_tokens(raw_value),
+                projected_token_estimate=estimate_tokens(value),
             ))
 
         return resolved, audit_rows

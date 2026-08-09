@@ -69,6 +69,22 @@ class ToolRegistry:
             raise ValueError(
                 f"business_state_mutation_requires_approval:{definition.name}"
             )
+        if (
+            definition.visibility == "worker_private"
+            and definition.produced_outputs
+            and not definition.output_contracts
+        ):
+            raise ValueError(
+                f"worker_private_tool_requires_explicit_output_contracts:{definition.name}"
+            )
+        if (
+            definition.visibility == "worker_private"
+            and (definition.input_schema.get("properties") or {})
+            and not definition.input_contracts
+        ):
+            raise ValueError(
+                f"worker_private_tool_requires_explicit_input_contracts:{definition.name}"
+            )
         input_slots = [str(item.slot_id or "").strip() for item in definition.input_contracts]
         output_slots = [str(item.slot_id or "").strip() for item in definition.output_contracts]
         if any(not slot for slot in input_slots):
@@ -84,6 +100,23 @@ class ToolRegistry:
         if undeclared_inputs:
             raise ValueError(
                 f"tool_input_contract_not_in_input_schema:{definition.name}:{','.join(undeclared_inputs)}"
+            )
+        invalid_cardinality = [
+            item.slot_id for item in definition.input_contracts
+            if str(item.cardinality or "one") not in {"one", "many"}
+        ]
+        if invalid_cardinality:
+            raise ValueError(
+                f"invalid_tool_input_cardinality:{definition.name}:{','.join(invalid_cardinality)}"
+            )
+        invalid_many_schema = [
+            item.slot_id for item in definition.input_contracts
+            if str(item.cardinality or "one") == "many"
+            and str((input_properties.get(item.slot_id) or {}).get("type") or "") != "array"
+        ]
+        if invalid_many_schema:
+            raise ValueError(
+                f"tool_many_input_requires_array_schema:{definition.name}:{','.join(invalid_many_schema)}"
             )
         missing_paths = [
             item.slot_id for item in definition.output_contracts

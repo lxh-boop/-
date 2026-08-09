@@ -13,16 +13,6 @@ from ..models import GraphAgentTask, GraphWorkerResult, ResultStatus
 from .common import contract_acceptance_rules, contract_output_slots, execution_safe_value, safe_public_value
 
 
-_TOOL_SLOT_MAP = {
-    "internal.prediction.get_stock": ["entity_model_signals"],
-    "internal.ranking.get_latest": ["market_ranking_signals"],
-    "internal.model.get_metrics": ["model_quality_metrics"],
-    "internal.backtest.get_summary": ["backtest_summary"],
-    "internal.strategy.get_selected": ["selected_strategy_state"],
-    "internal.portfolio.get_state": ["current_portfolio_state", "portfolio_positions"],
-    "internal.account.get_state": ["account_financial_state"],
-    "internal.user_profile.get": ["user_profile_state", "user_constraints"],
-}
 
 
 def _available_context(
@@ -54,17 +44,11 @@ def _publish_slots(task: GraphAgentTask, dag_result: Any) -> tuple[dict[str, Any
     slots: dict[str, Any] = {}
     warnings: list[str] = []
     for tool_result in list(getattr(dag_result, "final_results", []) or []):
-        tool_name = str(getattr(tool_result, "tool_name", "") or "")
         data = execution_safe_value(dict(getattr(tool_result, "data", {}) or {}))
         semantic_slots = data.get("slots") if isinstance(data.get("slots"), dict) else {}
         for slot, value in semantic_slots.items():
             if str(slot) in wanted:
                 slots[str(slot)] = execution_safe_value(value)
-        # Backward-compatible fallback for Tools not yet migrated to Tool IO Contract v1.
-        if not semantic_slots:
-            for slot in _TOOL_SLOT_MAP.get(tool_name, []):
-                if slot in wanted:
-                    slots[slot] = data
         warnings.extend(str(item) for item in getattr(tool_result, "warnings", []) or [] if str(item))
         warnings.extend(str(item) for item in getattr(tool_result, "errors", []) or [] if str(item))
     produced = [slot for slot in contract_output_slots(task) if slot in slots]

@@ -1,10 +1,6 @@
 """Authoritative Worker implementation directory.
 
-MainAgent visibility is progressive:
-1. every Worker contributes a compact summary;
-2. MainAgent selects candidate Worker IDs;
-3. only selected candidates expose full public descriptions.
-
+MainAgent receives every eligible Worker's complete public capability description upfront.
 Private prompts and private Tool IDs never leave the Worker runtime.
 """
 
@@ -40,6 +36,7 @@ class CapabilityWorkerCard:
     limitations: list[str] = field(default_factory=list)
     escalation_policy: str = ""
     execution_mode: str = "pure_llm"
+    output_publication_mode: str = "worker_synthesized"
     max_effect_level: str = "read"
     private_worker_prompt: str = ""
     private_tool_ids: list[str] = field(default_factory=list)
@@ -101,6 +98,7 @@ _CARDS = {
         limitations=["只读取内部权威数据", "不把读取结果自行扩展成最终业务结论"],
         escalation_policy="私有Tool均无法产出合同槽位时上报MainAgent。",
         execution_mode="hybrid",
+        output_publication_mode="private_tool_passthrough",
         private_worker_prompt=(
             "根据MainAgent给出的业务目标和合同承诺Slot，自主规划最小私有Tool DAG。"
             "不要因为初始没有证券GraphRef就直接判定上下文缺失；如果已有私有Tool能先产生排名/身份线索，"
@@ -131,6 +129,7 @@ _CARDS = {
         limitations=["关系端点必须来自权威GraphRef", "不推断未绑定的来源或目标角色"],
         escalation_policy="无兼容私有Tool或局部处理耗尽后上报MainAgent。",
         execution_mode="hybrid",
+        output_publication_mode="private_tool_passthrough",
         private_worker_prompt=(
             "只在锁定GraphRef范围内读取关系，不创造实体。不得按实体数量决定工具；"
             "先按required_input_slots过滤，再结合合同目标、Tool摘要和produced_outputs规划。"

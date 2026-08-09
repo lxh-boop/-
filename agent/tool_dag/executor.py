@@ -46,11 +46,7 @@ class ToolDagExecutor:
                 if not isinstance(slots, dict) or output_slot not in slots:
                     raise KeyError(f"tool_output_slot_missing:{output_slot}")
                 return slots[output_slot]
-            key = str(spec.get("data_key") or "").strip()
-            if key:
-                return (result.data or {}).get(key)
-            # Legacy Tool handoff may still consume the complete normalized result.
-            return result.to_dict()
+            raise KeyError(f"tool_output_slot_required:{spec.get('from_tool_task_id') or ''}")
         return {
             key: ToolDagExecutor._resolve_ref(value, context=context, results=results)
             for key, value in spec.items()

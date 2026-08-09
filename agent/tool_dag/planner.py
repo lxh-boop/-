@@ -1,8 +1,8 @@
-"""Progressive LLM planner for Worker-private Tool DAGs.
+"""LLM planner for Worker-private Tool DAGs.
 
-A Worker first receives summaries for compatible private Tools. After selecting
-candidate Tool IDs, only those Tools expose full descriptions and schemas for
-DAG planning. MainAgent never sees either layer.
+Each Worker sees its own fixed private Tool contracts. Runtime does not guess
+producer/consumer bindings before DAG planning; the DAG explicitly decides which
+context values and upstream Tool outputs satisfy each Tool input.
 """
 
 from __future__ import annotations
@@ -63,155 +63,48 @@ class WorkerToolDagPlanner:
         *,
         worker_task_id: str,
         worker_role: str,
-        worker_objective: str,
-        boundary_id: str,
         available_tool_names: set[str],
         required_output_keys: list[str],
-        available_context_keys: set[str],
         run_id: str,
-        replan_context: dict[str, Any] | None = None,
     ) -> list[str]:
-        summaries = self.directory.summary_catalog(
+        """Expose the full allowed private Tool catalog to the Worker planner.
+
+        This is deterministic and intentionally does not infer reachability from
+        input/output names. The final Tool DAG is the only place where concrete
+        producer/consumer bindings are declared.
+        """
+
+        selected = self.directory.candidate_tool_names(
             worker_role,
-            tool_names=sorted(available_tool_names),
+            allowed_tool_names=available_tool_names,
         )
-        flow_event(
-            "TOOL_SUMMARY_CATALOG_LOADED",
-            {
-                "worker_role": worker_role,
-                "compatible_tool_count": len(summaries),
-                "tool_ids": [item["tool_id"] for item in summaries],
-                "visibility": "summary_only",
-            },
-            run_id=run_id,
-            task_id=worker_task_id,
-        )
-        if not summaries:
+        if not selected:
             raise ToolDagContractViolation(
-                "no_compatible_private_tool",
-                "$.private_tool_summary_catalog",
-                ",".join(sorted(available_context_keys)),
+                "no_worker_private_tool",
+                "$.private_tool_catalog",
+                worker_role,
             )
-        if len(summaries) == 1:
-            selected = [str(summaries[0]["tool_id"])]
-            flow_event(
-                "TOOL_CANDIDATE_SELECTION_COMPLETED",
-                {
-                    "candidate_tool_ids": selected,
-                    "selection_mode": "single_compatible_tool",
-                },
-                run_id=run_id,
-                task_id=worker_task_id,
-            )
-            return selected
-
-        known = {str(item.get("tool_id") or "") for item in summaries}
-        required = {str(item) for item in required_output_keys if str(item)}
-
-        def validate(payload: dict[str, Any]) -> None:
-            ids = payload.get("candidate_tool_ids")
-            if not isinstance(ids, list) or not ids:
-                raise ToolDagContractViolation("tool_candidate_list_required", "$.candidate_tool_ids")
-            normalized = [str(item or "").strip() for item in ids]
-            if len(normalized) != len(set(normalized)):
-                raise ToolDagContractViolation("duplicate_tool_candidate", "$.candidate_tool_ids")
-            unknown = sorted(set(normalized) - known)
-            if unknown:
-                raise ToolDagContractViolation(
-                    "unknown_tool_candidate",
-                    "$.candidate_tool_ids",
-                    ",".join(unknown),
-                )
-            selected_rows = [item for item in summaries if item["tool_id"] in normalized]
-            covered = {
-                str(slot)
-                for item in selected_rows
-                for slot in item.get("produced_output_slots") or []
-                if str(slot)
-            }
-            if required and not required.issubset(covered):
-                missing = sorted(required - covered)
-                raise ToolDagContractViolation(
-                    "tool_candidates_do_not_cover_worker_outputs",
-                    "$.candidate_tool_ids",
-                    ",".join(missing),
-                )
-
-            # Candidate Tools must form a reachable capability chain from the
-            # Worker's current context. A downstream Tool may depend on a slot
-            # produced by another selected private Tool; Runtime validates the
-            # chain but never chooses the sequence on the Worker's behalf.
-            available_slots = set(available_context_keys)
-            pending = {str(item.get("tool_id") or ""): item for item in selected_rows}
-            while pending:
-                progressed = False
-                for tool_id, item in list(pending.items()):
-                    required_slots = {
-                        str(slot)
-                        for slot in item.get("required_input_slots") or []
-                        if str(slot)
-                    }
-                    if required_slots.issubset(available_slots):
-                        available_slots.update(
-                            str(slot)
-                            for slot in item.get("produced_output_slots") or []
-                            if str(slot)
-                        )
-                        pending.pop(tool_id, None)
-                        progressed = True
-                if not progressed:
-                    raise ToolDagContractViolation(
-                        "tool_candidates_missing_reachable_prerequisite_chain",
-                        "$.candidate_tool_ids",
-                        ",".join(sorted(pending)),
-                    )
-
-        user_payload: dict[str, Any] = {
-            "worker_task_id": worker_task_id,
-            "worker_role": worker_role,
-            "boundary_id": boundary_id,
-            "worker_objective": worker_objective,
-            "available_context_keys": sorted(available_context_keys),
-            "required_output_keys": list(required_output_keys),
-            "private_tool_summary_catalog": summaries,
-            "required_output_shape": {
-                "candidate_tool_ids": ["tool.id"],
-                "selection_reason": "short reason",
-            },
+        rows = self.directory.summary_catalog(worker_role, tool_names=selected)
+        produced = {
+            str(slot)
+            for row in rows
+            for slot in row.get("produced_output_slots") or []
+            if str(slot)
         }
-        if replan_context:
-            user_payload["local_replan_context"] = replan_context
-        payload = self.llm_service.generate_json(
-            stage="worker_tool_candidate_selection",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "你是专业Worker的私有Tool候选选择阶段。当前只看到从现有上下文或其他私有Tool产出可达的Tool摘要。"
-                        "选择完成Worker合同所需的最小候选Tool集合；如果目标Tool的输入需要由另一个私有Tool先产生，必须把该前置Tool一并选入候选集合。"
-                        "不得选择摘要之外的Tool，不生成DAG，不生成参数。只输出JSON。"
-                    ),
-                },
-                {"role": "user", "content": compact_json_dumps(user_payload)},
-            ],
-            max_output_tokens=600,
-            validator=validate,
-            operation=f"select_private_tool_candidates:{worker_role}:{boundary_id}",
-            disable_thinking=True,
-            repair_mode="targeted",
-            repair_guidance="只修复候选Tool ID、重复项或输出覆盖问题。",
-        )
-        selected = list(dict.fromkeys(
-            str(item or "").strip()
-            for item in payload.get("candidate_tool_ids") or []
-            if str(item or "").strip()
-        ))
+        required = {str(item) for item in required_output_keys if str(item)}
+        if required and not required.issubset(produced):
+            missing = sorted(required - produced)
+            raise ToolDagContractViolation(
+                "worker_private_tools_do_not_cover_required_outputs",
+                "$.private_tool_catalog",
+                ",".join(missing),
+            )
         flow_event(
-            "TOOL_CANDIDATE_SELECTION_COMPLETED",
+            "TOOL_PRIVATE_CATALOG_SELECTED",
             {
-                "candidate_tool_ids": selected,
-                "selection_mode": "summary_then_details",
-                "selection_reason": str(payload.get("selection_reason") or "")[:1000],
+                "tool_ids": selected,
+                "selection_mode": "all_worker_private_tools",
+                "candidate_llm_call_used": False,
             },
             run_id=run_id,
             task_id=worker_task_id,
@@ -235,19 +128,11 @@ class WorkerToolDagPlanner:
     ) -> ToolDagPlan:
         available_keys = set(available_context)
         requested_allowed = set(allowed_tool_names)
-        compatible = set(self.directory.reachable_tool_names(
-            worker_role,
-            available_context_keys=available_keys,
-            allowed_tool_names=requested_allowed,
-        ))
         selected = self._select_tool_candidates(
             worker_task_id=worker_task_id,
             worker_role=worker_role,
-            worker_objective=worker_objective,
-            boundary_id=boundary_id,
-            available_tool_names=compatible,
+            available_tool_names=requested_allowed,
             required_output_keys=required_output_keys,
-            available_context_keys=available_keys,
             run_id=run_id,
         )
         allowed = set(selected)
@@ -302,11 +187,11 @@ class WorkerToolDagPlanner:
             )
 
         system = (
-            "你是专业Worker内部的Tool DAG Planner。你先看过兼容Tool摘要，现在只获得已选候选Tool的完整描述和Schema。"
+            "你是专业Worker内部的Tool DAG Planner。private_tool_details_catalog包含该Worker可用的固定Tool合同。"
             "只能从 private_tool_details_catalog 选择Tool；不得选择其他Worker或修改Worker DAG。"
-            "根据任务目标和available_context生成最小Tool DAG。允许后续Tool消费前序Tool产生的语义Output Slot；由你决定Tool顺序和依赖。args只放普通常量，权威值通过inputs的from_context或from_tool_task_id引用。"
-            "当输入来自前序Tool时，优先使用{from_tool_task_id, output_slot}，output_slot必须来自上游Tool的output_contract；不要猜测records/items等Python内部data_key。"
-            "工具间只允许from_tool_task_id引用。final_output_task_ids必须指向完成目标的末端任务。"
+            "根据任务目标和available_context生成最小Tool DAG。Tool彼此独立；只有本次DAG决定哪个输入引用哪个上下文或上游Tool输出。args只放普通常量，权威值通过inputs引用。"
+            "当输入来自前序Tool时，使用{from_tool_task_id, output_slot}；当输入合同cardinality=many时，inputs对应值必须是由一个或多个引用组成的List。"
+            "output_slot必须来自上游Tool的output_contract；不要猜测records/items等Python内部data_key。final_output_task_ids必须指向完成目标的末端任务。"
             "不要输出goal_contract或expected_output_keys。严格输出JSON。"
         )
         payload = self.llm_service.generate_json(
@@ -407,30 +292,17 @@ class WorkerToolDagPlanner:
         previous_ids = {task.tool_task_id for task in previous_plan.tasks}
         available_keys = set(available_context)
         requested_allowed = set(allowed_tool_names)
-        compatible = set(self.directory.reachable_tool_names(
-            previous_plan.worker_role,
-            available_context_keys=available_keys,
-            allowed_tool_names=requested_allowed,
-        ))
         frozen_tool_names = {
             str(task.tool_name)
             for task in previous_plan.tasks
             if task.tool_task_id in reusable_ids
         }
-        candidate_pool = compatible.union(frozen_tool_names)
         selected = self._select_tool_candidates(
             worker_task_id=previous_plan.worker_task_id,
             worker_role=previous_plan.worker_role,
-            worker_objective=str(previous_plan.goal_contract.get("goal_summary") or ""),
-            boundary_id="local_replan",
-            available_tool_names=candidate_pool,
+            available_tool_names=requested_allowed.union(frozen_tool_names),
             required_output_keys=list(previous_plan.goal_contract.get("required_output_keys") or []),
-            available_context_keys=available_keys,
             run_id=run_id,
-            replan_context={
-                "node_execution_records": node_records,
-                "frozen_tool_ids": sorted(frozen_tool_names),
-            },
         )
         allowed = set(selected).union(frozen_tool_names)
         private_catalog = catalog_for_prompt(

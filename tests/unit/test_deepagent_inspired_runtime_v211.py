@@ -33,9 +33,9 @@ def test_worker_catalog_exposes_all_public_descriptions_upfront() -> None:
     assert "delegation_description" in w02
     assert "delegate_when" in w02
     assert "系统内部" in w02["delegation_description"]
-    assert "entity_model_signals" in w02["produced_output_slots"]
-    assert "market_ranking_signals" in w02["produced_output_slots"]
-    assert "model_quality_metrics" in w02["produced_output_slots"]
+    assert "entity_model_signals" in w02["output_slot_examples"]
+    assert "market_ranking_signals" in w02["output_slot_examples"]
+    assert "model_quality_metrics" in w02["output_slot_examples"]
 
 
 def test_slot_materialization_uses_bound_producer_and_preserves_nested_payload(tmp_path: Path) -> None:

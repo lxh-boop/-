@@ -9,6 +9,7 @@ from typing import Any
 from core.llm import LLMService
 
 from agent.capabilities import CapabilityContract, CapabilityContractValidator
+from agent.capabilities.semantic_slots import SemanticSlotError
 from agent.communication import MessageType, publish_agent_message
 from agent.console_trace import flow_event, get_llm_execution_timing, get_tool_execution_timing
 from agent.graph.impact_service import GraphImpactService
@@ -94,15 +95,13 @@ class SpecialistRuntime:
 
     @staticmethod
     def _produced_slots(task: GraphAgentTask, result: GraphWorkerResult) -> list[str]:
+        del task
         data = dict(result.data or {}) if isinstance(result.data, dict) else {}
-        slots = [str(item) for item in data.get("produced_information_slots") or [] if str(item)]
-        if not slots and isinstance(data.get("slots"), dict):
-            slots = [str(key) for key in data["slots"]]
-        if not slots:
-            slots = [str(item) for item in result.metadata.get("produced_information_slots") or [] if str(item)]
-        if not slots and result.status in {ResultStatus.COMPLETED, ResultStatus.PROPOSAL_READY}:
-            slots = list(task.expected_output_slots)
-        return list(dict.fromkeys(slots))
+        materialized = data.get("slots") if isinstance(data.get("slots"), dict) else {}
+        return list(dict.fromkeys(
+            str(slot_id) for slot_id, value in materialized.items()
+            if str(slot_id) and value is not None
+        ))
 
     def run(
         self,
@@ -132,9 +131,44 @@ class SpecialistRuntime:
             agent_id=task.assigned_agent,
         )
         task.status = TaskStatus.RUNNING
-        resolved_inputs, projected_inputs = self.input_projection.project(
-            task, execution_context=context
-        )
+        try:
+            resolved_inputs, projected_inputs = self.input_projection.project(
+                task, execution_context=context
+            )
+        except SemanticSlotError as exc:
+            task.status = TaskStatus.FAILED
+            return GraphWorkerResult(
+                task_id=task.task_id,
+                agent_id=task.assigned_agent,
+                status=ResultStatus.FAILED,
+                output_type="CapabilityResult",
+                data=None,
+                error={
+                    "error_id": "contract_validation_failure",
+                    "code": exc.code,
+                    "message": str(exc),
+                    "component": "worker_input_projection",
+                    "retryable": False,
+                    "slot_id": exc.slot_id,
+                    "detail": exc.detail,
+                },
+                focus_refs=task.focus_refs,
+                summary=(
+                    "CapabilityContract要求的Slot字段不存在，Worker未执行。"
+                    if language != "en"
+                    else "A required Slot field is missing; the Worker was not executed."
+                ),
+                completion=non_success_completion_report(
+                    task,
+                    execution_status="failed",
+                    reason=str(exc),
+                    failure_kind="contract_validation_failure",
+                ),
+                metadata={
+                    "input_gate_owner": "runtime",
+                    "main_agent_replan_recommended": False,
+                },
+            )
         flow_event(
             "WORKER_INPUT_PROJECTED",
             {
@@ -142,11 +176,51 @@ class SpecialistRuntime:
                 "worker_id": task.worker_id,
                 "slot_ids": [item.slot_id for item in projected_inputs],
                 "upstream_value_refs": [item.value_ref for item in projected_inputs if item.value_ref],
-                "projection_mode": "slot_store_materialized",
+                "projection_mode": "slot_store_field_projected",
                 "coordinator_summary_used_as_execution_input": False,
+                "slot_projection": [
+                    {
+                        "slot_id": item.slot_id,
+                        "required_paths": item.required_paths,
+                        "optional_paths": item.optional_paths,
+                        "raw_chars": item.raw_chars,
+                        "projected_chars": item.projected_chars,
+                        "raw_token_estimate": item.raw_token_estimate,
+                        "projected_token_estimate": item.projected_token_estimate,
+                    }
+                    for item in projected_inputs
+                ],
+                "raw_token_estimate_total": sum(item.raw_token_estimate for item in projected_inputs),
+                "projected_token_estimate_total": sum(item.projected_token_estimate for item in projected_inputs),
             },
             run_id=task.run_id,
         )
+        for item in projected_inputs:
+            if item.projected_token_estimate > 8000:
+                flow_event(
+                    "SLOT_OVERSIZED",
+                    {
+                        "task_id": task.task_id,
+                        "worker_id": task.worker_id,
+                        "slot_id": item.slot_id,
+                        "raw_token_estimate": item.raw_token_estimate,
+                        "projected_token_estimate": item.projected_token_estimate,
+                        "required_paths": item.required_paths,
+                    },
+                    run_id=task.run_id,
+                )
+        projected_total = sum(item.projected_token_estimate for item in projected_inputs)
+        if projected_total > 16000:
+            flow_event(
+                "WORKER_INPUT_OVERSIZED",
+                {
+                    "task_id": task.task_id,
+                    "worker_id": task.worker_id,
+                    "projected_token_estimate_total": projected_total,
+                    "slot_ids": [item.slot_id for item in projected_inputs],
+                },
+                run_id=task.run_id,
+            )
 
         # Input sufficiency is a Runtime responsibility, not a Worker judgment.
         # A Worker receives only the inputs that were actually bound to its
@@ -285,6 +359,13 @@ class SpecialistRuntime:
             else:
                 raise RuntimeError(f"unknown_worker_agent:{task.assigned_agent}")
         except Exception as exc:
+            exc_name = type(exc).__name__
+            structured_output_failure = exc_name == "LLMJSONError" or "json" in exc_name.lower()
+            failure_kind = (
+                "structured_output_failure"
+                if structured_output_failure
+                else "worker_execution_failure"
+            )
             result = GraphWorkerResult(
                 task_id=task.task_id,
                 agent_id=task.assigned_agent,
@@ -292,20 +373,35 @@ class SpecialistRuntime:
                 output_type="CapabilityResult",
                 data=None,
                 error={
-                    "code": "worker_execution_failed",
+                    "code": failure_kind,
                     "message": str(exc),
                     "component": task.assigned_agent,
-                    "retryable": True,
+                    "retryable": False if structured_output_failure else True,
+                    "local_recovery_exhausted": bool(structured_output_failure),
                 },
                 focus_refs=task.focus_refs,
-                summary="Worker 执行失败。" if language != "en" else "Worker execution failed.",
-                warnings=[f"{type(exc).__name__}:{exc}"],
+                summary=(
+                    "Worker结构化输出修复失败。"
+                    if structured_output_failure and language != "en"
+                    else "Worker structured-output recovery failed."
+                    if structured_output_failure
+                    else "Worker 执行失败."
+                    if language != "en"
+                    else "Worker execution failed."
+                ),
+                warnings=[f"{exc_name}:{exc}"],
                 completion=non_success_completion_report(
                     task,
                     execution_status="failed",
                     reason=str(exc),
-                    failure_kind="worker_execution_failure",
+                    failure_kind=failure_kind,
                 ),
+                metadata={
+                    "main_agent_replan_recommended": not structured_output_failure,
+                    "structured_output_local_recovery": (
+                        "exhausted" if structured_output_failure else ""
+                    ),
+                },
             )
 
         produced = self._produced_slots(task, result)
@@ -325,9 +421,15 @@ class SpecialistRuntime:
             )
 
         contracts = [CapabilityContract.from_dict(item) for item in task.contracts]
+        materialized_slots = (
+            dict((result.data or {}).get("slots") or {})
+            if isinstance(result.data, dict) and isinstance((result.data or {}).get("slots"), dict)
+            else {}
+        )
         contract_reports = self.contract_validator.validate(
             contracts=contracts,
             produced_slots=set(produced),
+            materialized_slots=materialized_slots,
             result_status=result.status.value,
             result_payload=result.data,
             evidence_refs=[ref.node_id for ref in result.evidence_refs] or [f"worker_result:{task.task_id}"],

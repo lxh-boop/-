@@ -378,7 +378,7 @@ class ToolExecutor:
                 "argument_keys": argument_keys,
                 "failure_kind": str(result.get("failure_kind") or ""),
                 "retryable": bool(result.get("retryable", False)),
-                "tool_io_contract_version": "tool-io-contract.v1" if definition.output_contracts or definition.input_contracts else "legacy",
+                "tool_io_contract_version": "tool-io-contract.v1" if definition.output_contracts or definition.input_contracts else "uncontracted",
                 "semantic_output_slots": list(semantic_slots),
             }
             reported_success = bool(result.get("success"))

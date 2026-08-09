@@ -32,6 +32,8 @@ class InputSlotRequirement:
     cardinality: Literal["one", "many"] = "one"
     authority_policy: str = "authoritative_or_verified_upstream"
     freshness_policy: str = "request_default"
+    required_paths: list[str] = field(default_factory=list)
+    optional_paths: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "InputSlotRequirement":
@@ -48,6 +50,16 @@ class InputSlotRequirement:
                 row.get("authority_policy") or "authoritative_or_verified_upstream"
             ).strip(),
             freshness_policy=str(row.get("freshness_policy") or "request_default").strip(),
+            required_paths=list(dict.fromkeys(
+                str(item).strip()
+                for item in row.get("required_paths") or []
+                if str(item).strip()
+            )),
+            optional_paths=list(dict.fromkeys(
+                str(item).strip()
+                for item in row.get("optional_paths") or []
+                if str(item).strip()
+            )),
         )
 
 
@@ -61,6 +73,7 @@ class OutputSlotGuarantee:
     provenance_required: bool = True
     authority_level: str = "worker_verified"
     freshness_policy: str = "request_default"
+    required_paths: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "OutputSlotGuarantee":
@@ -72,6 +85,11 @@ class OutputSlotGuarantee:
             provenance_required=bool(row.get("provenance_required", True)),
             authority_level=str(row.get("authority_level") or "worker_verified").strip(),
             freshness_policy=str(row.get("freshness_policy") or "request_default").strip(),
+            required_paths=list(dict.fromkeys(
+                str(item).strip()
+                for item in row.get("required_paths") or []
+                if str(item).strip()
+            )),
         )
 
 
@@ -173,8 +191,10 @@ class CapabilityBoundary:
     description: str
     responsibilities: list[str] = field(default_factory=list)
     non_responsibilities: list[str] = field(default_factory=list)
-    accepted_input_slots: list[str] = field(default_factory=list)
-    produced_output_slots: list[str] = field(default_factory=list)
+    accepted_input_patterns: list[str] = field(default_factory=lambda: ["*"])
+    produced_output_patterns: list[str] = field(default_factory=lambda: ["*"])
+    input_slot_examples: list[str] = field(default_factory=list)
+    output_slot_examples: list[str] = field(default_factory=list)
     allowed_acceptance_rule_ids: list[str] = field(default_factory=list)
     required_context_slots: list[str] = field(default_factory=list)
     allowed_information_sources: list[str] = field(default_factory=list)
@@ -270,6 +290,8 @@ class InputOutputBinding:
     producer_task_id: str = ""
     producer_contract_id: str = ""
     entity_scope: str = ""
+    required_paths: list[str] = field(default_factory=list)
+    optional_paths: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

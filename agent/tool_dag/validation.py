@@ -45,15 +45,13 @@ def _validate_input_binding_shape(value: Any, *, path: str) -> None:
             if not str(item.get("from_context") or "").strip():
                 raise ToolDagContractViolation("tool_context_ref_key_required", item_path)
         else:
-            unknown = set(item) - {"from_tool_task_id", "output_slot", "data_key"}
+            unknown = set(item) - {"from_tool_task_id", "output_slot"}
             if unknown:
                 raise ToolDagContractViolation(
                     "tool_result_ref_has_unknown_fields", item_path, ",".join(sorted(unknown))
                 )
             if not str(item.get("from_tool_task_id") or "").strip():
                 raise ToolDagContractViolation("tool_result_ref_task_id_required", item_path)
-            if str(item.get("output_slot") or "").strip() and str(item.get("data_key") or "").strip():
-                raise ToolDagContractViolation("tool_result_ref_output_slot_or_data_key", item_path)
 
 
 def _matches_schema_type(value: Any, schema: dict[str, Any]) -> bool:
@@ -208,6 +206,19 @@ class ToolDagValidator:
                         str((properties.get(name) or {}).get("type") or ""),
                     )
             for name, spec in inputs.items():
+                contract = _input_contract(definition, name)
+                cardinality = str(getattr(contract, "cardinality", "one") or "one")
+                if cardinality == "many":
+                    if not isinstance(spec, list) or not spec:
+                        raise ToolDagContractViolation(
+                            "tool_input_many_requires_non_empty_list",
+                            f"{path}.inputs.{name}",
+                        )
+                elif isinstance(spec, list):
+                    raise ToolDagContractViolation(
+                        "tool_input_one_requires_single_binding",
+                        f"{path}.inputs.{name}",
+                    )
                 _validate_input_binding_shape(spec, path=f"{path}.inputs.{name}")
                 refs = list(_iter_input_refs(spec))
                 if not refs:
@@ -215,7 +226,6 @@ class ToolDagValidator:
                         "tool_task_input_must_reference_context_or_tool",
                         f"{path}.inputs.{name}",
                     )
-                contract = _input_contract(definition, name)
                 if contract is not None and contract.accepted_sources:
                     allowed_sources = set(contract.accepted_sources)
                     for ref in refs:
@@ -276,7 +286,6 @@ class ToolDagValidator:
                     if not upstream_id:
                         continue
                     output_slot = str(ref.get("output_slot") or "").strip()
-                    legacy_data_key = str(ref.get("data_key") or "").strip()
                     if upstream_id in task_by_id:
                         producer_definition = definitions[upstream_id]
                     else:
@@ -302,13 +311,11 @@ class ToolDagValidator:
                                 f"$.tasks[{index}].inputs.{input_name}",
                                 f"{producer_contract.schema_id}->{consumer_contract.schema_id}",
                             )
-                    elif producer_definition.output_contracts:
-                        # Contracted Tools expose semantic output slots only.
-                        # Their raw Python data paths are Runtime-private.
+                    else:
                         raise ToolDagContractViolation(
-                            "tool_contracted_output_requires_output_slot",
+                            "tool_output_slot_required",
                             f"$.tasks[{index}].inputs.{input_name}",
-                            legacy_data_key or upstream_id,
+                            upstream_id,
                         )
 
         final_ids = [str(item).strip() for item in finals if str(item or "").strip()]

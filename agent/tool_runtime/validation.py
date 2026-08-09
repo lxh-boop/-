@@ -11,33 +11,24 @@ from .contracts import ToolDefinition, ToolInputContract, ToolOutputContract
 
 
 def input_contracts_for(definition: ToolDefinition) -> list[ToolInputContract]:
-    """Return explicit semantic input contracts, or infer a legacy view."""
+    """Return explicit semantic inputs only.
 
-    if definition.input_contracts:
-        return list(definition.input_contracts)
-    required = {str(item) for item in (definition.required_input_slots or definition.input_schema.get("required") or []) if str(item)}
-    properties = definition.input_schema.get("properties") if isinstance(definition.input_schema.get("properties"), dict) else {}
-    slots: list[ToolInputContract] = []
-    names = list(dict.fromkeys([
-        *[str(item) for item in definition.required_input_slots or [] if str(item)],
-        *[str(item) for item in definition.optional_input_slots or [] if str(item)],
-        *[str(item) for item in properties if str(item)],
-    ]))
-    for name in names:
-        slots.append(ToolInputContract(slot_id=name, required=name in required))
-    return slots
+    Worker-private Tool planning no longer infers semantic inputs from Python
+    function schemas or non-contract metadata.
+    """
+
+    return list(definition.input_contracts or [])
 
 
 def output_contracts_for(definition: ToolDefinition) -> list[ToolOutputContract]:
-    """Return explicit semantic outputs, or infer legacy semantic slots."""
+    """Return the explicit semantic outputs declared by the Tool.
 
-    if definition.output_contracts:
-        return list(definition.output_contracts)
-    return [
-        ToolOutputContract(slot_id=str(slot), source_path="")
-        for slot in definition.produced_outputs or []
-        if str(slot)
-    ]
+    There is intentionally no produced_outputs -> semantic Slot fallback.
+    Worker-private Tool data enters the new runtime only through concrete
+    ToolOutputContract source_path mappings.
+    """
+
+    return list(definition.output_contracts or [])
 
 
 def _extract_path(payload: dict[str, Any], path: str) -> tuple[bool, Any]:

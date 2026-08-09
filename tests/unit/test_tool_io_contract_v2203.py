@@ -18,6 +18,8 @@ from agent.worker_tools.internal_system import (
     INTERNAL_ENTITY_RESOLVE_RANKED_SECURITY,
     INTERNAL_PREDICTION_GET_STOCK,
     INTERNAL_RANKING_GET_LATEST,
+    INTERNAL_PORTFOLIO_GET_STATE,
+    INTERNAL_USER_PROFILE_GET,
     build_internal_system_tool_definitions,
 )
 from agent.worker_tools.registry import WorkerToolDirectory
@@ -187,8 +189,7 @@ def test_validator_requires_semantic_output_slot_for_contracted_tool() -> None:
                 "args": {},
                 "inputs": {
                     "market_ranking_signals": {
-                        "from_tool_task_id": "P01",
-                        "data_key": "records",
+                        "from_tool_task_id": "P01"
                     }
                 },
                 "priority": 2,
@@ -207,9 +208,9 @@ def test_validator_requires_semantic_output_slot_for_contracted_tool() -> None:
             read_only=True,
         )
     except ToolDagContractViolation as exc:
-        assert exc.code == "tool_contracted_output_requires_output_slot"
+        assert exc.code == "tool_output_slot_required"
     else:
-        raise AssertionError("contracted Tool raw data_key must be rejected")
+        raise AssertionError("contracted Tool handoff without output_slot must be rejected")
 
 
 def test_semantic_slot_drives_tool_to_tool_execution() -> None:
@@ -483,3 +484,32 @@ def test_real_w02_contracts_form_semantic_chain_without_exposing_paths() -> None
     )
     assert details[INTERNAL_PREDICTION_GET_STOCK]["input_contract"][0]["schema_id"] == "SecurityNodeId.v1"
     assert "source_path" not in str(details)
+
+
+def test_real_w02_portfolio_and_profile_use_split_semantic_projections() -> None:
+    class FakeIdentity:
+        def resolve_identity(self, *args, **kwargs):
+            return []
+
+    class FakeProvider:
+        identity = FakeIdentity()
+
+        def public_entity_descriptor(self, ref):
+            return {}
+
+    definitions = {
+        item.name: item
+        for item in build_internal_system_tool_definitions(FakeProvider())
+    }
+    portfolio = definitions[INTERNAL_PORTFOLIO_GET_STATE]
+    portfolio_paths = {item.slot_id: item.source_path for item in portfolio.output_contracts}
+    assert portfolio_paths == {
+        "current_portfolio_state": "data.portfolio_state",
+        "portfolio_positions": "data.portfolio_positions",
+    }
+    profile = definitions[INTERNAL_USER_PROFILE_GET]
+    profile_paths = {item.slot_id: item.source_path for item in profile.output_contracts}
+    assert profile_paths == {
+        "user_profile_state": "data.profile_state",
+        "user_constraints": "data.constraints",
+    }

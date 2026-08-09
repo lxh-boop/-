@@ -20,6 +20,8 @@ from agent.tool_runtime import (
     OP_READ,
     TOOL_VISIBILITY_WORKER_PRIVATE,
     ToolDefinition,
+    ToolInputContract,
+    ToolOutputContract,
     description,
     result_schema,
     schema,
@@ -29,9 +31,6 @@ from agent.tool_runtime import (
 EVIDENCE_SEARCH_NEWS_TOOL = "evidence.search_news"
 EVIDENCE_SEARCH_RAG_TOOL = "evidence.search_rag"
 EVIDENCE_FINALIZE_COLLECTION_TOOL = "evidence.finalize_collection"
-EVIDENCE_COLLECT_EXTERNAL_TOOL = "evidence.collect_external"  # legacy compatibility
-EVIDENCE_RETRIEVE_TOOL = EVIDENCE_COLLECT_EXTERNAL_TOOL
-EVIDENCE_ANALYZE_ENTITIES_TOOL = EVIDENCE_COLLECT_EXTERNAL_TOOL
 
 
 def _object_refs(arguments: dict[str, Any]) -> list[GraphRef]:
@@ -383,40 +382,20 @@ def build_evidence_tool_definitions(
         required_refs = _object_refs({"object_refs": arguments.get("required_object_refs") or []})
         collections = arguments.get("collections") or []
         if not isinstance(collections, list):
-            collections = [collections]
+            raise ValueError("evidence_collections_list_required")
         source_collection_count = len(collections)
-        source_success_count = 0
-        source_failure_count = 0
         normalized_collections: list[dict[str, Any]] = []
-        for envelope in collections:
-            # Canonical handoff is UnifiedToolResult.to_dict(). For compatibility,
-            # a raw ``results`` list is also a valid successful/empty source read.
-            if isinstance(envelope, list):
-                normalized_collections.append({
-                    "success": True,
-                    "data": {"results": envelope, "business_empty": not bool(envelope)},
-                })
-                source_success_count += 1
-                continue
-            if not isinstance(envelope, dict):
-                source_failure_count += 1
-                continue
-            normalized_collections.append(envelope)
-            data = _envelope_data(envelope)
-            hard_failure = bool(
-                not envelope.get("success")
-                and (
-                    envelope.get("error_type")
-                    or envelope.get("error_message")
-                    or envelope.get("errors")
-                )
-            )
-            if hard_failure:
-                source_failure_count += 1
-            else:
-                # Valid empty results count as a successful source query.
-                source_success_count += 1
+        for collection in collections:
+            if not isinstance(collection, dict):
+                raise ValueError("evidence_collection_semantic_payload_required")
+            normalized_collections.append(dict(collection))
         collections = normalized_collections
+        # Tool-DAG dependencies only expose materialized semantic output slots.
+        # A failed upstream source Tool therefore blocks this finalizer rather than
+        # passing a second legacy envelope shape into the transform. Valid empty
+        # source reads are ordinary successful semantic payloads.
+        source_success_count = source_collection_count
+        source_failure_count = 0
         grouped: dict[str, dict[str, Any]] = {
             ref.node_id: {
                 "focus_ref": ref.to_dict(),
@@ -567,15 +546,6 @@ def build_evidence_tool_definitions(
             "retryable": bool(all_sources_failed),
         }
 
-    def collect_external_legacy(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-        return provider.collect_external_evidence(
-            _object_refs(arguments),
-            query=str(arguments.get("query") or ""),
-            top_k=max(1, min(int(arguments.get("top_k") or 20), 100)),
-            output_dir=_path(context, "output_dir", "outputs"),
-            db_path=context.get("db_path"),
-            as_of_time=str(arguments.get("as_of_time") or ""),
-        )
 
     common_source_schema = schema(
         {
@@ -603,6 +573,20 @@ def build_evidence_tool_definitions(
             supported_actions=["search_news", "search_announcements"],
             supported_objects=["financial_object_graph_ref_set"],
             produced_outputs=["results", "news_evidence"],
+            input_contracts=[
+                ToolInputContract(slot_id="object_refs", required=True),
+                ToolInputContract(slot_id="query", required=False),
+                ToolInputContract(slot_id="top_k", required=False),
+                ToolInputContract(slot_id="as_of_time", required=False),
+            ],
+            output_contracts=[
+                ToolOutputContract(slot_id="results", source_path="data.results"),
+                ToolOutputContract(
+                    slot_id="news_evidence",
+                    schema_id="EvidenceSourceCollection.v1",
+                    source_path="data",
+                ),
+            ],
             operation_type=OP_READ,
             allowed_agent_types=[EVIDENCE_COLLECTOR],
             permission_scope=OP_READ,
@@ -632,6 +616,20 @@ def build_evidence_tool_definitions(
             supported_actions=["search_rag_evidence"],
             supported_objects=["financial_object_graph_ref_set"],
             produced_outputs=["results", "rag_evidence"],
+            input_contracts=[
+                ToolInputContract(slot_id="object_refs", required=True),
+                ToolInputContract(slot_id="query", required=True),
+                ToolInputContract(slot_id="top_k", required=False),
+                ToolInputContract(slot_id="as_of_time", required=False),
+            ],
+            output_contracts=[
+                ToolOutputContract(slot_id="results", source_path="data.results"),
+                ToolOutputContract(
+                    slot_id="rag_evidence",
+                    schema_id="EvidenceSourceCollection.v1",
+                    source_path="data",
+                ),
+            ],
             operation_type=OP_READ,
             allowed_agent_types=[EVIDENCE_COLLECTOR],
             permission_scope=OP_READ,
@@ -681,6 +679,26 @@ def build_evidence_tool_definitions(
                 "coverage",
                 "validated_evidence_collection",
             ],
+            input_contracts=[
+                ToolInputContract(
+                    slot_id="collections",
+                    schema_id="EvidenceSourceCollection.v1",
+                    required=True,
+                    accepted_sources=("upstream_tool",),
+                    cardinality="many",
+                    description="One or more evidence-source semantic payloads selected by the Tool DAG.",
+                ),
+                ToolInputContract(slot_id="required_object_refs", required=True),
+                ToolInputContract(slot_id="collection_goal", required=False),
+            ],
+            output_contracts=[
+                ToolOutputContract(slot_id="results", source_path="data.results"),
+                ToolOutputContract(slot_id="record_count", source_path="data.record_count"),
+                ToolOutputContract(slot_id="source_count", source_path="data.source_count"),
+                ToolOutputContract(slot_id="deduplication", source_path="data.deduplication"),
+                ToolOutputContract(slot_id="coverage", source_path="data.coverage"),
+                ToolOutputContract(slot_id="validated_evidence_collection", source_path="data.validated_evidence_collection"),
+            ],
             operation_type=OP_READ,
             allowed_agent_types=[EVIDENCE_COLLECTOR],
             permission_scope=OP_READ,
@@ -691,35 +709,7 @@ def build_evidence_tool_definitions(
             audit_level="full",
             tags=["worker_private", "evidence", "finalizer", "atomic", "read_only"],
         ),
-        ToolDefinition(
-            name=EVIDENCE_COLLECT_EXTERNAL_TOOL,
-            display_name="Collect External Evidence (Legacy)",
-            description=description(
-                "Compatibility wrapper that collects external evidence in one call.",
-                "An older caller explicitly invokes the legacy canonical name.",
-                "New W01 Tool DAG planning, interpretation, graph persistence, portfolio work, or proposals.",
-                "object_refs, query, top_k, and optional time boundary.",
-                "Per-entity evidence records and sources.",
-            ),
-            input_schema=schema(
-                common_source_schema["properties"],
-                required=["object_refs", "query"],
-            ),
-            output_schema=result_schema(["results"]),
-            execution_handler=collect_external_legacy,
-            supported_actions=["legacy_collect_external_evidence"],
-            supported_objects=["financial_object_graph_ref_set"],
-            produced_outputs=["results"],
-            operation_type=OP_READ,
-            allowed_agent_types=[EVIDENCE_COLLECTOR],
-            permission_scope=OP_READ,
-            visibility=TOOL_VISIBILITY_WORKER_PRIVATE,
-            side_effects=[],
-            mutates_business_state=False,
-            idempotency="read_only",
-            audit_level="full",
-            tags=["worker_private", "evidence", "legacy", "read_only"],
-        ),
+
     ]
 
 
@@ -727,8 +717,5 @@ __all__ = [
     "EVIDENCE_SEARCH_NEWS_TOOL",
     "EVIDENCE_SEARCH_RAG_TOOL",
     "EVIDENCE_FINALIZE_COLLECTION_TOOL",
-    "EVIDENCE_COLLECT_EXTERNAL_TOOL",
-    "EVIDENCE_RETRIEVE_TOOL",
-    "EVIDENCE_ANALYZE_ENTITIES_TOOL",
     "build_evidence_tool_definitions",
 ]

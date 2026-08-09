@@ -13,6 +13,7 @@ from agent.collaboration.worker_contracts import WorkerContractViolation
 
 from .models import CapabilityTask, ResolvedCapabilityTask
 from .slot_binder import SlotBindingResult
+from .semantic_slots import slot_matches_patterns
 
 _EFFECT_ORDER = {"read": 0, "proposal": 1, "write": 2}
 
@@ -79,8 +80,14 @@ class WorkerAssignmentValidator:
 
             task_inputs = set(task.input_slots())
             task_outputs = set(task.output_slots())
-            unsupported_inputs = sorted(task_inputs - set(boundary.accepted_input_slots))
-            unsupported_outputs = sorted(task_outputs - set(boundary.produced_output_slots))
+            unsupported_inputs = sorted(
+                slot for slot in task_inputs
+                if not slot_matches_patterns(slot, boundary.accepted_input_patterns)
+            )
+            unsupported_outputs = sorted(
+                slot for slot in task_outputs
+                if not slot_matches_patterns(slot, boundary.produced_output_patterns)
+            )
             if unsupported_inputs or unsupported_outputs:
                 raise WorkerContractViolation(
                     "selected_worker_contract_outside_boundary",
