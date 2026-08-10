@@ -12,6 +12,260 @@ from ..completion import build_completion_report
 from ..models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus
 from .common import contract_acceptance_rules, contract_output_slots, execution_safe_value, safe_public_value
 
+_CANONICAL_EVIDENCE_SLOT = "entity_external_evidence"
+_SOURCE_RECORDS_SLOT = "evidence_source_records"
+_EVIDENCE_VIEW_PREFIX = "evidence."
+_EVIDENCE_VIEW_SOURCE_ALIASES: dict[str, set[str]] = {
+    "news": {"news_and_announcements"},
+    "research": {"rag_evidence"},
+}
+_SOURCE_INDEX_FIELDS = (
+    "canonical_id",
+    "source_ids",
+    "retrieved_by",
+    "news_id",
+    "source_id",
+    "graph_evidence_key",
+    "chunk_id",
+    "source_type",
+    "provider_type",
+    "source",
+    "title",
+    "section_title",
+    "publish_time",
+    "trade_date",
+    "date",
+    "url",
+    "score",
+    "mapping_confidence",
+    "merged_record_count",
+)
+
+
+def _canonical_payload(
+    *,
+    selected_refs: list[Any],
+    entity_catalog: list[dict[str, Any]],
+    collection_goal: str,
+    results: list[dict[str, Any]],
+    record_count: int,
+    source_count: int,
+    deduplication: dict[str, Any],
+    coverage: dict[str, Any],
+    business_empty: bool,
+) -> dict[str, Any]:
+    return execution_safe_value({
+        "entity_refs": [ref.to_dict() for ref in selected_refs],
+        "entity_catalog": entity_catalog,
+        "collection_goal": collection_goal,
+        "results": results,
+        "record_count": record_count,
+        "source_count": source_count,
+        "deduplication": deduplication,
+        "coverage": coverage,
+        "business_empty": business_empty,
+    })
+
+
+def _record_retrieval_sources(row: dict[str, Any]) -> set[str]:
+    raw = row.get("retrieved_by")
+    if isinstance(raw, (list, tuple, set)):
+        return {str(item).strip() for item in raw if str(item).strip()}
+    value = str(raw or "").strip()
+    return {value} if value else set()
+
+
+def _source_index_record(row: dict[str, Any]) -> dict[str, Any]:
+    """Return provenance/index fields only; never repeat evidence body text."""
+
+    return execution_safe_value({
+        key: row.get(key)
+        for key in _SOURCE_INDEX_FIELDS
+        if row.get(key) not in (None, "", [], {})
+    })
+
+
+def _coverage_for_results(
+    *,
+    selected_refs: list[Any],
+    results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    required_ids = {str(ref.node_id) for ref in selected_refs if str(getattr(ref, "node_id", ""))}
+    covered_ids = {
+        str((item.get("focus_ref") or {}).get("node_id") or "")
+        for item in results
+        if isinstance(item, dict) and list(item.get("records") or [])
+    }
+    covered_ids.discard("")
+    return {
+        "required_entity_count": len(required_ids),
+        "covered_entity_count": len(covered_ids),
+        "missing_entity_ref_ids": sorted(required_ids - covered_ids),
+        "coverage_satisfied": required_ids.issubset(covered_ids),
+    }
+
+
+def _source_records_payload(
+    *,
+    selected_refs: list[Any],
+    entity_catalog: list[dict[str, Any]],
+    collection_goal: str,
+    results: list[dict[str, Any]],
+    coverage: dict[str, Any],
+    business_empty: bool,
+) -> dict[str, Any]:
+    indexed_results: list[dict[str, Any]] = []
+    record_count = 0
+    source_ids: set[str] = set()
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        indexed_records = [
+            _source_index_record(row)
+            for row in list(item.get("records") or [])
+            if isinstance(row, dict)
+        ]
+        record_count += len(indexed_records)
+        for row in indexed_records:
+            for source_id in row.get("source_ids") or []:
+                if str(source_id).strip():
+                    source_ids.add(str(source_id).strip())
+            for key in ("canonical_id", "news_id", "source_id", "graph_evidence_key", "chunk_id"):
+                if str(row.get(key) or "").strip():
+                    source_ids.add(str(row.get(key)).strip())
+        indexed_results.append({
+            "focus_ref": execution_safe_value(item.get("focus_ref") or {}),
+            "success": bool(indexed_records),
+            "records": indexed_records,
+            "source_names": [str(value) for value in item.get("source_names") or [] if str(value)],
+            "warnings": [str(value) for value in item.get("warnings") or []],
+            "errors": [str(value) for value in item.get("errors") or []],
+        })
+    return execution_safe_value({
+        "entity_refs": [ref.to_dict() for ref in selected_refs],
+        "entity_catalog": entity_catalog,
+        "collection_goal": collection_goal,
+        "results": indexed_results,
+        "record_count": record_count,
+        "source_count": len(source_ids) or record_count,
+        "coverage": coverage,
+        "business_empty": business_empty,
+        "projection": "provenance_index",
+    })
+
+
+def _view_sources(slot_id: str) -> set[str]:
+    suffix = slot_id[len(_EVIDENCE_VIEW_PREFIX):].strip()
+    if not suffix:
+        return set()
+    return set(_EVIDENCE_VIEW_SOURCE_ALIASES.get(suffix, {suffix}))
+
+
+def _evidence_view_payload(
+    *,
+    slot_id: str,
+    selected_refs: list[Any],
+    entity_catalog: list[dict[str, Any]],
+    collection_goal: str,
+    results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    allowed_sources = _view_sources(slot_id)
+    view_results: list[dict[str, Any]] = []
+    source_counts: dict[str, int] = {}
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        selected_records: list[dict[str, Any]] = []
+        for row in list(item.get("records") or []):
+            if not isinstance(row, dict):
+                continue
+            retrieved_by = _record_retrieval_sources(row)
+            if allowed_sources and retrieved_by.intersection(allowed_sources):
+                selected_records.append(execution_safe_value(row))
+                for source_name in retrieved_by.intersection(allowed_sources):
+                    source_counts[source_name] = source_counts.get(source_name, 0) + 1
+        view_results.append({
+            "focus_ref": execution_safe_value(item.get("focus_ref") or {}),
+            "success": bool(selected_records),
+            "message": str(item.get("message") or ""),
+            "records": selected_records,
+            "sources": [_source_index_record(row) for row in selected_records],
+            "source_names": sorted(allowed_sources.intersection({
+                str(value) for value in item.get("source_names") or [] if str(value)
+            })),
+            "warnings": [str(value) for value in item.get("warnings") or []],
+            "errors": [str(value) for value in item.get("errors") or []],
+        })
+    record_count = sum(len(item.get("records") or []) for item in view_results)
+    source_count = sum(len(item.get("sources") or []) for item in view_results)
+    coverage = _coverage_for_results(selected_refs=selected_refs, results=view_results)
+    return execution_safe_value({
+        "entity_refs": [ref.to_dict() for ref in selected_refs],
+        "entity_catalog": entity_catalog,
+        "collection_goal": collection_goal,
+        "view_slot": slot_id,
+        "retrieval_sources": sorted(allowed_sources),
+        "results": view_results,
+        "record_count": record_count,
+        "source_count": source_count,
+        "deduplication": {
+            "policy": "canonical_collection_source_view",
+            "canonical_record_count": record_count,
+            "source_record_counts": source_counts,
+        },
+        "coverage": coverage,
+        "business_empty": record_count == 0,
+        "projection": "source_view",
+    })
+
+
+def _semantic_evidence_slots(
+    *,
+    requested_slots: list[str],
+    selected_refs: list[Any],
+    entity_catalog: list[dict[str, Any]],
+    collection_goal: str,
+    results: list[dict[str, Any]],
+    record_count: int,
+    source_count: int,
+    deduplication: dict[str, Any],
+    coverage: dict[str, Any],
+    business_empty: bool,
+) -> dict[str, Any]:
+    canonical = _canonical_payload(
+        selected_refs=selected_refs,
+        entity_catalog=entity_catalog,
+        collection_goal=collection_goal,
+        results=results,
+        record_count=record_count,
+        source_count=source_count,
+        deduplication=deduplication,
+        coverage=coverage,
+        business_empty=business_empty,
+    )
+    slots: dict[str, Any] = {}
+    for slot_id in requested_slots:
+        if slot_id == _CANONICAL_EVIDENCE_SLOT:
+            slots[slot_id] = canonical
+        elif slot_id == _SOURCE_RECORDS_SLOT:
+            slots[slot_id] = _source_records_payload(
+                selected_refs=selected_refs,
+                entity_catalog=entity_catalog,
+                collection_goal=collection_goal,
+                results=results,
+                coverage=coverage,
+                business_empty=business_empty,
+            )
+        elif slot_id.startswith(_EVIDENCE_VIEW_PREFIX):
+            slots[slot_id] = _evidence_view_payload(
+                slot_id=slot_id,
+                selected_refs=selected_refs,
+                entity_catalog=entity_catalog,
+                collection_goal=collection_goal,
+                results=results,
+            )
+    return slots
+
 
 def _final_data(tool_dag_result: Any) -> dict[str, Any]:
     """Return the validated finalizer payload without exposing private Tool ids."""
@@ -174,11 +428,25 @@ def run_evidence(
     deduplication = safe_public_value(raw.get("deduplication") or {})
     business_empty = bool(raw.get("business_empty", record_count == 0))
     coverage_satisfied = bool(coverage.get("coverage_satisfied", True))
+    requested_slots = contract_output_slots(task)
+    entity_catalog = execution_safe_value(
+        task.metadata.get("authoritative_entity_catalog") or []
+    )
+    semantic_slots = _semantic_evidence_slots(
+        requested_slots=requested_slots,
+        selected_refs=selected_refs,
+        entity_catalog=entity_catalog,
+        collection_goal=collection_goal,
+        results=results,
+        record_count=record_count,
+        source_count=source_count,
+        deduplication=deduplication,
+        coverage=coverage,
+        business_empty=business_empty,
+    )
     payload = {
         "entity_refs": [ref.to_dict() for ref in selected_refs],
-        "entity_catalog": safe_public_value(
-            task.metadata.get("authoritative_entity_catalog") or []
-        ),
+        "entity_catalog": safe_public_value(entity_catalog),
         "collection_goal": collection_goal,
         "results": results,
         "record_count": record_count,
@@ -187,29 +455,31 @@ def run_evidence(
         "coverage": coverage,
         "business_empty": business_empty,
         "write_performed": False,
-        "slots": {
-            slot: execution_safe_value({
-                "entity_refs": [ref.to_dict() for ref in selected_refs],
-                "entity_catalog": task.metadata.get("authoritative_entity_catalog") or [],
-                "collection_goal": collection_goal,
-                "results": results,
-                "record_count": record_count,
-                "source_count": source_count,
-                "deduplication": deduplication,
-                "coverage": coverage,
-                "business_empty": business_empty,
-            })
-            for slot in contract_output_slots(task)
-        },
-        "produced_information_slots": contract_output_slots(task),
+        "slots": semantic_slots,
+        "produced_information_slots": list(semantic_slots),
     }
     warnings = [
         str(item)
         for item in [*(raw.get("warnings") or []), *(raw.get("errors") or [])]
         if str(item).strip()
     ]
+    requested_slot_payloads = [
+        value for value in semantic_slots.values() if isinstance(value, dict)
+    ]
+    all_requested_business_empty = bool(requested_slot_payloads) and all(
+        bool(value.get("business_empty", False)) for value in requested_slot_payloads
+    )
+    requested_coverage_satisfied = bool(requested_slot_payloads) and all(
+        bool(value.get("business_empty", False))
+        or bool((value.get("coverage") or {}).get("coverage_satisfied", True))
+        for value in requested_slot_payloads
+    )
     if success:
-        status = ResultStatus.PARTIAL if record_count and not coverage_satisfied else ResultStatus.COMPLETED
+        status = (
+            ResultStatus.PARTIAL
+            if requested_slot_payloads and not requested_coverage_satisfied
+            else ResultStatus.COMPLETED
+        )
     else:
         status = ResultStatus.FAILED
     failed_observations = [
@@ -217,20 +487,19 @@ def run_evidence(
         for item in dag_result.node_records
         if not item.success
     ]
-    required_slots = contract_output_slots(task)
+    required_slots = requested_slots
+    produced_slots = list(semantic_slots)
+    all_required_slots_materialized = set(required_slots).issubset(produced_slots)
     if success:
-        if business_empty:
-            produced_slots = required_slots
+        if all_requested_business_empty and all_required_slots_materialized:
             expected_completed = True
             completion_status = "completed"
             business_status = "empty"
-        elif coverage_satisfied:
-            produced_slots = required_slots
+        elif requested_coverage_satisfied and all_required_slots_materialized:
             expected_completed = True
             completion_status = "completed"
             business_status = "sufficient"
         else:
-            produced_slots = [slot for slot in required_slots if slot == "entity_external_evidence"]
             expected_completed = False
             completion_status = "partially_completed"
             business_status = "partial"

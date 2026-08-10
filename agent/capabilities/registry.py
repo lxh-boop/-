@@ -66,8 +66,8 @@ _BOUNDARIES: dict[str, CapabilityBoundary] = {
     "external_evidence.research": _boundary(
         boundary_id="external_evidence.research",
         name="外部证据研究",
-        description="检索、整理并去重目标实体相关的新闻、公告和研究证据。",
-        responsibilities=["收集外部证据", "保留来源和时间", "明确业务为空"],
+        description="检索、整理并去重目标实体相关的新闻、公告和研究证据；entity_external_evidence 是统一主证据集合，evidence_source_records 是轻量溯源索引，evidence.* 是按来源的可选视图。",
+        responsibilities=["收集外部证据", "形成统一主证据集合", "按需发布来源视图和溯源索引", "保留来源和时间", "明确业务为空"],
         non_responsibilities=["解释最终含义", "生成风险评级", "生成操作方案"],
         accepted_input_patterns=["authoritative_entity_refs", "current_user_request", "as_of_time", "entity.*", "request.*", "time.*"],
         produced_output_patterns=["evidence.*", "entity_external_evidence", "evidence_source_records"],
@@ -76,7 +76,7 @@ _BOUNDARIES: dict[str, CapabilityBoundary] = {
         allowed_acceptance_rule_ids=["schema_valid", "entity_scope_consistent", "provenance_present", "source_dates_preserved", "business_empty_explicit", "no_persistent_write"],
         required_context_slots=["authoritative_entity_refs"],
         allowed_information_sources=["registered_external_evidence_tools"],
-        completion_principles=["证据可追溯", "不得补造", "按实体去重"],
+        completion_principles=["证据可追溯", "不得补造", "按实体去重", "output_slot_examples 是可选语义输出，不要求同一任务全部发布"],
     ),
     "internal_fact.retrieval": _boundary(
         boundary_id="internal_fact.retrieval",
@@ -140,8 +140,8 @@ _BOUNDARIES: dict[str, CapabilityBoundary] = {
     "entity.analysis": _boundary(
         boundary_id="entity.analysis",
         name="金融实体分析",
-        description="基于上游证据和内部事实形成结构化实体分析。",
-        responsibilities=["区分事实与分析", "解释模型信号", "表达不确定性"],
+        description="基于上游证据和内部事实形成结构化实体分析；存在 entity_external_evidence 时优先消费统一主证据，避免把同源 evidence.* 派生视图重复送入分析。",
+        responsibilities=["区分事实与分析", "优先消费统一主证据而非重复派生视图", "解释模型信号", "表达不确定性"],
         non_responsibilities=["自行检索证据", "生成交易方案", "提交业务写入"],
         accepted_input_patterns=["authoritative_entity_refs", "entity.*", "evidence.*", "ranking.*", "metric.*", "graph.*", "relation.*", "entity_external_evidence", "evidence_source_records", "entity_model_signals", "market_ranking_signals", "model_quality_metrics", "financial_relation_paths", "graph_relation_facts"],
         produced_output_patterns=["analysis.*", "entity_analysis", "entity_analysis_uncertainty"],

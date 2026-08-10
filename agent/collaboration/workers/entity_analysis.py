@@ -20,7 +20,13 @@ from .structured_output import generate_json_with_local_structural_repair
 _CLAIM_LIST_FIELDS = ("facts", "analysis", "uncertainties")
 
 
-_EVIDENCE_SLOTS = {"entity_external_evidence", "evidence_source_records"}
+_CANONICAL_EVIDENCE_SLOT = "entity_external_evidence"
+_SOURCE_RECORDS_SLOT = "evidence_source_records"
+_EVIDENCE_VIEW_PREFIX = "evidence."
+
+
+def _is_evidence_slot(slot_id: str) -> bool:
+    return slot_id in {_CANONICAL_EVIDENCE_SLOT, _SOURCE_RECORDS_SLOT} or slot_id.startswith(_EVIDENCE_VIEW_PREFIX)
 
 
 _MAX_EVIDENCE_RECORDS_PER_ENTITY = 12
@@ -156,7 +162,7 @@ def _compact_evidence_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def _compact_payload(slot_id: str, payload: Any) -> Any:
     if not isinstance(payload, dict):
         return safe_public_value(payload)
-    if slot_id in _EVIDENCE_SLOTS:
+    if _is_evidence_slot(slot_id):
         return _compact_evidence_payload(payload)
     # Internal fact results are already structured and normally much smaller.
     encoded = json.dumps(execution_safe_value(payload), ensure_ascii=False, default=str)
@@ -235,31 +241,33 @@ def run_entity_analysis(
 ) -> GraphWorkerResult:
 
     items = _resolved_items(task, resolved_inputs)
-    evidence_items = [item for item in items if item.get("slot_id") in _EVIDENCE_SLOTS]
+    evidence_items = [item for item in items if _is_evidence_slot(str(item.get("slot_id") or ""))]
 
+    canonical_source_task_ids = {
+        str(source_id)
+        for item in items
+        if str(item.get("slot_id") or "") == _CANONICAL_EVIDENCE_SLOT
+        for source_id in item.get("source_task_ids") or []
+        if str(source_id)
+    }
     safe_items: list[dict[str, Any]] = []
-    full_evidence_source_ids: set[str] = set()
+    suppressed_redundant_evidence_slots: list[str] = []
     for item in items:
         slot_id = str(item.get("slot_id") or "")
         source_task_ids = [str(value) for value in item.get("source_task_ids") or [] if str(value)]
         payload = item.get("payload")
-        if slot_id == "entity_external_evidence":
-            full_evidence_source_ids.update(source_task_ids)
-            compact_payload = _compact_payload(slot_id, payload)
-        elif slot_id == "evidence_source_records" and set(source_task_ids).intersection(full_evidence_source_ids):
-            # W01 currently publishes the same evidence collection payload into both
-            # evidence slots. Keep the second slot's identity without duplicating the
-            # complete evidence corpus in the W09 prompt.
-            payload_dict = payload if isinstance(payload, dict) else {}
-            compact_payload = {
-                "payload_alias_of": "entity_external_evidence",
-                "record_count": int(payload_dict.get("record_count") or 0),
-                "source_count": int(payload_dict.get("source_count") or 0),
-                "coverage": safe_public_value(payload_dict.get("coverage") or {}),
-                "business_empty": bool(payload_dict.get("business_empty", False)),
-            }
-        else:
-            compact_payload = _compact_payload(slot_id, payload)
+        if (
+            slot_id != _CANONICAL_EVIDENCE_SLOT
+            and _is_evidence_slot(slot_id)
+            and set(source_task_ids).intersection(canonical_source_task_ids)
+        ):
+            # Derivative evidence views are valid runtime Slots, but when the same
+            # upstream task also supplies the canonical collection they do not add
+            # independent facts for W09. Runtime has already validated/materialized
+            # them; omit their repeated record bodies from the analysis prompt.
+            suppressed_redundant_evidence_slots.append(slot_id)
+            continue
+        compact_payload = _compact_payload(slot_id, payload)
         safe_items.append({
             "slot_id": slot_id,
             "source_task_ids": source_task_ids,
@@ -474,6 +482,7 @@ def run_entity_analysis(
                 "analysis_count": len(payload["analysis"]),
                 "uncertainty_count": len(payload["uncertainties"]),
                 "source_task_count": len(payload["source_task_ids"]),
+                "suppressed_redundant_evidence_slots": list(suppressed_redundant_evidence_slots),
             },
         ],
         confidence=0.85,
@@ -482,6 +491,7 @@ def run_entity_analysis(
             "database_write": False,
             "source_task_ids": payload["source_task_ids"],
             "bound_slot_projection": "execution_materialized_then_worker_compacted",
+            "suppressed_redundant_evidence_slots": list(suppressed_redundant_evidence_slots),
         },
     )
 
