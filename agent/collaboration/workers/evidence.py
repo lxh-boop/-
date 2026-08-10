@@ -41,6 +41,98 @@ _SOURCE_INDEX_FIELDS = (
     "merged_record_count",
 )
 
+# Worker-to-Worker canonical evidence is an analysis transport contract, not a
+# dump of the private Tool result.  Preserve stable identity/provenance and
+# business-relevant metadata, but normalize all body variants to one bounded
+# text field.  The complete Tool result remains private to W01's Tool DAG.
+_CANONICAL_RECORD_FIELDS = (
+    "canonical_id",
+    "source_ids",
+    "retrieved_by",
+    "news_id",
+    "source_id",
+    "graph_evidence_key",
+    "chunk_id",
+    "source_type",
+    "provider_type",
+    "source",
+    "title",
+    "section_title",
+    "publish_time",
+    "trade_date",
+    "date",
+    "url",
+    "stock_code",
+    "industry",
+    "concept",
+    "event_type",
+    "sentiment",
+    "importance_score",
+    "is_announcement",
+    "relevance_score",
+    "mapping_confidence",
+    "impact_direction",
+    "impact_strength",
+    "impact_confidence",
+    "score",
+    "merged_record_count",
+    "content_level",
+)
+_CANONICAL_TEXT_FIELDS = ("summary", "text", "chunk_text", "content")
+_CANONICAL_TEXT_LIMIT_CHARS = 1000
+
+
+def _bounded_evidence_text(value: Any, *, limit: int = _CANONICAL_TEXT_LIMIT_CHARS) -> tuple[str, bool]:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text, False
+    # Keep both the opening context and the tail conclusion instead of silently
+    # retaining only the first paragraph.
+    tail = max(180, min(300, limit // 3))
+    head = max(1, limit - tail - 18)
+    return f"{text[:head]} …<truncated>… {text[-tail:]}", True
+
+
+def _canonical_record(row: dict[str, Any]) -> dict[str, Any]:
+    projected = {
+        key: execution_safe_value(row.get(key))
+        for key in _CANONICAL_RECORD_FIELDS
+        if row.get(key) not in (None, "", [], {})
+    }
+    body_field = ""
+    body_value: Any = ""
+    for candidate in _CANONICAL_TEXT_FIELDS:
+        if row.get(candidate) not in (None, ""):
+            body_field = candidate
+            body_value = row.get(candidate)
+            break
+    if body_field:
+        original_text = str(body_value or "")
+        bounded, truncated = _bounded_evidence_text(original_text)
+        projected["text"] = bounded
+        projected["text_source_field"] = body_field
+        projected["text_original_chars"] = len(original_text)
+        if truncated:
+            projected["text_truncated"] = True
+    return execution_safe_value(projected)
+
+
+def _compact_deduplication(value: dict[str, Any]) -> dict[str, Any]:
+    keep = (
+        "policy",
+        "raw_record_count",
+        "canonical_record_count",
+        "duplicate_record_count",
+        "duplicate_group_count",
+        "cross_source_duplicate_group_count",
+        "source_record_counts",
+    )
+    return execution_safe_value({
+        key: value.get(key)
+        for key in keep
+        if value.get(key) not in (None, "", [], {})
+    })
+
 
 def _canonical_payload(
     *,
@@ -54,16 +146,42 @@ def _canonical_payload(
     coverage: dict[str, Any],
     business_empty: bool,
 ) -> dict[str, Any]:
+    projected_results: list[dict[str, Any]] = []
+    truncated_record_count = 0
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        records = [
+            _canonical_record(row)
+            for row in list(item.get("records") or [])
+            if isinstance(row, dict)
+        ]
+        truncated_record_count += sum(1 for row in records if row.get("text_truncated"))
+        projected_results.append({
+            "focus_ref": execution_safe_value(item.get("focus_ref") or {}),
+            "success": bool(item.get("success", bool(records))),
+            "records": records,
+            "source_names": [str(value) for value in item.get("source_names") or [] if str(value)],
+            "warnings": [str(value) for value in item.get("warnings") or []],
+            "errors": [str(value) for value in item.get("errors") or []],
+        })
     return execution_safe_value({
         "entity_refs": [ref.to_dict() for ref in selected_refs],
         "entity_catalog": entity_catalog,
         "collection_goal": collection_goal,
-        "results": results,
+        "results": projected_results,
         "record_count": record_count,
         "source_count": source_count,
-        "deduplication": deduplication,
+        "deduplication": _compact_deduplication(deduplication),
         "coverage": coverage,
         "business_empty": business_empty,
+        "projection": {
+            "kind": "analysis_canonical_evidence",
+            "body_policy": "single_bounded_text",
+            "text_limit_chars": _CANONICAL_TEXT_LIMIT_CHARS,
+            "projected_record_count": sum(len(item.get("records") or []) for item in projected_results),
+            "truncated_record_count": truncated_record_count,
+        },
     })
 
 
@@ -181,7 +299,7 @@ def _evidence_view_payload(
                 continue
             retrieved_by = _record_retrieval_sources(row)
             if allowed_sources and retrieved_by.intersection(allowed_sources):
-                selected_records.append(execution_safe_value(row))
+                selected_records.append(_canonical_record(row))
                 for source_name in retrieved_by.intersection(allowed_sources):
                     source_counts[source_name] = source_counts.get(source_name, 0) + 1
         view_results.append({

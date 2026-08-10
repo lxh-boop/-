@@ -98,10 +98,14 @@ def _compact_record(row: dict[str, Any]) -> dict[str, Any]:
     """Keep only grounded fields needed for analysis and structured attribution."""
 
     wanted = (
+        "canonical_id",
+        "source_ids",
+        "retrieved_by",
         "chunk_id",
         "news_id",
         "source_id",
         "source_type",
+        "provider_type",
         "source",
         "title",
         "section_title",
@@ -109,8 +113,20 @@ def _compact_record(row: dict[str, Any]) -> dict[str, Any]:
         "trade_date",
         "date",
         "url",
-        "score",
+        "event_type",
+        "sentiment",
+        "importance_score",
+        "is_announcement",
+        "relevance_score",
         "mapping_confidence",
+        "impact_direction",
+        "impact_strength",
+        "impact_confidence",
+        "score",
+        "merged_record_count",
+        "text_source_field",
+        "text_original_chars",
+        "text_truncated",
     )
     compact = {
         key: safe_public_value(row.get(key))

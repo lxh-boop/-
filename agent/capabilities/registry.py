@@ -66,7 +66,7 @@ _BOUNDARIES: dict[str, CapabilityBoundary] = {
     "external_evidence.research": _boundary(
         boundary_id="external_evidence.research",
         name="外部证据研究",
-        description="检索、整理并去重目标实体相关的新闻、公告和研究证据；entity_external_evidence 是统一主证据集合，evidence_source_records 是轻量溯源索引，evidence.* 是按来源的可选视图。",
+        description="检索、整理并去重目标实体相关的新闻、公告和研究证据；entity_external_evidence 是面向下游分析的紧凑统一主证据集合，完整 Tool 结果不跨 Worker 传输；evidence_source_records 是轻量溯源索引，evidence.* 是按来源的可选视图。",
         responsibilities=["收集外部证据", "形成统一主证据集合", "按需发布来源视图和溯源索引", "保留来源和时间", "明确业务为空"],
         non_responsibilities=["解释最终含义", "生成风险评级", "生成操作方案"],
         accepted_input_patterns=["authoritative_entity_refs", "current_user_request", "as_of_time", "entity.*", "request.*", "time.*"],
@@ -76,7 +76,7 @@ _BOUNDARIES: dict[str, CapabilityBoundary] = {
         allowed_acceptance_rule_ids=["schema_valid", "entity_scope_consistent", "provenance_present", "source_dates_preserved", "business_empty_explicit", "no_persistent_write"],
         required_context_slots=["authoritative_entity_refs"],
         allowed_information_sources=["registered_external_evidence_tools"],
-        completion_principles=["证据可追溯", "不得补造", "按实体去重", "output_slot_examples 是可选语义输出，不要求同一任务全部发布"],
+        completion_principles=["证据可追溯", "不得补造", "按实体去重", "跨 Worker 只传分析所需的单份标准化正文与必要 provenance", "output_slot_examples 是可选语义输出，不要求同一任务全部发布"],
     ),
     "internal_fact.retrieval": _boundary(
         boundary_id="internal_fact.retrieval",
