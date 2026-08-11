@@ -33,10 +33,17 @@ def escalation_from_worker_result(task: Any, result: Any) -> WorkerEscalation | 
     raw_error = dict(getattr(result, "error", None) or {})
     missing_items = list(getattr(result, "missing_items", None) or [])
     source_error = dict(raw_error.get("source_tool_error") or {})
+    declared_missing_parameter = any(
+        "parameter" in str(getattr(item, "reason", "") or "").lower()
+        for item in missing_items
+    )
+    default_need_context_error = (
+        "user_input_required" if declared_missing_parameter else "worker_context_unresolved"
+    )
     error_id = str(
         raw_error.get("error_id") or raw_error.get("code")
         or source_error.get("error_id")
-        or ("worker_context_unresolved" if status == "need_context" else "worker_capability_failed")
+        or (default_need_context_error if status == "need_context" else "worker_capability_failed")
     )
     reason = str(raw_error.get("reason") or raw_error.get("message") or source_error.get("reason") or "")
     if not reason and missing_items:

@@ -142,16 +142,29 @@ _CARDS = {
         worker_id="W04",
         agent_id=RISK_ANALYST,
         role="portfolio_risk_assessment",
-        short_description="基于组合、账户和用户约束计算风险事实并形成风险评估。",
-        full_description="负责集中度、暴露、账户风险事实和约束审查，不修改持仓。",
+        short_description="消费本任务已绑定的组合、账户、用户约束等风险相关Slot，计算风险事实并形成风险评估。",
+        full_description=(
+            "负责基于CapabilityContract实际绑定的权威业务Slot完成集中度、暴露、账户风险事实和约束审查，不修改持仓。"
+            "W04依赖的是本轮所需的信息Slot，而不是固定依赖某个Worker；如果完成风险任务所需的业务Slot没有绑定，"
+            "应向MainAgent上报缺失信息，由MainAgent决定增加上游能力、补充上下文，或在确认属于用户参数时再询问用户。"
+        ),
         supported_boundary_ids=["portfolio.risk_assessment", "context.resolution"],
+        delegation_description=(
+            "当用户目标需要对已经取得的组合、账户、持仓、用户约束或其他风险相关事实做集中度、暴露和风险边界分析时委派W04。"
+            "W04不负责假设或补造未绑定的业务事实；缺少所需Slot时只向MainAgent报告缺口。"
+        ),
+        delegate_when=[
+            "需要基于已绑定组合或账户事实计算集中度、暴露或风险边界",
+            "需要审查已绑定用户约束与当前组合之间的风险关系",
+            "下游调仓或方案Worker需要结构化风险分析Slot作为依据",
+        ],
         capability_tags=["risk", "concentration", "exposure", "constraint"],
-        supported_scenarios=["组合集中度分析", "账户风险事实读取", "风险约束审查"],
-        unsupported_scenarios=["订单执行", "持仓写入"],
-        limitations=["依赖上游组合和用户槽位"],
-        escalation_policy="缺少可验证风险输入或私有Tool无法完成时上报MainAgent。",
+        supported_scenarios=["组合集中度分析", "账户风险事实分析", "风险约束审查", "为下游方案提供结构化风险Slot"],
+        unsupported_scenarios=["读取未绑定的原始业务事实", "订单执行", "持仓写入", "最终调仓Proposal生成"],
+        limitations=["只消费本轮CapabilityContract绑定的业务Slot", "不与任何特定上游Worker ID硬绑定"],
+        escalation_policy="所需业务Slot未绑定或私有Tool无法完成时，先向MainAgent上报缺失信息；W04不直接向用户索取内部业务对象。",
         execution_mode="hybrid",
-        private_worker_prompt="根据风险合同选择最小只读Tool DAG，区分风险事实和建议。",
+        private_worker_prompt="根据风险合同和已绑定Slot选择最小只读Tool DAG，区分风险事实和建议；缺少合同必需Slot时上报MainAgent，不补造输入。",
         private_tool_ids=[
             "risk.calculate_concentration", "risk.read_account_risk_facts",
             "risk.summarize_exposure", "risk.finalize_facts",
@@ -161,14 +174,22 @@ _CARDS = {
         worker_id="W05",
         agent_id=STRATEGY_GUARD,
         role="state_change_proposal",
-        short_description="生成或审查需要用户审批的状态变更Proposal。",
-        full_description="只生成和审查待审批方案，不执行Commit，不绕过审批。",
+        short_description="消费本轮已绑定的状态、约束、风险分析等Slot，生成或审查需要用户审批的状态变更Proposal。",
+        full_description=(
+            "只基于CapabilityContract实际绑定的上游事实与分析Slot生成和审查待审批方案，不执行Commit，不绕过审批。"
+            "调仓场景可以消费W04等上游能力产生的风险Slot，但W05不与W04或任何特定Worker ID硬绑定；是否需要风险分析由本轮合同决定。"
+        ),
         supported_boundary_ids=["state_change.proposal"],
+        delegation_description=(
+            "当用户明确要求形成调仓、配置调整或其他状态变更方案时委派W05。"
+            "W05根据本轮已绑定的组合状态、用户约束、风险分析或其他必要Slot形成待审批Proposal。"
+        ),
+        delegate_when=["存在明确的调仓或状态变更意图", "需要把已验证的上游事实/风险结论转成待审批Proposal"],
         capability_tags=["proposal", "approval", "strategy_guard"],
-        supported_scenarios=["调仓方案生成", "状态变更约束审查"],
-        unsupported_scenarios=["直接Commit", "绕过审批"],
-        limitations=["必须存在显式变更意图"],
-        escalation_policy="无法形成合规Proposal时返回能力级错误。",
+        supported_scenarios=["调仓方案生成", "状态变更约束审查", "消费上游风险分析形成Proposal"],
+        unsupported_scenarios=["直接Commit", "绕过审批", "替代上游专业风险分析"],
+        limitations=["必须存在显式变更意图", "只消费本轮合同绑定的Slot，不固定依赖某个Worker"],
+        escalation_policy="缺少形成合规Proposal所需的已验证Slot时上报MainAgent；只有MainAgent确认属于用户参数后才询问用户。",
         execution_mode="pure_llm",
         max_effect_level="proposal",
         private_worker_prompt="只生成或审查待审批Proposal，不得Commit。",

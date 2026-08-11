@@ -267,9 +267,12 @@ class AgentCollaborationCoordinator:
                         "context_binding 是 MainAgent 对当前业务范围的语义判断；portfolio、account、global、none 是业务范围，"
                         "不能把‘我的持仓’、‘当前账户’等范围词误当成单只证券实体。只有请求中明确出现具体证券、公司、行业、事件或已命名组合对象时才输出 mention。"
                         "lexical_candidates 只是字符串候选，不是权威结论；你必须根据用户目标决定是否保留。"
-                        "不要从常识补充对象，不要生成代码，不要决定最终实体 ID。当前请求中没有需要 GraphRef 解析的明确对象时返回空数组。"
+                        "不要从常识补充对象，不要生成代码，不要决定最终实体 ID。当前请求中没有需要 GraphRef 解析的明确对象时，"
+                        "仍必须返回顶层 JSON 对象 {\"mentions\":[]}，不得返回顶层数组 []。"
                         "角色只能是 focus、comparison、cause、impact_target、context、event。"
-                        "严格输出 JSON：{\"mentions\":[{\"text\":\"\",\"role\":\"focus\"}]}。"
+                        "严格输出且只能输出一个顶层 JSON 对象，唯一允许的顶层字段为 mentions。"
+                        "有候选时输出 {\"mentions\":[{\"text\":\"具体对象\",\"role\":\"focus\"}]}；"
+                        "无候选时输出 {\"mentions\":[]}。不要输出 Markdown、解释或顶层数组。"
                     ),
                 },
                 {
@@ -917,6 +920,12 @@ class AgentCollaborationCoordinator:
             )
         statuses = [result.status for result in results.values()]
         need_context = [item for result in results.values() for item in result.missing_items if item.blocking]
+        final_sufficiency = self.sufficiency_gate.evaluate(
+            missing_items=need_context,
+            available_parameters=hydrated.available_parameters,
+        ) if need_context else None
+        waiting_user_input = bool(final_sufficiency and final_sufficiency.next_action in {"ask_user", "select_entity"})
+        waiting_internal_context = bool(need_context and not waiting_user_input)
         status_failed = sum(status in {ResultStatus.FAILED, ResultStatus.BLOCKED, ResultStatus.NOT_EXECUTED} for status in statuses)
         semantic_failed = sum(
             1
@@ -954,6 +963,10 @@ class AgentCollaborationCoordinator:
             })
         failed = max(status_failed, semantic_failed)
         completed = sum(status in {ResultStatus.COMPLETED, ResultStatus.PARTIAL, ResultStatus.PROPOSAL_READY} for status in statuses)
+        # Keep the external execution-status contract stable: both user-input
+        # waits and internal-context waits remain waiting_context here. The
+        # persisted RunCheckpoint distinguishes waiting_user_input from
+        # waiting_context for resume/routing semantics.
         execution_status = (
             "waiting_context" if need_context else
             "completed" if failed == 0 else
@@ -961,24 +974,34 @@ class AgentCollaborationCoordinator:
             "failed"
         )
         success = completed > 0 and failed == 0 and not need_context
-        question = _clarification_question(need_context, language) if need_context else ""
+        question = _clarification_question(need_context, language) if waiting_user_input else ""
+        context_wait_message = (
+            "系统仍缺少内部上下文或上游能力结果，本轮不会把它误判成需要用户提供的参数。"
+            if waiting_internal_context and language != "en" else
+            "The system is still missing internal context or an upstream capability result; it is not being treated as a user-supplied parameter."
+            if waiting_internal_context else ""
+        )
         internal_count = len([item for item in timeline if item.get("status") not in {"not_executed"}])
         self.checkpoints.save(RunCheckpoint(
             run_id=run_id,
             session_id=session_id,
             user_id=user_id,
-            status="waiting_user_input" if need_context else "completed" if success else "failed",
+            status="waiting_user_input" if waiting_user_input else "waiting_context" if waiting_internal_context else "completed" if success else "failed",
             current_node_id="final_response",
             capability_plan=dict(plan_meta.get("capability_plan") or {}),
             task_states={task.task_id: (results[task.task_id].status.value if task.task_id in results else "not_executed") for task in tasks},
             resolved_entity_refs=[ref.to_dict() for ref in focus_refs],
             slot_refs=[f"run-slot:{run_id}:{task_id}" for task_id in results],
-            missing_context_slots=[item.key for item in need_context],
+            missing_parameters=list(final_sufficiency.missing_parameters) if final_sufficiency else [],
+            missing_context_slots=(
+                [*final_sufficiency.missing_context_slots, *final_sufficiency.unresolved_entities]
+                if final_sufficiency else []
+            ),
             replan_count=len([item for item in replan_audit if item.get("status") == "executed"]),
         ))
         return {
             "success": success,
-            "answer": answer if not question else question,
+            "answer": question if question else context_wait_message if context_wait_message else answer,
             "task_results": public_results,
             "graph_worker_results": {
                 "contract_version": "graph_worker_results.v1",
@@ -995,8 +1018,9 @@ class AgentCollaborationCoordinator:
             "warnings": [warning for result in results.values() for warning in result.warnings],
             "errors": [],
             "execution_status": execution_status,
-            "need_clarification": bool(need_context),
+            "need_clarification": bool(waiting_user_input),
             "clarification_question": question,
+            "context_sufficiency": final_sufficiency.to_dict() if final_sufficiency else {},
             "missing_context": [item.to_dict() for item in need_context],
             "observations": final_observations,
             "replan_audit": replan_audit,
@@ -1119,6 +1143,10 @@ class AgentCollaborationCoordinator:
             "semantic_satisfied": semantic_satisfied,
             "produced_information_slots": sorted(produced),
             "missing_information_slots": sorted(missing),
+            "missing_context_slots": sorted({
+                str(item.key) for item in list(result.missing_items or [])
+                if getattr(item, "blocking", True) and str(getattr(item, "key", "") or "")
+            }),
             "failure_kind": failure_kind,
             "retryable": bool((result.error or {}).get("retryable")),
             "repairable": repairable,

@@ -335,6 +335,7 @@ class CoordinatorPlanner:
         run_id: str,
         initial_slots: set[str],
         recovery_context: dict[str, Any] | None = None,
+        planning_gap_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Select Worker calls only from the canonical intent + public descriptions."""
 
@@ -380,6 +381,60 @@ class CoordinatorPlanner:
                         f"$.worker_calls[{index}].desired_output_slots",
                         self._worker_output_contract_error_detail(worker_by_id[worker_id], unsupported),
                     )
+            if planning_gap_context:
+                prior_calls = [
+                    dict(item) for item in planning_gap_context.get("existing_worker_calls") or []
+                    if isinstance(item, dict)
+                ]
+                selected_ids = {
+                    str(item.get("worker_id") or "").strip().upper()
+                    for item in calls if isinstance(item, dict)
+                }
+                prior_ids = {
+                    str(item.get("worker_id") or "").strip().upper()
+                    for item in prior_calls
+                }
+                removed = sorted(prior_ids - selected_ids)
+                if removed:
+                    raise WorkerContractViolation(
+                        "planning_gap_repair_removed_existing_worker",
+                        "$.worker_calls",
+                        ",".join(removed),
+                    )
+                for prior in prior_calls:
+                    worker_id = str(prior.get("worker_id") or "").strip().upper()
+                    prior_outputs = {str(item) for item in prior.get("desired_output_slots") or [] if str(item)}
+                    repaired_outputs = {
+                        str(item)
+                        for call in calls if isinstance(call, dict)
+                        and str(call.get("worker_id") or "").strip().upper() == worker_id
+                        for item in call.get("desired_output_slots") or [] if str(item)
+                    }
+                    missing_prior_outputs = sorted(prior_outputs - repaired_outputs)
+                    if missing_prior_outputs:
+                        raise WorkerContractViolation(
+                            "planning_gap_repair_removed_existing_output",
+                            "$.worker_calls",
+                            f"{worker_id}:{','.join(missing_prior_outputs)}",
+                        )
+                repairable_slots = {
+                    str(item.get("input_slot_id") or "")
+                    for item in planning_gap_context.get("planning_gaps") or []
+                    if item.get("producer_candidate_worker_ids") and str(item.get("input_slot_id") or "")
+                }
+                produced_for_gap = {
+                    str(slot)
+                    for call in calls if isinstance(call, dict)
+                    for slot in call.get("desired_output_slots") or [] if str(slot)
+                }
+                unresolved_repairable = sorted(repairable_slots - produced_for_gap)
+                if unresolved_repairable:
+                    raise WorkerContractViolation(
+                        "planning_gap_repair_did_not_cover_missing_slot",
+                        "$.worker_calls",
+                        ",".join(unresolved_repairable),
+                    )
+
             if intent_contract.get("requires_user_facing_response") and not any(
                 "user_facing_report" in {str(item) for item in raw.get("desired_output_slots") or []}
                 for raw in calls if isinstance(raw, dict)
@@ -406,8 +461,22 @@ class CoordinatorPlanner:
         }
         if recovery_context:
             user_payload["bounded_recovery_context"] = recovery_context
+        if planning_gap_context:
+            user_payload["planning_gap_context"] = planning_gap_context
+        selection_stage = (
+            "planning_gap_worker_call_repair" if planning_gap_context
+            else "recovery_worker_call_selection" if recovery_context
+            else "upfront_worker_call_selection"
+        )
+        planning_gap_instruction = (
+            "当前是Planning Gap能力补全，不是重新规划业务意图。planning_gap_context中的existing_worker_calls必须保留，"
+            "不得删除其Worker或既有desired_output_slots；允许从公开Worker descriptions中增加必要的支持Worker，"
+            "使存在producer_candidate_worker_ids的missing required Slot获得生产者。新增支持Worker可以covers_need_ids=[]，"
+            "因为它服务的是既有业务Worker的输入合同，而不是新增用户Need。依赖的是Slot，不得把消费者Worker与某个生产者Worker ID写成固定绑定。"
+            if planning_gap_context else ""
+        )
         payload = self.llm_service.generate_json(
-            stage="upfront_worker_call_selection" if not recovery_context else "recovery_worker_call_selection",
+            stage=selection_stage,
             messages=[
                 {
                     "role": "system",
@@ -419,6 +488,7 @@ class CoordinatorPlanner:
                         "required_output_shape只是格式示意，不得把它作为返回包装层；顶层必须直接返回worker_calls和selection_reason。"
                         "选择能够覆盖全部required need的最小充分Worker调用集合。每个required need必须由covers_need_ids显式覆盖。"
                         "需要自然语言最终交付的presentation need必须由能真实产出user_facing_report的Worker覆盖，但不要根据Worker编号硬编码。"
+                        + planning_gap_instruction +
                         "不要选择Tool，不要生成DAG，不要输出私有Prompt。只输出JSON。"
                     ),
                 },
@@ -430,7 +500,8 @@ class CoordinatorPlanner:
             disable_thinking=False,
             repair_mode="targeted",
             repair_guidance=(
-                "只修复need覆盖、Worker公开产出Slot和Worker ID；不得重新解释用户请求。"
+                ("Planning Gap修复时必须保留existing_worker_calls及其既有desired_output_slots，只允许增加解决缺口所需的Worker/Slot；" if planning_gap_context else "")
+                + "只修复need覆盖、Worker公开产出Slot和Worker ID；不得重新解释用户请求。"
                 "若validation_error.contract_code=worker_call_output_outside_worker，必须读取validation_error.detail中的"
                 "worker_id、invalid_slots、produced_output_patterns、output_slot_examples和output_publication_mode："
                 "worker_synthesized可在pattern命名空间内重新命名/创建Key；private_tool_passthrough只能选择private_tool_semantic_outputs；"
@@ -730,6 +801,59 @@ class CoordinatorPlanner:
         }
         return compiled, meta
 
+    @classmethod
+    def _planning_gap_context(
+        cls,
+        *,
+        exc: WorkerContractViolation,
+        tasks: list[CapabilityTask],
+        worker_call_plan: dict[str, Any],
+        worker_descriptions: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Build a MainAgent-visible, Tool-free planning-gap contract.
+
+        SlotBinder owns detection; MainAgent still owns Worker selection.  Public
+        producer candidates are capability matches only and never an automatic
+        Worker binding.
+        """
+
+        raw_gaps = list((exc.metadata or {}).get("planning_gaps") or [])
+        if not raw_gaps:
+            raw_gaps = [{
+                "gap_type": "required_input_has_no_producer",
+                "consumer_task_id": "",
+                "consumer_contract_id": "",
+                "consumer_worker_id": "",
+                "input_slot_id": str(exc.detail or ""),
+                "repair_scope": "worker_selection",
+            }]
+        enriched: list[dict[str, Any]] = []
+        for raw in raw_gaps:
+            row = dict(raw or {})
+            slot_id = str(row.get("input_slot_id") or "")
+            row["producer_candidate_worker_ids"] = [
+                str(worker.get("worker_id") or "")
+                for worker in worker_descriptions
+                if slot_id and cls._worker_supports_output(worker, slot_id)
+            ]
+            enriched.append(row)
+        return {
+            "schema_version": "planning_gap.v1",
+            "gap_kind": "required_input_has_no_producer",
+            "planning_gaps": enriched,
+            "existing_worker_calls": [
+                dict(item) for item in worker_call_plan.get("worker_calls") or []
+                if isinstance(item, dict)
+            ],
+            "repair_owner": "main_agent",
+            "runtime_role": "detect_and_validate_only",
+            "worker_id_binding_allowed": False,
+            "instruction": (
+                "保持canonical intent和既有Worker调用；优先用公开能力补齐缺失Slot。"
+                "SlotBinder不得自动选择Worker；没有公开能力可生产的Slot不得猜测为某个内部Worker。"
+            ),
+        }
+
     def plan(
         self,
         *,
@@ -775,23 +899,91 @@ class CoordinatorPlanner:
                 run_id=run_id,
                 initial_slots=initial_slots,
             )
-            return self._compile(
-                payload=payload,
-                tasks=tasks,
-                request_mode=mode,
-                session_id=session_id,
-                run_id=run_id,
-                user_id=user_id,
-                focus_refs=focus_refs,
-                context_refs=context_refs,
-                as_of_time=as_of_time,
-                initial_slots=initial_slots,
-                planning_meta={
-                    "canonical_intent_contract": intent,
-                    "worker_call_plan": worker_call_plan,
-                    "worker_description_count": len(descriptions),
-                },
-            )
+            planning_gap_audit: list[dict[str, Any]] = []
+            max_gap_repairs = 2
+            for gap_round in range(0, max_gap_repairs + 1):
+                try:
+                    compiled, meta = self._compile(
+                        payload=payload,
+                        tasks=tasks,
+                        request_mode=mode,
+                        session_id=session_id,
+                        run_id=run_id,
+                        user_id=user_id,
+                        focus_refs=focus_refs,
+                        context_refs=context_refs,
+                        as_of_time=as_of_time,
+                        initial_slots=initial_slots,
+                        planning_meta={
+                            "canonical_intent_contract": intent,
+                            "worker_call_plan": worker_call_plan,
+                            "worker_description_count": len(descriptions),
+                        },
+                    )
+                    meta["planning_gap_repair"] = {
+                        "repair_count": len(planning_gap_audit),
+                        "max_repairs": max_gap_repairs,
+                        "audit": planning_gap_audit,
+                    }
+                    return compiled, meta
+                except WorkerContractViolation as exc:
+                    if exc.code != "capability_required_input_has_no_producer" or gap_round >= max_gap_repairs:
+                        raise
+                    gap_context = self._planning_gap_context(
+                        exc=exc,
+                        tasks=tasks,
+                        worker_call_plan=worker_call_plan,
+                        worker_descriptions=descriptions,
+                    )
+                    unresolved = [
+                        item for item in gap_context.get("planning_gaps") or []
+                        if not item.get("producer_candidate_worker_ids")
+                    ]
+                    audit_row = {
+                        "round": gap_round + 1,
+                        "status": "detected",
+                        "gap_context": gap_context,
+                    }
+                    planning_gap_audit.append(audit_row)
+                    flow_event(
+                        "WORKER_PLANNING_GAP_DETECTED",
+                        audit_row,
+                        run_id=run_id,
+                        level="WARNING",
+                    )
+                    if unresolved:
+                        raise WorkerContractViolation(
+                            "capability_required_input_unresolvable",
+                            exc.path,
+                            ",".join(str(item.get("input_slot_id") or "") for item in unresolved),
+                            metadata={"planning_gap_context": gap_context},
+                        ) from exc
+                    worker_call_plan = self._select_worker_calls(
+                        intent_contract=intent,
+                        worker_descriptions=descriptions,
+                        request_mode=mode,
+                        run_id=run_id,
+                        initial_slots=initial_slots,
+                        planning_gap_context=gap_context,
+                    )
+                    payload, tasks = self._generate_worker_dag(
+                        intent_contract=intent,
+                        worker_call_plan=worker_call_plan,
+                        worker_descriptions=descriptions,
+                        request_mode=mode,
+                        run_id=run_id,
+                        initial_slots=initial_slots,
+                        recovery_context={
+                            "planning_gap_repair": True,
+                            "planning_gap_context": gap_context,
+                            "instruction": "只实现MainAgent已补全的Worker调用集合，不重新解释canonical intent。",
+                        },
+                    )
+                    planning_gap_audit[-1]["status"] = "replanned"
+                    planning_gap_audit[-1]["repaired_worker_ids"] = [
+                        str(item.get("worker_id") or "")
+                        for item in worker_call_plan.get("worker_calls") or []
+                    ]
         except (WorkerContractViolation, KeyError, ValueError) as exc:
             raise CoordinatorPlanningError(
                 str(exc), diagnostics={"failure_kind": "upfront_worker_dag_planning_failure"}
@@ -868,6 +1060,7 @@ class CoordinatorPlanner:
                 "operation": error.get("operation"),
                 "reason": error.get("reason") or error.get("message"),
                 "missing_information_slots": item.get("missing_information_slots") or [],
+                "missing_context_slots": item.get("missing_context_slots") or [],
             })
         recovery_context = {
             "round": int(replan_round),
@@ -908,10 +1101,26 @@ class CoordinatorPlanner:
             for item in failure_signatures
         }
         repeated_shapes = []
+        recovery_produced_slots = {
+            str(slot)
+            for task in remapped
+            for slot in task.output_slots()
+            if str(slot)
+        }
+        missing_context_by_shape = {
+            (
+                str(item.get("worker_id") or ""),
+                str(item.get("boundary_id") or ""),
+                tuple(item.get("required_input_slots") or []),
+            ): {str(slot) for slot in item.get("missing_context_slots") or [] if str(slot)}
+            for item in failure_signatures
+        }
         for task in remapped:
             shape = (task.worker_id, task.boundary_id, tuple(sorted(task.input_slots(required_only=True))))
             if shape in failed_shapes:
-                repeated_shapes.append({"worker_id": task.worker_id, "boundary_id": task.boundary_id, "required_input_slots": list(shape[2])})
+                repaired_inputs = missing_context_by_shape.get(shape, set()).intersection(recovery_produced_slots)
+                if not repaired_inputs:
+                    repeated_shapes.append({"worker_id": task.worker_id, "boundary_id": task.boundary_id, "required_input_slots": list(shape[2])})
         if repeated_shapes:
             raise WorkerContractViolation("replan_repeated_failed_worker_shape", "$.tasks", str(repeated_shapes))
         payload = dict(payload)

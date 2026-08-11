@@ -53,6 +53,37 @@ class SlotBinder:
                         }
                     )
 
+        # Planning-stage preflight: collect every required Slot that has no
+        # producer before binding anything. SlotBinder reports the information
+        # gap but never chooses or inserts a Worker; Worker selection remains a
+        # MainAgent responsibility.
+        planning_gaps: list[dict[str, str]] = []
+        for task in tasks:
+            for contract in task.contracts:
+                for required_input in contract.required_inputs:
+                    candidates = [
+                        item
+                        for item in producer_index.get(required_input.slot_id, [])
+                        if str(item.get("producer_task_id") or "") != task.task_id
+                    ]
+                    if required_input.required and not candidates:
+                        planning_gaps.append({
+                            "gap_type": "required_input_has_no_producer",
+                            "consumer_task_id": task.task_id,
+                            "consumer_contract_id": contract.contract_id,
+                            "consumer_worker_id": task.worker_id,
+                            "input_slot_id": required_input.slot_id,
+                            "repair_scope": "worker_selection",
+                        })
+        if planning_gaps:
+            first = planning_gaps[0]
+            raise WorkerContractViolation(
+                "capability_required_input_has_no_producer",
+                f"$.tasks[{first['consumer_task_id']}].contracts[{first['consumer_contract_id']}]",
+                first["input_slot_id"],
+                metadata={"planning_gaps": planning_gaps},
+            )
+
         bindings: dict[str, list[InputOutputBinding]] = {task.task_id: [] for task in tasks}
         dependencies: dict[str, list[str]] = {task.task_id: [] for task in tasks}
         for task in tasks:

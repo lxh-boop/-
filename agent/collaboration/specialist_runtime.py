@@ -241,9 +241,9 @@ class SpecialistRuntime:
                 output_type="CapabilityResult",
                 data=None,
                 error={
-                    "error_id": "missing_context",
+                    "error_id": "worker_input_slot_unresolved",
                     "operation": task.objective or task.boundary_id,
-                    "reason": "CapabilityContract required input bindings are unavailable.",
+                    "reason": "CapabilityContract required input Slot is unavailable after binding/materialization; report to MainAgent for capability/context repair.",
                 },
                 focus_refs=task.focus_refs,
                 summary=(
@@ -256,6 +256,7 @@ class SpecialistRuntime:
                         key=slot_id,
                         description=f"CapabilityContract required input is not bound: {slot_id}",
                         expected_format="Runtime SlotBinder input slot",
+                        reason="worker_input_slot_unresolved: this is a Worker input Slot gap, not automatically a user parameter.",
                         searched_sources=["resolved_input_bindings", "resolved_inputs"],
                     )
                     for slot_id in missing_required
@@ -264,7 +265,7 @@ class SpecialistRuntime:
                     task,
                     execution_status="need_context",
                     reason="CapabilityContract required input bindings are unavailable.",
-                    failure_kind="missing_context",
+                    failure_kind="worker_input_slot_unresolved",
                 ),
             )
             produced = self._produced_slots(task, result)
