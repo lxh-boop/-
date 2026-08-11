@@ -60,7 +60,7 @@ class CoordinatorPlanner:
             self.registry,
             worker_tool_directory=worker_tool_directory,
         )
-        self.validator = CapabilityPlanValidator(self.registry)
+        self.validator = CapabilityPlanValidator(self.registry, directory)
         self.slot_binder = SlotBinder()
         self.assignment_validator = WorkerAssignmentValidator(self.registry, directory)
 
@@ -108,6 +108,7 @@ class CoordinatorPlanner:
         language: str,
         initial_slots: set[str],
         memory_summary: str,
+        context_binding: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """The only normal-path LLM stage allowed to interpret the raw request."""
 
@@ -138,6 +139,13 @@ class CoordinatorPlanner:
                         "把用户真正希望得到的信息拆成少量、明确、可执行的needs。intent_summary里提到的每一个分析维度都必须在needs中出现；"
                         "needs中没有的维度不要写进intent_summary。不要写Worker ID、Agent ID、Tool、Capability boundary或Slot名称。"
                         "不要因为系统拥有某项能力就自动扩大需求；也不要把用户请求中实际需要的维度省略。"
+                        "当前user_request是本轮业务目标的第一权威来源；context_binding是本轮对象范围与历史对象继承规则的权威约束。"
+                        "session_summary只是经过入口上下文绑定策略允许进入本阶段的对话背景，不是金融实体权威来源。"
+                        "当context_binding.entity_scope=portfolio且inherit_previous_focus=false时，必须保持组合级目标；"
+                        "除非当前user_request本身明确点名具体证券/公司，或available_context_kinds中已有authoritative_entity_refs，"
+                        "不得把历史会话中的单一证券重新加入intent_summary、needs或scope_note，也不得把组合任务收窄成单证券任务。"
+                        "具体证券、公司、行业或事件只有在当前user_request明确出现，或available_context_kinds中存在authoritative_entity_refs时，"
+                        "才能进入实体特定的intent_summary或needs；不得仅根据session_summary重新引入一个未绑定的历史金融对象。"
                         "effect_limit只能遵守request_mode。只输出JSON。"
                     ),
                 },
@@ -147,7 +155,9 @@ class CoordinatorPlanner:
                         "request_mode": request_mode,
                         "reply_language": language,
                         "user_request": query,
+                        "context_binding": dict(context_binding or {}),
                         "available_context_kinds": sorted(initial_slots),
+                        "authoritative_entity_refs_available": "authoritative_entity_refs" in initial_slots,
                         "session_summary": str(memory_summary or "")[:1400],
                         "required_output_shape": {
                             "intent_summary": "对用户真实目标的单一权威概括",
@@ -226,6 +236,15 @@ class CoordinatorPlanner:
 
     @staticmethod
     def _worker_output_patterns(worker: dict[str, Any]) -> list[str]:
+        direct = [
+            str(pattern)
+            for pattern in worker.get("produced_output_patterns") or []
+            if str(pattern)
+        ]
+        if direct:
+            return list(dict.fromkeys(direct))
+        # Compatibility for older tests/snapshots. The active MainAgent catalog
+        # no longer exposes fine-grained boundaries.
         return list(dict.fromkeys(
             str(pattern)
             for boundary in worker.get("supported_boundaries") or []
@@ -245,6 +264,67 @@ class CoordinatorPlanner:
             }
             return slot_id in discoverable
         return True
+
+    @classmethod
+    def _worker_output_contract_error_detail(
+        cls,
+        worker: dict[str, Any],
+        invalid_slots: set[str] | list[str],
+    ) -> str:
+        """Return repair-ready details without closing the open Slot namespace.
+
+        Worker-synthesized Slot ids remain open-ended.  The hard boundary is the
+        Worker's declared ``produced_output_patterns`` namespace.  Keeping this
+        detail machine-readable lets the existing single targeted-repair call
+        rename an invalid semantic key instead of merely repairing JSON shape.
+        """
+
+        mode = str(worker.get("output_publication_mode") or "worker_synthesized")
+        detail: dict[str, Any] = {
+            "worker_id": str(worker.get("worker_id") or ""),
+            "invalid_slots": sorted({str(item) for item in invalid_slots if str(item)}),
+            "output_publication_mode": mode,
+            "produced_output_patterns": cls._worker_output_patterns(worker),
+            "output_slot_examples": [
+                str(item)
+                for item in worker.get("output_slot_examples") or []
+                if str(item)
+            ],
+        }
+        if mode == "private_tool_passthrough":
+            detail["private_tool_semantic_outputs"] = [
+                str(item)
+                for item in worker.get("private_tool_semantic_outputs") or []
+                if str(item)
+            ]
+            detail["repair_rule"] = (
+                "Select an existing private_tool_semantic_outputs key; do not synthesize a new Slot id."
+            )
+        else:
+            detail["repair_rule"] = (
+                "Reuse an output_slot_examples key when suitable, otherwise rename/create a semantic Slot key "
+                "that literally matches at least one produced_output_patterns entry."
+            )
+        return compact_json_dumps(detail)
+
+    @staticmethod
+    def _lift_worker_call_shape_echo(payload: dict[str, Any]) -> None:
+        """Normalize the model echoing the prompt's shape example as a wrapper.
+
+        This is structural-only normalization: it does not add, remove, rename,
+        or reinterpret any Worker or Slot.  It prevents the single repair budget
+        from being spent only on removing ``required_output_shape`` before the
+        real semantic contract error can be surfaced.
+        """
+
+        if isinstance(payload.get("worker_calls"), list):
+            return
+        echoed = payload.get("required_output_shape")
+        if not isinstance(echoed, dict) or not isinstance(echoed.get("worker_calls"), list):
+            return
+        payload["worker_calls"] = echoed["worker_calls"]
+        if not str(payload.get("selection_reason") or "").strip():
+            payload["selection_reason"] = str(echoed.get("selection_reason") or "").strip()
 
     def _select_worker_calls(
         self,
@@ -266,6 +346,7 @@ class CoordinatorPlanner:
         }
 
         def validate(payload: dict[str, Any]) -> None:
+            self._lift_worker_call_shape_echo(payload)
             calls = payload.get("worker_calls")
             if not isinstance(calls, list) or not calls:
                 raise WorkerContractViolation("worker_calls_required", "$.worker_calls")
@@ -294,7 +375,11 @@ class CoordinatorPlanner:
                     if not self._worker_supports_output(worker_by_id[worker_id], slot)
                 }
                 if unsupported:
-                    raise WorkerContractViolation("worker_call_output_outside_worker", f"$.worker_calls[{index}].desired_output_slots", ",".join(sorted(unsupported)))
+                    raise WorkerContractViolation(
+                        "worker_call_output_outside_worker",
+                        f"$.worker_calls[{index}].desired_output_slots",
+                        self._worker_output_contract_error_detail(worker_by_id[worker_id], unsupported),
+                    )
             if intent_contract.get("requires_user_facing_response") and not any(
                 "user_facing_report" in {str(item) for item in raw.get("desired_output_slots") or []}
                 for raw in calls if isinstance(raw, dict)
@@ -328,7 +413,10 @@ class CoordinatorPlanner:
                     "role": "system",
                     "content": (
                         "你是MainAgent的Worker委派阶段。原始用户请求已经被唯一解释为canonical_intent_contract；禁止重新解释、扩大或缩小它。"
-                        "你现在一次性看到所有可用Worker的完整公开description。使用delegation_description、delegate_when、supported_boundaries、produced_output_patterns、output_slot_examples、output_publication_mode和private_tool_semantic_outputs。private_tool_semantic_outputs只公开该Worker可确定性产出的语义Slot，不暴露Tool身份或参数。"
+                        "你现在一次性看到所有可用Worker的完整公开description。每个Worker是一块完整的专业能力范围，不是一组需要你继续挑选的子能力。"
+                        "使用delegation_description、delegate_when、produced_output_patterns、output_slot_examples、output_publication_mode和private_tool_semantic_outputs判断应该委派给谁。private_tool_semantic_outputs只公开该Worker可确定性产出的语义Slot，不暴露Tool身份或参数。"
+                        "produced_output_patterns是硬命名合同，不是主题提示。output_publication_mode=worker_synthesized时允许创建新Slot，但每个新Key必须字面匹配至少一个produced_output_patterns：例如risk.*只能生成risk.xxx，analysis.risk*只能生成analysis.risk开头的Key；不能改写成concentration_risk_fragment这类命名。没有通配符的pattern只能原样使用。已有能力优先复用output_slot_examples。private_tool_passthrough仍只能从private_tool_semantic_outputs选择。"
+                        "required_output_shape只是格式示意，不得把它作为返回包装层；顶层必须直接返回worker_calls和selection_reason。"
                         "选择能够覆盖全部required need的最小充分Worker调用集合。每个required need必须由covers_need_ids显式覆盖。"
                         "需要自然语言最终交付的presentation need必须由能真实产出user_facing_report的Worker覆盖，但不要根据Worker编号硬编码。"
                         "不要选择Tool，不要生成DAG，不要输出私有Prompt。只输出JSON。"
@@ -341,7 +429,13 @@ class CoordinatorPlanner:
             operation=f"upfront_worker_calls:{request_mode}",
             disable_thinking=False,
             repair_mode="targeted",
-            repair_guidance="只修复need覆盖、Worker公开产出Slot和Worker ID；不得重新解释用户请求。",
+            repair_guidance=(
+                "只修复need覆盖、Worker公开产出Slot和Worker ID；不得重新解释用户请求。"
+                "若validation_error.contract_code=worker_call_output_outside_worker，必须读取validation_error.detail中的"
+                "worker_id、invalid_slots、produced_output_patterns、output_slot_examples和output_publication_mode："
+                "worker_synthesized可在pattern命名空间内重新命名/创建Key；private_tool_passthrough只能选择private_tool_semantic_outputs；"
+                "不得原样保留不匹配pattern的Slot。"
+            ),
         )
         calls: list[dict[str, Any]] = []
         for index, raw in enumerate(payload.get("worker_calls") or [], start=1):
@@ -368,8 +462,7 @@ class CoordinatorPlanner:
         )
         return normalized
 
-    @staticmethod
-    def _normalize_task_ids(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _normalize_task_ids(self, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         normalized: list[dict[str, Any]] = []
         for task_index, raw_task in enumerate(tasks or [], start=1):
             if not isinstance(raw_task, dict):
@@ -378,6 +471,15 @@ class CoordinatorPlanner:
             row = dict(raw_task)
             row["task_id"] = task_id
             row["worker_id"] = str(row.get("worker_id") or "").strip().upper()
+            # ``boundary_id`` is retained only as a compatibility/audit field.
+            # MainAgent no longer selects a fine-grained sub-boundary. Runtime
+            # deterministically labels the task with the selected Worker's
+            # existing role, while contract validation uses that Worker's full
+            # capability scope.
+            try:
+                row["boundary_id"] = str(self.directory.get(row["worker_id"]).role)
+            except Exception:
+                row["boundary_id"] = ""
             contracts: list[dict[str, Any]] = []
             for contract_index, raw_contract in enumerate(row.get("contracts") or [], start=1):
                 if not isinstance(raw_contract, dict):
@@ -429,13 +531,7 @@ class CoordinatorPlanner:
         calls = list(worker_call_plan.get("worker_calls") or [])
         selected_ids = {str(row.get("worker_id") or "") for row in calls}
         selected_details = [row for row in worker_descriptions if row.get("worker_id") in selected_ids]
-        boundary_ids = sorted({
-            str(boundary.get("boundary_id") or "")
-            for detail in selected_details
-            for boundary in detail.get("supported_boundaries") or []
-            if str(boundary.get("boundary_id") or "")
-        })
-        boundary_catalog = self.registry.public_catalog(request_mode=request_mode, boundary_ids=boundary_ids)
+        selected_by_id = {str(row.get("worker_id") or ""): row for row in selected_details}
         goal = self._goal_contract(intent_contract=intent_contract, worker_calls=calls)
 
         def validate(candidate: dict[str, Any]) -> None:
@@ -463,18 +559,31 @@ class CoordinatorPlanner:
                         "$.tasks",
                         f"{call.get('call_id')}:{','.join(missing)}",
                     )
+            # Every promised output must be legal for the selected Worker's
+            # overall scope. Passthrough Workers remain additionally restricted
+            # to explicit ToolOutputContract semantic slots.
+            for task in tasks:
+                worker = selected_by_id.get(task.worker_id) or {}
+                unsupported = sorted(
+                    slot for slot in task.output_slots()
+                    if not self._worker_supports_output(worker, slot)
+                )
+                if unsupported:
+                    raise WorkerContractViolation(
+                        "worker_task_output_outside_worker_scope",
+                        "$.tasks",
+                        self._worker_output_contract_error_detail(worker, unsupported),
+                    )
 
         user_payload: dict[str, Any] = {
             "canonical_intent_contract": intent_contract,
             "selected_worker_calls": calls,
             "selected_worker_descriptions": selected_details,
             "available_initial_information_slots": sorted(initial_slots),
-            "capability_boundary_catalog": boundary_catalog,
             "program_owned_goal_contract": goal,
             "required_output_shape": {
                 "tasks": [{
                     "worker_id": "must appear in selected_worker_calls",
-                    "boundary_id": "one supported public boundary",
                     "objective": "short objective constrained by the WorkerCall",
                     "effect_limit": "read|proposal",
                     "priority": 1,
@@ -500,9 +609,11 @@ class CoordinatorPlanner:
                     "role": "system",
                     "content": (
                         "你是MainAgent的Worker DAG生成阶段。canonical_intent_contract和selected_worker_calls已经是权威决定；"
-                        "禁止重新解释原始用户请求，禁止增删WorkerCall。一次性生成完整Worker DAG的任务/CapabilityContract。"
-                        "每个WorkerCall的desired_output_slots必须由同一worker_id的任务真实承诺产出；Slot是开放的运行时语义Key，不是固定业务枚举。output_publication_mode=private_tool_passthrough时，desired_output_slots必须从private_tool_semantic_outputs选择；新增Tool的OutputContract会自动进入该列表，不需要中央Slot注册。output_publication_mode=worker_synthesized时，可创建匹配Boundary produced_output_patterns的新语义Key。生产者/消费者合同必须使用完全相同的Key。依赖关系不要手写，Runtime会根据Slot生产/消费自动推导。"
-                        "不要输出goal_contract（它由程序从canonical intent和WorkerCall固定生成），不要输出Tool、私有Prompt、dependency_task_ids、GraphRef、模型、超时、重试。"
+                        "禁止重新解释原始用户请求，禁止增删WorkerCall。每个selected Worker代表一块完整专业能力范围，不要再为Worker选择或发明子Boundary。"
+                        "一次性生成完整Worker DAG的任务/CapabilityContract；只描述Worker之间实际需要传递的信息Slot和本任务承诺产出的信息Slot。"
+                        "每个WorkerCall的desired_output_slots必须由同一worker_id的任务真实承诺产出；Slot是开放的运行时语义Key，不是固定业务枚举。output_publication_mode=private_tool_passthrough时，desired_output_slots必须从private_tool_semantic_outputs选择；新增Tool的OutputContract会自动进入该列表，不需要中央Slot注册。output_publication_mode=worker_synthesized时，可创建新语义Key，但Key必须字面匹配该Worker整体produced_output_patterns；produced_output_patterns是硬命名空间合同，不是语义提示。已有Key优先复用output_slot_examples。生产者/消费者合同必须使用完全相同的Key。依赖关系不要手写，Runtime会根据Slot生产/消费自动推导。"
+                        "session_summary、current_user_request、reply_language、runtime_context属于规划/运行上下文，不是经过验证的业务事实Slot，除系统诊断Worker外不要把它们声明成业务required_inputs。"
+                        "不要输出boundary_id、goal_contract（它由程序从canonical intent和WorkerCall固定生成），不要输出Tool、私有Prompt、dependency_task_ids、GraphRef、模型、超时、重试。"
                         "合同required_inputs只声明该任务实际不可缺少的输入；当你明确知道下游只需要Slot中的少数字段时，用required_paths声明最小字段路径（支持records[*].field），不知道结构时留空，禁止猜字段。只输出JSON。"
                     ),
                 },
@@ -513,7 +624,11 @@ class CoordinatorPlanner:
             operation=f"upfront_worker_dag:{request_mode}",
             disable_thinking=False,
             repair_mode="targeted",
-            repair_guidance="只修复已选WorkerCall到Capability任务/合同的实现，不得重新解释意图、增删WorkerCall或输出Tool。",
+            repair_guidance=(
+                "只修复已选WorkerCall到Worker级CapabilityContract的实现；不得选择子Boundary、重新解释意图、增删WorkerCall或输出Tool。"
+                "若validation_error.detail包含Worker输出合同，任何修复后的promised_outputs都必须严格匹配其中的produced_output_patterns；"
+                "worker_synthesized允许在pattern内创建新Key，但禁止在pattern外自由命名。"
+            ),
         )
         normalized_tasks = self._normalize_task_ids(payload.get("tasks") or [])
         normalized = {"goal_contract": goal, "tasks": normalized_tasks}
@@ -525,7 +640,7 @@ class CoordinatorPlanner:
                 "task_count": len(tasks),
                 "contract_count": sum(len(item.contracts) for item in tasks),
                 "worker_ids": [item.worker_id for item in tasks],
-                "boundary_ids": [item.boundary_id for item in tasks],
+                "worker_scope_ids": [item.boundary_id for item in tasks],
                 "main_agent_worker_visibility": "all_public_descriptions_upfront",
                 "main_agent_tool_visibility": "none",
                 "raw_request_used": False,
@@ -597,6 +712,7 @@ class CoordinatorPlanner:
             "runtime_version": RUNTIME_VERSION,
             "planning_mode": "upfront_worker_dag_then_private_tool_dag",
             "worker_selection_owner": "main_agent",
+            "capability_scope_mode": "worker_level",
             "worker_assignment_runtime_role": "validate_only",
             "raw_request_semantic_owner": "canonical_intent_contract",
             "task_count": len(compiled),
@@ -627,6 +743,7 @@ class CoordinatorPlanner:
         memory_summary: str,
         language: str = "zh",
         as_of_time: str = "",
+        context_binding: dict[str, Any] | None = None,
     ) -> tuple[list[GraphAgentTask], dict[str, Any]]:
         mode = str(request_mode or "analysis").lower()
         if mode not in {"analysis", "proposal"}:
@@ -640,6 +757,7 @@ class CoordinatorPlanner:
                 language=language,
                 initial_slots=initial_slots,
                 memory_summary=memory_summary,
+                context_binding=context_binding,
             )
             descriptions = self._load_worker_descriptions(request_mode=mode, run_id=run_id)
             worker_call_plan = self._select_worker_calls(

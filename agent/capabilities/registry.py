@@ -253,6 +253,39 @@ class CapabilityRegistry:
             raise KeyError(f"unknown_capability_boundary:{key}")
         return self._boundaries[key]
 
+    def aggregate_scope(self, boundary_ids: list[str] | tuple[str, ...] | set[str]) -> dict[str, Any]:
+        """Merge existing boundary definitions into one Worker-level capability scope.
+
+        The existing boundary registry remains the source of truth for semantic
+        Slot patterns and acceptance rules.  MainAgent no longer selects one of
+        these fine-grained boundaries; Runtime uses their union only to validate
+        the owning Worker's overall professional scope.
+        """
+
+        boundaries = [self.get_boundary(str(boundary_id)) for boundary_id in boundary_ids]
+        if not boundaries:
+            raise KeyError("empty_worker_capability_scope")
+
+        def merge(name: str) -> list[str]:
+            return list(dict.fromkeys(
+                str(item)
+                for boundary in boundaries
+                for item in getattr(boundary, name, []) or []
+                if str(item)
+            ))
+
+        return {
+            "source_boundary_ids": [boundary.boundary_id for boundary in boundaries],
+            "accepted_input_patterns": merge("accepted_input_patterns"),
+            "produced_output_patterns": merge("produced_output_patterns"),
+            "input_slot_examples": merge("input_slot_examples"),
+            "output_slot_examples": merge("output_slot_examples"),
+            "allowed_acceptance_rule_ids": merge("allowed_acceptance_rule_ids"),
+            "required_context_slots": merge("required_context_slots"),
+            "allowed_information_sources": merge("allowed_information_sources"),
+            "completion_principles": merge("completion_principles"),
+        }
+
     def public_catalog(
         self,
         *,

@@ -25,6 +25,12 @@ def _to_prediction(row: dict[str, Any], total_count: int) -> ModelPredictionSign
     return ModelPredictionSignal.from_mapping(data)
 
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
 def _from_database(context: PipelineContext) -> list[dict[str, Any]]:
     repo = PredictionRepository(context.db_path)
     trade_date = None if context.trade_date == "latest" else context.trade_date
@@ -70,6 +76,21 @@ def run_prediction_pipeline(
             source=source,
         )
 
+    total_rows = len(rows)
+    fixed_top15 = any("top15_up_signal" in row for row in rows)
+    if fixed_top15:
+        rows = [row for row in rows if _as_bool(row.get("top15_up_signal"))]
+        if len(rows) != min(15, total_rows):
+            return PredictionPipelineResult(
+                status=PipelineStatus.FAILED,
+                message="Fixed daily Top15 ranking is incomplete.",
+                input_count=total_rows,
+                output_count=0,
+                errors=[f"expected_top15={min(15, total_rows)}; actual={len(rows)}"],
+                predictions=[],
+                source=source,
+            )
+
     declared_models = {
         str(row.get("model_name") or "").strip()
         for row in rows
@@ -89,13 +110,14 @@ def run_prediction_pipeline(
         )
 
     total = len(rows)
-    predictions = [_to_prediction(row, total) for row in rows[: max(1, int(context.top_k))]]
+    limit = 15 if fixed_top15 else max(1, int(context.top_k))
+    predictions = [_to_prediction(row, total) for row in rows[:limit]]
     actual_trade_dates = [item.trade_date for item in predictions if item.trade_date]
     output_paths = {"ranking": str(path)} if path.exists() else {}
     return PredictionPipelineResult(
         status=PipelineStatus.SUCCESS,
         message=f"Loaded {len(predictions)} model predictions.",
-        input_count=total,
+        input_count=total_rows,
         output_count=len(predictions),
         output_paths=output_paths,
         warnings=warnings,

@@ -62,34 +62,13 @@ def build_kronos_ranking(
         model_name=KRONOS_MODEL_NAME,
         model_version=KRONOS_MODEL_VERSION,
     )
-    calibrated_rate = pd.to_numeric(out["up_prob_calibrated"], errors="coerce")
-    calibration_samples = pd.to_numeric(
-        out.get(
-            "calibration_sample_count",
-            pd.Series(0, index=out.index, dtype=float),
-        ),
-        errors="coerce",
-    ).fillna(0)
-    out["_predicted_up_hit_rate"] = calibrated_rate.fillna(0.5)
-    out["_predicted_up_sample_count"] = calibration_samples
     out = out.sort_values(
-        [
-            "predicted_up_first",
-            "_predicted_up_hit_rate",
-            "_predicted_up_sample_count",
-            "expected_next_day_return",
-            "code",
-        ],
-        ascending=[False, False, False, False, True],
+        ["predicted_up_first", "expected_next_day_return", "code"],
+        ascending=[False, False, True],
     ).reset_index(drop=True)
     out["rank"] = np.arange(1, len(out) + 1)
     out["score"] = (len(out) - out.index.to_numpy(dtype=float)) / max(len(out), 1)
-    out = out.drop(
-        columns=[
-            "_predicted_up_hit_rate",
-            "_predicted_up_sample_count",
-        ]
-    )
+    out["top15_up_signal"] = out["rank"].le(15)
     out = add_confidence_scores(out, calibration_report=calibration_report)
     out = normalize_ranking_columns(out)
     validate_ranking_schema(out)
@@ -97,11 +76,16 @@ def build_kronos_ranking(
     ranking_report = {
         "source": "kronos_mini_next_day_ohlcva",
         "native_output": ["pred_open", "pred_high", "pred_low", "pred_close", "pred_volume", "pred_amount"],
-        "ranking_basis": "predicted_up_then_causal_stock_hit_rate_then_predicted_return",
+        "ranking_basis": "daily_fixed_top15_by_predicted_next_day_return",
         "ranking_head_used": False,
         "ranking_head_trained_but_not_selected": True,
         "ranking_orientation": KRONOS_RANKING_ORIENTATION,
         "sentiment_fusion": False,
+        "top15_selection": {
+            "fixed_daily_count": 15,
+            "stock_direction_head_used": False,
+            "reason": "candidate_stock_direction_heads_failed_55pct_holdout_acceptance",
+        },
         "training_penalty_note": (
             "4/6/9/12/16 false-positive penalties remain training-only and use realized T+1 labels; "
             "no same-day sentiment adjustment is applied."

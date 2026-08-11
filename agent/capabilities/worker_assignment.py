@@ -1,8 +1,8 @@
 """Validate MainAgent-selected Worker assignments.
 
 This module never chooses a Worker. It only verifies that the selected Worker
-exists, is available, supports the requested boundary, respects the request
-side-effect limit, and can legally receive the task contract.
+exists, is available, respects the request side-effect limit, and can legally
+receive the task contract inside that Worker's overall professional scope.
 """
 
 from __future__ import annotations
@@ -57,14 +57,15 @@ class WorkerAssignmentValidator:
                     f"$.tasks[{task.task_id}].worker_id",
                     card.worker_id,
                 )
-            if task.boundary_id not in set(card.supported_boundary_ids):
+            compatible_scope_ids = {str(card.role), *[str(item) for item in card.supported_boundary_ids]}
+            if task.boundary_id not in compatible_scope_ids:
                 raise WorkerContractViolation(
                     "selected_worker_does_not_support_boundary",
                     f"$.tasks[{task.task_id}]",
-                    f"worker={card.worker_id},boundary={task.boundary_id}",
+                    f"worker={card.worker_id},scope={task.boundary_id},expected={card.role}",
                 )
 
-            boundary = self.capability_registry.get_boundary(task.boundary_id)
+            worker_scope = self.capability_registry.aggregate_scope(card.supported_boundary_ids)
             if _EFFECT_ORDER.get(task.effect_limit, 99) > _EFFECT_ORDER.get(card.max_effect_level, 99):
                 raise WorkerContractViolation(
                     "selected_worker_effect_limit_insufficient",
@@ -82,15 +83,15 @@ class WorkerAssignmentValidator:
             task_outputs = set(task.output_slots())
             unsupported_inputs = sorted(
                 slot for slot in task_inputs
-                if not slot_matches_patterns(slot, boundary.accepted_input_patterns)
+                if not slot_matches_patterns(slot, worker_scope["accepted_input_patterns"])
             )
             unsupported_outputs = sorted(
                 slot for slot in task_outputs
-                if not slot_matches_patterns(slot, boundary.produced_output_patterns)
+                if not slot_matches_patterns(slot, worker_scope["produced_output_patterns"])
             )
             if unsupported_inputs or unsupported_outputs:
                 raise WorkerContractViolation(
-                    "selected_worker_contract_outside_boundary",
+                    "selected_worker_contract_outside_scope",
                     f"$.tasks[{task.task_id}]",
                     f"inputs={unsupported_inputs},outputs={unsupported_outputs}",
                 )

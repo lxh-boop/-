@@ -71,12 +71,13 @@ def test_target_mode_kronos_ranking_uses_validation_selected_signal_without_sent
     assert report["ranking_head_used"] is False
     assert report["ranking_head_trained_but_not_selected"] is True
     assert report["ranking_orientation"] == "causal_stock_hit_rate_descending"
-    assert report["ranking_basis"] == "predicted_up_then_causal_stock_hit_rate_then_predicted_return"
+    assert report["ranking_basis"] == "daily_fixed_top15_by_predicted_next_day_return"
+    assert ranking["top15_up_signal"].tolist() == [True, True]
     assert report["native_output"][:4] == ["pred_open", "pred_high", "pred_low", "pred_close"]
     assert report["sentiment_fusion"] is False
 
 
-def test_predicted_up_group_orders_by_stock_hit_rate_then_sample_count(
+def test_fixed_top15_order_does_not_use_historical_hit_rate(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -145,6 +146,7 @@ def test_predicted_up_group_orders_by_stock_hit_rate_then_sample_count(
         history_dir=str(tmp_path),
     )
 
-    assert ranking["code"].tolist() == ["000003", "000002", "000001"]
-    assert ranking["up_prob_calibrated"].tolist() == [0.8, 0.8, 0.4]
-    assert ranking["calibration_sample_count"].tolist() == [5, 2, 10]
+    assert ranking["code"].tolist() == ["000001", "000002", "000003"]
+    assert ranking["top15_up_signal"].tolist() == [True, True, True]
+    assert ranking["up_prob_calibrated"].tolist() == [0.4, 0.8, 0.8]
+    assert ranking["calibration_sample_count"].tolist() == [10, 2, 5]

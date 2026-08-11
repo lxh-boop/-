@@ -135,6 +135,47 @@ def _bind_task_completion_contracts(
     del tasks, directory
 
 
+def _planning_memory_summary(
+    *,
+    session_summary: str,
+    long_term_memory_summary: str,
+    inherit_previous_focus: bool,
+) -> str:
+    """Build the memory view that may influence business-intent planning.
+
+    MainEntryDecision owns whether the current request inherits the previous
+    conversation focus.  When it explicitly rejects that inheritance, the
+    canonical-intent planner must not be allowed to re-introduce a previous
+    named financial entity through ``session_summary``.  Long-term memory stays
+    available for non-focus user preferences/constraints; authoritative entity
+    identity still comes exclusively from GraphRef resolution.
+    """
+
+    items: list[str] = []
+    if inherit_previous_focus and str(session_summary or "").strip():
+        items.append(str(session_summary).strip())
+    if str(long_term_memory_summary or "").strip():
+        items.append(str(long_term_memory_summary).strip())
+    return "\n".join(items)[:4800]
+
+
+def _has_forward_replan_context_blocker(observations: list[dict[str, Any]]) -> bool:
+    """Return True when a failure belongs to the context/authority layer.
+
+    Worker forward-replan may replace failed business Workers, but it must not
+    manufacture user input or authoritative GraphRefs that only the context and
+    identity layers are allowed to establish.
+    """
+
+    return any(
+        str(item.get("failure_kind") or "") in {
+            "user_input_required",
+            "worker_context_unresolved",
+        }
+        for item in observations
+    )
+
+
 
 class AgentCollaborationCoordinator:
     """Existing Main-Agent pattern with a Neo4j/GraphRef-only data boundary."""
@@ -426,10 +467,15 @@ class AgentCollaborationCoordinator:
         )
         context.setdefault("available_parameters", dict(hydrated.available_parameters))
         context.setdefault("permission_context", dict(hydrated.permission_context))
-        planning_memory_summary = "\n".join(
-            item for item in [hydrated.session_summary, hydrated.long_term_memory_summary] if item
-        )[:4800]
-        context["memory_summary"] = planning_memory_summary or memory_summary
+        planning_memory_summary = _planning_memory_summary(
+            session_summary=hydrated.session_summary,
+            long_term_memory_summary=hydrated.long_term_memory_summary,
+            inherit_previous_focus=decision.context_binding.inherit_previous_focus,
+        )
+        # Keep the full conversation summary in runtime context for audit and
+        # non-business conversational handling.  The MainAgent business planner
+        # receives the authority-filtered view below.
+        context["memory_summary"] = memory_summary
         context["long_term_memory_refs"] = list(hydrated.long_term_memory_refs)
         flow_event(
             "CONTEXT_HYDRATED",
@@ -550,6 +596,14 @@ class AgentCollaborationCoordinator:
                 "worker_loading": "all_public_descriptions_upfront",
                 "runtime_assignment_role": "validate_only",
                 "raw_request_semantic_owner": "canonical_intent_contract",
+                "planning_memory_policy": {
+                    "previous_focus_inheritance": bool(decision.context_binding.inherit_previous_focus),
+                    "session_summary_included": bool(
+                        decision.context_binding.inherit_previous_focus
+                        and str(hydrated.session_summary or "").strip()
+                    ),
+                    "long_term_memory_included": bool(str(hydrated.long_term_memory_summary or "").strip()),
+                },
             },
             run_id=run_id,
         )
@@ -562,9 +616,10 @@ class AgentCollaborationCoordinator:
                 user_id=user_id,
                 focus_refs=focus_refs,
                 context_refs=context_refs,
-                memory_summary=planning_memory_summary or memory_summary,
+                memory_summary=planning_memory_summary,
                 language=language,
                 as_of_time=explicit_as_of,
+                context_binding=decision.context_binding.to_dict(),
             )
         except Exception as exc:
             flow_event(
@@ -656,10 +711,7 @@ class AgentCollaborationCoordinator:
                     else "INFO"
                 ),
             )
-            blocking_context = any(
-                item.get("failure_kind") == "user_input_required"
-                for item in observations
-            )
+            blocking_context = _has_forward_replan_context_blocker(observations)
             replan_candidates = [
                 item
                 for item in observations
@@ -685,7 +737,7 @@ class AgentCollaborationCoordinator:
                     user_id=user_id,
                     focus_refs=focus_refs,
                     context_refs=context_refs,
-                    memory_summary=memory_summary,
+                    memory_summary=planning_memory_summary,
                     language=language,
                     as_of_time=explicit_as_of,
                     current_tasks=active_tasks,

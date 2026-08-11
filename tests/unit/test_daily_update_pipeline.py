@@ -59,3 +59,23 @@ def test_daily_update_pipeline_returns_clear_error_on_failed_step() -> None:
     assert result.status == PipelineStatus.FAILED
     assert "prediction step failed" in result.message
     assert result.errors == ["missing ranking"]
+
+
+def test_daily_update_pipeline_treats_precision_abstain_as_normal_skip() -> None:
+    calls = []
+
+    def prediction_fn(context):
+        calls.append("prediction")
+        return PredictionPipelineResult(
+            status=PipelineStatus.SKIPPED,
+            message="Direction head selected abstain for this signal date.",
+            input_count=300,
+            warnings=["No actionable signals."],
+        )
+
+    result = run_daily_update_pipeline(PipelineContext(), prediction_fn=prediction_fn)
+
+    assert result.status == PipelineStatus.SKIPPED
+    assert result.input_count == 300
+    assert not result.errors
+    assert calls == ["prediction"]

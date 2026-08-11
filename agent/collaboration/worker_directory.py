@@ -101,8 +101,10 @@ _CARDS = {
         output_publication_mode="private_tool_passthrough",
         private_worker_prompt=(
             "根据MainAgent给出的业务目标和合同承诺Slot，自主规划最小私有Tool DAG。"
-            "不要因为初始没有证券GraphRef就直接判定上下文缺失；如果已有私有Tool能先产生排名/身份线索，"
-            "应在Worker内部继续规划，并通过权威实体解析Tool获得GraphRef后再调用需要实体的Tool。"
+            "只有当业务目标本身是全市场排名、筛选或发现候选证券时，才允许先读取排名并通过"
+            "internal.entity.resolve_ranked_security把排名结果解析成GraphRef后继续调用实体Tool。"
+            "如果业务目标明确指向某个命名证券/公司，而available_context没有该目标的权威security_node_id/GraphRef，"
+            "绝不能用排名第一或其他候选证券替代目标；此时实体特定输出应保持缺失并按现有失败合同上报。"
             "只发布结构化内部事实，不做最终分析或报告。"
         ),
         private_tool_ids=[

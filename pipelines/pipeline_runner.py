@@ -47,7 +47,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     context = context_from_args(args)
     result = run_daily_update_pipeline(context, steps=args.steps)
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2, default=str))
-    return 0 if result.status in {"success", "partial"} else 1
+    return 0 if result.status in {"success", "partial", "skipped"} else 1
 
 
 if __name__ == "__main__":

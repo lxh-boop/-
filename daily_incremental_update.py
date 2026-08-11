@@ -34,6 +34,7 @@ from kronos_runtime import (
     build_kronos_ranking,
 )
 from kronos_runtime.settings import KRONOS_TARGET_VALIDATION, KRONOS_TRAINING_PENALTY
+from kronos_runtime.tushare_precision_features import refresh_precision_features_for_date
 from market_context import ensure_market_context_for_feature_data
 from model_zoo_backend import (
     is_zoo_backend,
@@ -289,6 +290,18 @@ def kronos_daily_update(
         prediction_date=str(market_window["prediction_target_date"]),
     )
     signal_date = str(predictions["date"].iloc[0])
+    try:
+        precision_feature_report = refresh_precision_features_for_date(
+            token=token,
+            signal_date=signal_date,
+            stock_codes=set(stock_pool),
+        )
+    except Exception as exc:
+        precision_feature_report = {
+            "ready": False,
+            "trade_date": signal_date,
+            "error_type": type(exc).__name__,
+        }
     ranking, ranking_report = build_kronos_ranking(
         predictions=predictions,
         feature_data=feature_data,
@@ -317,6 +330,7 @@ def kronos_daily_update(
         "training_false_positive_penalty": dict(KRONOS_TRAINING_PENALTY),
         "kronos_assets": adapter.asset_report,
         "kronos_coverage": adapter.coverage_report,
+        "direction_feature_refresh": precision_feature_report,
         "ranking": ranking_report,
         "historical_validation": {
             **KRONOS_TARGET_VALIDATION,

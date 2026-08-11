@@ -60,6 +60,17 @@ def run_daily_update_pipeline(
     if "prediction" in selected:
         result = prediction_fn(context)
         results["prediction"] = result
+        if result.status == PipelineStatus.SKIPPED:
+            return DailyUpdatePipelineResult(
+                status=PipelineStatus.SKIPPED,
+                message=f"prediction step abstained: {result.message}",
+                input_count=result.input_count,
+                output_count=0,
+                output_paths=dict(result.output_paths),
+                errors=[],
+                warnings=result.warnings,
+                step_results=results,
+            )
         if result.status != PipelineStatus.SUCCESS:
             return DailyUpdatePipelineResult(
                 status=PipelineStatus.FAILED,

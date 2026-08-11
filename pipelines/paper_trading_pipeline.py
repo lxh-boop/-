@@ -659,6 +659,8 @@ def run_paper_trading_from_latest(
 
     recommendations_error = ""
     using_ranking_only = False
+    fixed_top15_enforced = False
+    top15_stock_codes: set[str] = set()
     ranking_is_newer = (
         ranking_path.exists()
         and recommendations_path.exists()
@@ -681,6 +683,30 @@ def run_paper_trading_from_latest(
             if ranking_models and ranking_models != {KRONOS_MODEL_NAME}:
                 raise RuntimeError(
                     f"模拟盘拒绝旧模型排名：expected={KRONOS_MODEL_NAME}, actual={sorted(ranking_models)}"
+                )
+
+        if not ranking.empty and "top15_up_signal" in ranking.columns:
+            fixed_top15_enforced = True
+            selected = ranking["top15_up_signal"].map(
+                lambda value: value is True
+                or str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+            )
+            code_values = ranking.get(
+                "stock_code",
+                ranking.get("code", pd.Series("", index=ranking.index)),
+            )
+            top15_stock_codes = set(
+                code_values[selected]
+                .astype(str)
+                .str.split(".")
+                .str[0]
+                .str.zfill(6)
+            ) - {"", "000nan"}
+            ranking = ranking[selected].copy()
+            if len(top15_stock_codes) != min(15, len(selected)):
+                raise RuntimeError(
+                    f"固定Top15排名不完整：expected={min(15, len(selected))}, "
+                    f"actual={len(top15_stock_codes)}"
                 )
 
         if (
@@ -708,6 +734,18 @@ def run_paper_trading_from_latest(
             errors=[str(exc)],
         )
 
+    if fixed_top15_enforced and not recommendations.empty:
+        recommendation_codes = recommendations.get(
+            "stock_code",
+            recommendations.get("code", pd.Series("", index=recommendations.index)),
+        )
+        normalized_codes = (
+            recommendation_codes.astype(str).str.split(".").str[0].str.zfill(6)
+        )
+        recommendations = recommendations[
+            normalized_codes.isin(top15_stock_codes)
+        ].copy()
+
     if recommendations.empty:
         if ranking.empty:
             message = (
@@ -725,7 +763,8 @@ def run_paper_trading_from_latest(
         using_ranking_only = True
 
     if top_k:
-        recommendations = recommendations.head(int(top_k)).copy()
+        effective_top_k = min(int(top_k), 15) if fixed_top15_enforced else int(top_k)
+        recommendations = recommendations.head(effective_top_k).copy()
 
     if not ranking.empty and not using_ranking_only:
         try:

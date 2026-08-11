@@ -219,6 +219,7 @@ LATEST_RAW_DATA_PATH = os.path.join(DATA_DIR, "latest_raw_stock_data.csv")
 LATEST_FEATURE_DATA_PATH = os.path.join(DATA_DIR, "latest_feature_stock_data_alpha158.csv")
 KRONOS_MARKET_HISTORY_CACHE_PATH = os.path.join(DATA_DIR, "kronos_market_history.csv")
 KRONOS_LATEST_METRICS_PATH = os.path.join(MODEL_DIR, "kronos_mini", "metrics.json")
+KRONOS_STOCK_DIRECTION_FEATURE_DIR = os.path.join(DATA_DIR, "model_precision", "tushare")
 
 RANKING_LATEST_PATH = os.path.join(OUTPUT_DIR, "ranking_latest.csv")
 EVAL_METRICS_PATH = os.path.join(OUTPUT_DIR, "evaluation_metrics.csv")
