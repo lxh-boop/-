@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import os
@@ -143,15 +144,21 @@ def _metrics(frame: pd.DataFrame, score_column: str) -> dict[str, Any]:
     }
 
 
-def _configuration_id(args: argparse.Namespace, base_columns: list[str]) -> str:
+def _configuration_id(
+    args: argparse.Namespace,
+    base_columns: list[str],
+    model_specs: tuple[ModelSpec, ...],
+) -> str:
     payload = {
+        "implementation_version": 2,
         "start_date": args.start_date,
         "end_date": args.end_date,
         "retrain_every": args.retrain_every,
         "daily_from": args.daily_from,
         "training_years": args.training_years,
         "columns": base_columns,
-        "models": [spec.__dict__ for spec in MODEL_SPECS],
+        "model_set": args.model_set,
+        "models": [spec.__dict__ for spec in model_specs],
     }
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:16]
@@ -191,6 +198,7 @@ def _train_period(
     period_dates: list[pd.Timestamp],
     base_columns: list[str],
     gain_columns: list[str],
+    model_specs: tuple[ModelSpec, ...],
     training_years: int,
     num_threads: int,
 ) -> pd.DataFrame:
@@ -208,38 +216,44 @@ def _train_period(
 
     groups = training.groupby("date", sort=False).size().to_numpy()
     labels = training["label_up"].astype(int)
-    datasets = {
-        "base": lgb.Dataset(
-            training[base_columns],
-            label=labels,
-            group=groups,
-            params={"feature_pre_filter": False},
-            free_raw_data=False,
-        ),
-        "gain": lgb.Dataset(
-            training[gain_columns],
-            label=labels,
-            group=groups,
-            params={"feature_pre_filter": False},
-            free_raw_data=False,
-        ),
-    }
     column_orders = {"base": base_columns, "gain": gain_columns}
-    for spec in MODEL_SPECS:
+    for spec in model_specs:
+        # data_random_seed is a Dataset construction parameter in LightGBM. Each
+        # ensemble member therefore needs its own Dataset to reproduce the model
+        # selected during the original seed search.
+        dataset = lgb.Dataset(
+            training[column_orders[spec.column_order]],
+            label=labels,
+            group=groups,
+            params={
+                "data_random_seed": spec.seed,
+                "feature_pre_filter": False,
+            },
+            free_raw_data=True,
+        )
         model = lgb.train(
             _parameters(spec.seed, num_threads),
-            datasets[spec.column_order],
+            dataset,
             num_boost_round=spec.iterations,
             callbacks=[lgb.log_evaluation(0)],
         )
         evaluation[spec.name] = model.predict(
             evaluation[column_orders[spec.column_order]]
         ).astype("float32")
+        del model, dataset
+        gc.collect()
 
-    score_columns = [spec.name for spec in MODEL_SPECS]
-    weights = pd.Series({spec.name: spec.weight for spec in MODEL_SPECS})
-    within_day_ranks = evaluation.groupby("date", sort=False)[score_columns].rank(pct=True)
-    evaluation["ensemble_score"] = within_day_ranks.mul(weights, axis=1).sum(axis=1)
+    score_columns = [spec.name for spec in model_specs]
+    if len(model_specs) == 1:
+        evaluation["ensemble_score"] = evaluation[model_specs[0].name]
+    else:
+        weights = pd.Series({spec.name: spec.weight for spec in model_specs})
+        within_day_ranks = evaluation.groupby("date", sort=False)[score_columns].rank(
+            pct=True
+        )
+        evaluation["ensemble_score"] = within_day_ranks.mul(weights, axis=1).sum(
+            axis=1
+        )
     evaluation["train_start"] = training["date"].min()
     evaluation["train_end"] = training["date"].max()
     evaluation["score_period_start"] = score_start
@@ -288,6 +302,12 @@ def parse_args() -> argparse.Namespace:
         help="Trailing training window in years; 0 uses all prior observations.",
     )
     parser.add_argument("--num-threads", type=int, default=-1)
+    parser.add_argument(
+        "--model-set",
+        choices=("ensemble", "seed101"),
+        default="ensemble",
+        help="Train the full selected ensemble or only its strongest single member.",
+    )
     parser.add_argument("--target-precision", type=float, default=0.55)
     parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR)
     parser.add_argument("--no-resume", action="store_true")
@@ -306,6 +326,11 @@ def main() -> int:
     base_columns, gain_columns = _load_feature_orders(
         data, args.feature_columns, args.feature_report
     )
+    model_specs = (
+        MODEL_SPECS
+        if args.model_set == "ensemble"
+        else tuple(spec for spec in MODEL_SPECS if spec.name == args.model_set)
+    )
     evaluation_mask = data["date"].between(args.start_date, args.end_date)
     evaluation_dates = data.loc[evaluation_mask, "date"].drop_duplicates().tolist()
     if not evaluation_dates:
@@ -316,7 +341,7 @@ def main() -> int:
         retrain_every=int(args.retrain_every),
         daily_from=daily_from,
     )
-    configuration_id = _configuration_id(args, base_columns)
+    configuration_id = _configuration_id(args, base_columns, model_specs)
     scored_parts: list[pd.DataFrame] = []
     period_reports: list[dict[str, Any]] = []
     for index, period_dates in enumerate(periods, start=1):
@@ -337,6 +362,7 @@ def main() -> int:
                 period_dates=period_dates,
                 base_columns=base_columns,
                 gain_columns=gain_columns,
+                model_specs=model_specs,
                 training_years=int(args.training_years),
                 num_threads=int(args.num_threads),
             )
@@ -372,6 +398,18 @@ def main() -> int:
         str(year): _metrics(frame, "pred_return")
         for year, frame in predictions.groupby(predictions["date"].dt.year, sort=True)
     }
+    member_metrics = {
+        spec.name: {
+            "overall": _metrics(predictions, spec.name),
+            "yearly": {
+                str(year): _metrics(frame, spec.name)
+                for year, frame in predictions.groupby(
+                    predictions["date"].dt.year, sort=True
+                )
+            },
+        }
+        for spec in model_specs
+    }
     target = float(args.target_precision)
     accepted = bool(
         overall["all_days_have_15"]
@@ -395,7 +433,8 @@ def main() -> int:
             "period_count": len(periods),
         },
         "feature_count": len(base_columns),
-        "models": [spec.__dict__ for spec in MODEL_SPECS],
+        "model_set": args.model_set,
+        "models": [spec.__dict__ for spec in model_specs],
         "data_contract": {
             "label": "future_1d_ret_gt_0",
             "metric": "mean_of_each_days_fixed_top15_precision",
@@ -404,6 +443,7 @@ def main() -> int:
         },
         "overall": overall,
         "yearly": yearly,
+        "members": member_metrics,
         "pred_return_baseline": {"overall": baseline, "yearly": baseline_yearly},
         "periods": period_reports,
         "disclaimer": "本项目仅用于机器学习、金融数据分析和项目展示，不构成投资建议，不用于实盘交易。",

@@ -24,6 +24,12 @@ function randomId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`
 }
 
+const FINALIZE_RETRY_DELAYS_MS = [0, 1500, 4000, 8000]
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
 export function AgentPage() {
   useAgentTaskEvents()
   const queryClient = useQueryClient()
@@ -215,7 +221,19 @@ export function AgentPage() {
 
     void (async () => {
       try {
-        const assistantMessage = await agentApi.finalizeTask(userId, conversationId, task.task_id)
+        let assistantMessage: Awaited<ReturnType<typeof agentApi.finalizeTask>> | null = null
+        let lastError: unknown = null
+        for (const delayMs of FINALIZE_RETRY_DELAYS_MS) {
+          if (delayMs > 0) await sleep(delayMs)
+          try {
+            assistantMessage = await agentApi.finalizeTask(userId, conversationId, task.task_id)
+            break
+          } catch (error) {
+            lastError = error
+          }
+        }
+        if (!assistantMessage) throw lastError ?? new Error('finalize_task_failed')
+
         if (assistantMessage.run_id) setSelectedRunId(assistantMessage.run_id)
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: ['web', 'agent', 'messages', userId, conversationId] }),
@@ -227,7 +245,7 @@ export function AgentPage() {
         clearTask()
       } catch (error) {
         finalizingRef.current = ''
-        message.error(`Agent 结果保存失败：${String(error)}`)
+        message.error(`Agent 结果保存失败，已自动重试：${String(error)}`)
       }
     })()
   }, [agentTask, clearTask, conversationId, queryClient, userId])

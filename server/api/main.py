@@ -23,7 +23,7 @@ from server.api.dispatch import (
     paper_bootstrap,
 )
 from server.api.router_factory import build_operation_router
-from server.api.tasks import router as tasks_router
+from server.api.tasks import router as tasks_router, task_manager
 from server.api.routers.web_dashboard import router as web_dashboard_router
 from server.api.routers.web_stocks import router as web_stocks_router
 from server.api.routers.web_models import router as web_models_router
@@ -38,6 +38,11 @@ from scheduler.runtime_scheduler import shutdown_runtime_scheduler, start_runtim
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
+    # Task recovery belongs to the real API process lifecycle, not TaskManager
+    # construction. Compose enables it explicitly so imports/tests cannot
+    # accidentally interrupt live production tasks.
+    if os.environ.get("STOCK_AGENT_RECOVER_INTERRUPTED_ON_START", "0") == "1":
+        task_manager.recover_on_api_startup()
     # 正式 API 进程即常驻调度器宿主；测试环境由 runtime_scheduler 自动禁用。
     start_runtime_scheduler()
     try:

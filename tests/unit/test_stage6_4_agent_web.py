@@ -222,8 +222,14 @@ def test_agent_task_api_injects_server_defaults_and_redacts_request(monkeypatch)
 
     captured: dict[str, object] = {}
 
+    class Profile:
+        context_window = 32768
+        supports_json_schema = True
+        supports_tools = True
+
     class Settings:
         profile_id = "profile-test"
+        config_hash = "config-test"
         mode = "api"
         provider = "test-provider"
         base_url = "https://private-endpoint.invalid/v1"
@@ -232,8 +238,10 @@ def test_agent_task_api_injects_server_defaults_and_redacts_request(monkeypatch)
         request_timeout_seconds = 30
         max_retries = 0
         credential = "secret-value"
+        endpoint_scope = "api"
+        profile = Profile()
 
-    monkeypatch.setattr(task_api.llm_settings_registry, "resolve", lambda payload: Settings())
+    monkeypatch.setattr(task_api.llm_settings_registry, "resolve_current", lambda: Settings())
 
     def fake_submit(**kwargs):
         captured.update(kwargs)

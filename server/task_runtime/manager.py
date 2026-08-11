@@ -38,11 +38,29 @@ class TaskManager:
         self.store = TaskStore(path)
         self._lock = threading.RLock()
         self._processes: dict[str, subprocess.Popen[Any]] = {}
-        self.store.recover_interrupted()
+        # IMPORTANT: construction must be side-effect free for persisted task state.
+        # Tests, helper scripts, or a second in-process manager may construct
+        # TaskManager while the real API owns live tasks. Startup recovery is
+        # therefore explicit and is invoked only by the real API lifespan.
+        self._startup_recovery_done = False
 
     @property
     def db_path(self) -> Path:
         return self.store.db_path
+
+    def recover_on_api_startup(self) -> list[str]:
+        """Mark stale active tasks interrupted exactly once for this API manager.
+
+        This method is intentionally explicit. Merely importing task modules or
+        constructing a helper/test TaskManager must never mutate production task
+        state. The real FastAPI lifespan owns startup recovery.
+        """
+        with self._lock:
+            if self._startup_recovery_done:
+                return []
+            interrupted = self.store.recover_interrupted()
+            self._startup_recovery_done = True
+            return interrupted
 
     def submit(
         self,

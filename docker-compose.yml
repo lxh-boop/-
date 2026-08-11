@@ -18,6 +18,7 @@ services:
       STOCK_APP_RUNTIME_SCHEDULER_ENABLED: "1"
       TZ: Asia/Shanghai
       STOCK_AGENT_TASK_DB: /app/runtime/task_runtime.sqlite3
+      STOCK_AGENT_RECOVER_INTERRUPTED_ON_START: "1"
       STOCK_AGENT_MAX_CONCURRENT_TASKS: ${STOCK_AGENT_MAX_CONCURRENT_TASKS:-4}
       STOCK_AGENT_CORS_ORIGINS: ${STOCK_AGENT_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       STOCK_LOCAL_LLM_BASE_URL: ${STOCK_LOCAL_LLM_BASE_URL:-http://host.docker.internal:11434/v1}
@@ -63,6 +64,12 @@ services:
       - type: bind
         source: .
         target: /app
+      # High-frequency SQLite WAL must live on the Linux filesystem.
+      # Mounting /app/runtime separately shadows the runtime directory from
+      # the Windows project bind mount and prevents cross-filesystem WAL issues.
+      - type: volume
+        source: task_runtime_data
+        target: /app/runtime
       - type: bind
         source: ${STOCK_LLM_PROMPT_DUMP_HOST_DIR:-D:/google/llm_prompt_dumps}
         target: /app_runtime/llm_prompt_dumps
@@ -101,3 +108,7 @@ services:
       retries: 12
       start_period: 20s
     stop_grace_period: 10s
+
+volumes:
+  task_runtime_data:
+    name: stock_daily_app_task_runtime
