@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 EffectLevel = Literal["read", "proposal", "write"]
 Criticality = Literal["required", "optional"]
+RequirementSourcePolicy = Literal["system", "user", "either"]
+SatisfactionRule = Literal["exists", "non_empty", "one_of"]
 ContractTerminalState = Literal[
     "completed",
     "business_empty",
@@ -14,6 +16,43 @@ ContractTerminalState = Literal[
     "blocked",
     "failed",
 ]
+
+
+@dataclass(frozen=True)
+class NeedRequirement:
+    """One canonical semantic requirement compiled from a user Need.
+
+    This is planning IR, not a Worker contract. ``semantic_key`` must resolve
+    through CapabilityRegistry. Runtime-owned slot/parameter semantics are
+    expanded later; the LLM is not allowed to invent concrete contract policy.
+    """
+
+    requirement_id: str
+    semantic_key: str
+    direction: Literal["input", "output", "parameter"]
+    required: bool = True
+    required_paths: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "NeedRequirement":
+        row = dict(value or {})
+        direction = str(row.get("direction") or "input").strip().lower()
+        if direction not in {"input", "output", "parameter"}:
+            direction = "input"
+        return cls(
+            requirement_id=str(row.get("requirement_id") or "").strip(),
+            semantic_key=str(row.get("semantic_key") or "").strip(),
+            direction=direction,
+            required=bool(row.get("required", True)),
+            required_paths=list(dict.fromkeys(
+                str(item).strip()
+                for item in row.get("required_paths") or []
+                if str(item).strip()
+            )),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -34,6 +73,9 @@ class InputSlotRequirement:
     freshness_policy: str = "request_default"
     required_paths: list[str] = field(default_factory=list)
     optional_paths: list[str] = field(default_factory=list)
+    semantic_role: str = ""
+    source_policy: RequirementSourcePolicy = "system"
+    satisfaction_rule: SatisfactionRule = "exists"
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "InputSlotRequirement":
@@ -60,6 +102,64 @@ class InputSlotRequirement:
                 for item in row.get("optional_paths") or []
                 if str(item).strip()
             )),
+            semantic_role=str(row.get("semantic_role") or row.get("slot_id") or "").strip(),
+            source_policy=(
+                str(row.get("source_policy") or "system").strip().lower()
+                if str(row.get("source_policy") or "system").strip().lower() in {"system", "user", "either"}
+                else "system"
+            ),
+            satisfaction_rule=(
+                str(row.get("satisfaction_rule") or "exists").strip().lower()
+                if str(row.get("satisfaction_rule") or "exists").strip().lower() in {"exists", "non_empty", "one_of"}
+                else "exists"
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class BusinessParameterRequirement:
+    """One business parameter required by a capability contract.
+
+    Business parameters are intentionally separate from Worker-to-Worker Slots.
+    They describe user/either-owned values such as target allocation, dates or
+    preferences that cannot be safely invented by a domain Worker.
+    """
+
+    parameter_id: str
+    semantic_role: str = ""
+    required: bool = True
+    source_policy: RequirementSourcePolicy = "user"
+    satisfy_by: list[str] = field(default_factory=list)
+    satisfaction_rule: SatisfactionRule = "one_of"
+    description: str = ""
+    expected_format: str = ""
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "BusinessParameterRequirement":
+        row = dict(value or {})
+        parameter_id = str(row.get("parameter_id") or row.get("semantic_role") or "").strip()
+        satisfy_by = list(dict.fromkeys(
+            str(item).strip()
+            for item in row.get("satisfy_by") or []
+            if str(item).strip()
+        ))
+        if not satisfy_by and parameter_id:
+            satisfy_by = [parameter_id]
+        source_policy = str(row.get("source_policy") or "user").strip().lower()
+        if source_policy not in {"system", "user", "either"}:
+            source_policy = "user"
+        satisfaction_rule = str(row.get("satisfaction_rule") or "one_of").strip().lower()
+        if satisfaction_rule not in {"exists", "non_empty", "one_of"}:
+            satisfaction_rule = "one_of"
+        return cls(
+            parameter_id=parameter_id,
+            semantic_role=str(row.get("semantic_role") or parameter_id).strip(),
+            required=bool(row.get("required", True)),
+            source_policy=source_policy,
+            satisfy_by=satisfy_by,
+            satisfaction_rule=satisfaction_rule,
+            description=str(row.get("description") or "").strip(),
+            expected_format=str(row.get("expected_format") or "").strip(),
         )
 
 
@@ -104,6 +204,7 @@ class CapabilityContract:
     contract_id: str
     description: str
     required_inputs: list[InputSlotRequirement] = field(default_factory=list)
+    required_parameters: list[BusinessParameterRequirement] = field(default_factory=list)
     promised_outputs: list[OutputSlotGuarantee] = field(default_factory=list)
     acceptance_rule_ids: list[str] = field(default_factory=list)
     forbidden_output_slots: list[str] = field(default_factory=list)
@@ -127,6 +228,11 @@ class CapabilityContract:
             required_inputs=[
                 InputSlotRequirement.from_dict(item)
                 for item in row.get("required_inputs") or []
+                if isinstance(item, dict)
+            ],
+            required_parameters=[
+                BusinessParameterRequirement.from_dict(item)
+                for item in row.get("required_parameters") or []
                 if isinstance(item, dict)
             ],
             promised_outputs=[
@@ -173,6 +279,12 @@ class CapabilityContract:
             )
         )
 
+    def parameter_requirements(self, *, required_only: bool = False) -> list[BusinessParameterRequirement]:
+        return [
+            item for item in self.required_parameters
+            if item.parameter_id and (item.required or not required_only)
+        ]
+
     def output_slots(self) -> list[str]:
         return list(
             dict.fromkeys(item.slot_id for item in self.promised_outputs if item.slot_id)
@@ -193,6 +305,7 @@ class CapabilityBoundary:
     non_responsibilities: list[str] = field(default_factory=list)
     accepted_input_patterns: list[str] = field(default_factory=lambda: ["*"])
     produced_output_patterns: list[str] = field(default_factory=lambda: ["*"])
+    accepted_business_parameter_patterns: list[str] = field(default_factory=list)
     input_slot_examples: list[str] = field(default_factory=list)
     output_slot_examples: list[str] = field(default_factory=list)
     allowed_acceptance_rule_ids: list[str] = field(default_factory=list)

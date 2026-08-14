@@ -475,6 +475,8 @@ class SessionStateStore:
                 else 0.0
             )
             base = priority.get(item.key, 0.0)
+            if item.key.startswith("typed_graph_focus:"):
+                base = max(base, 9.5)
             if item.key.startswith("agent_result:"):
                 base -= 1.0
             score = (

@@ -5,11 +5,10 @@ Normal execution has one bounded planning phase before any Worker executes:
 1. Interpret the user request once into one canonical intent contract.
 2. Load every eligible Worker's full public description.
 3. Select Worker calls that explicitly cover the canonical intent needs.
-4. Generate and validate the complete Worker DAG once.
-5. Each selected Worker later plans its own private Tool DAG when applicable.
+4. Compile the complete Worker DAG deterministically from Need/Slot contracts.
+5. Each selected Worker plans its own private Tool DAG when applicable.
 
-The raw user request is not re-interpreted by Worker selection or Worker-DAG
-generation. Replan remains an exception-recovery path and reuses the original
+The raw user request is not re-interpreted by Worker selection or Worker-DAG compilation. Replan remains an exception-recovery path and reuses the original
 canonical intent contract.
 """
 
@@ -26,6 +25,7 @@ from agent.capabilities import (
     CapabilityPlanValidator,
     CapabilityRegistry,
     CapabilityTask,
+    NeedRequirementCompiler,
     SlotBinder,
     WorkerAssignmentValidator,
 )
@@ -61,6 +61,7 @@ class CoordinatorPlanner:
             worker_tool_directory=worker_tool_directory,
         )
         self.validator = CapabilityPlanValidator(self.registry, directory)
+        self.need_compiler = NeedRequirementCompiler(self.registry, directory)
         self.slot_binder = SlotBinder()
         self.assignment_validator = WorkerAssignmentValidator(self.registry, directory)
 
@@ -110,7 +111,13 @@ class CoordinatorPlanner:
         memory_summary: str,
         context_binding: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """The only normal-path LLM stage allowed to interpret the raw request."""
+        """The only normal-path LLM stage allowed to interpret the raw request.
+
+        V23.0.10 keeps this as the same single intent LLM call, but the result is
+        now a real planning IR: every business Need may reference only registered
+        semantic requirements. Concrete Slot/parameter ownership remains program
+        controlled by ``NeedRequirementCompiler``.
+        """
 
         def validate(payload: dict[str, Any]) -> None:
             if not isinstance(payload, dict):
@@ -121,14 +128,37 @@ class CoordinatorPlanner:
             raw_needs = payload.get("needs")
             if not isinstance(raw_needs, list) or not raw_needs:
                 raise WorkerContractViolation("intent_needs_required", "$.needs")
+            strict_requirements = (
+                str(payload.get("requirement_contract_version") or "").strip()
+                == NeedRequirementCompiler.SCHEMA_VERSION
+            )
+            proposal_output_seen = False
             for index, row in enumerate(raw_needs):
                 if not isinstance(row, dict) or not str(row.get("description") or "").strip():
                     raise WorkerContractViolation("intent_need_description_required", f"$.needs[{index}]")
+                normalized = self.need_compiler.normalize_need_requirements(
+                    need_id=f"N{index + 1:02d}",
+                    raw_requirements=row.get("requirements") or [],
+                    strict=strict_requirements,
+                )
+                for requirement in normalized:
+                    if requirement.get("direction") != "output":
+                        continue
+                    slot_id = str(requirement.get("slot_id") or "")
+                    if slot_id == "reviewed_proposal" or slot_id.startswith("proposal."):
+                        proposal_output_seen = True
+            if strict_requirements and request_mode == "proposal" and not proposal_output_seen:
+                raise WorkerContractViolation(
+                    "proposal_intent_missing_proposal_output_need",
+                    "$.needs",
+                    "proposal request must contain a business Need whose output is rebalance_proposal/rebalance_instructions",
+                )
             effect = str(payload.get("effect_limit") or "read").lower()
             allowed = "proposal" if request_mode == "proposal" else "read"
             if effect not in {"read", "proposal"} or (allowed == "read" and effect != "read"):
                 raise WorkerContractViolation("intent_effect_exceeds_request_mode", "$.effect_limit")
 
+        semantic_catalog = self.registry.semantic_requirement_catalog()
         payload = self.llm_service.generate_json(
             stage="upfront_user_intent_planning",
             messages=[
@@ -136,9 +166,15 @@ class CoordinatorPlanner:
                     "role": "system",
                     "content": (
                         "你是MainAgent的唯一用户意图解释阶段。只在这里解释原始用户请求，后续Worker选择和DAG规划不得重新解释原始请求。"
-                        "把用户真正希望得到的信息拆成少量、明确、可执行的needs。intent_summary里提到的每一个分析维度都必须在needs中出现；"
-                        "needs中没有的维度不要写进intent_summary。不要写Worker ID、Agent ID、Tool、Capability boundary或Slot名称。"
-                        "不要因为系统拥有某项能力就自动扩大需求；也不要把用户请求中实际需要的维度省略。"
+                        "把用户真正希望得到的信息拆成少量、明确、可执行的needs。intent_summary里提到的每一个业务结果都必须在needs中出现；"
+                        "needs中没有的结果不要写进intent_summary。每个business Need必须同时声明requirements，且至少有一个direction=output。"
+                        "requirements只允许从semantic_requirement_catalog选择semantic_key；不得写Worker ID、Agent ID、Tool、Capability boundary或自行发明Slot/参数名。"
+                        "direction=input表示完成本Need必须先具备的系统事实；direction=output表示本Need希望系统产生的业务结果；"
+                        "direction=parameter只用于用户必须明确决定、系统不可替用户决定的情景参数。"
+                        "特别注意：当用户问‘应该怎么调整/应该配多少/你建议怎么配置’时，目标仓位是系统应给出的output，不是用户parameter；"
+                        "此时应形成rebalance_proposal/rebalance_instructions输出Need。只有用户明确指定一个配置比例/金额，或要求在某个由用户决定的配置规模下做情景测算时，才使用target_allocation parameter。"
+                        "proposal请求必须包含一个真正产出状态变更方案的business Need，不能只列持仓/画像等前置数据Need。"
+                        "required_paths只用于用户需求明确要求某些字段时做最小字段约束；不知道数据结构时留空，禁止猜字段。"
                         "当前user_request是本轮业务目标的第一权威来源；context_binding是本轮对象范围与历史对象继承规则的权威约束。"
                         "session_summary只是经过入口上下文绑定策略允许进入本阶段的对话背景，不是金融实体权威来源。"
                         "当context_binding.entity_scope=portfolio且inherit_previous_focus=false时，必须保持组合级目标；"
@@ -159,11 +195,19 @@ class CoordinatorPlanner:
                         "available_context_kinds": sorted(initial_slots),
                         "authoritative_entity_refs_available": "authoritative_entity_refs" in initial_slots,
                         "session_summary": str(memory_summary or "")[:1400],
+                        "semantic_requirement_catalog": semantic_catalog,
                         "required_output_shape": {
+                            "requirement_contract_version": NeedRequirementCompiler.SCHEMA_VERSION,
                             "intent_summary": "对用户真实目标的单一权威概括",
                             "needs": [{
-                                "description": "一个明确的信息/分析需求",
+                                "description": "一个明确的信息/分析/方案需求",
                                 "required": True,
+                                "requirements": [{
+                                    "semantic_key": "must come from semantic_requirement_catalog",
+                                    "direction": "input|output|parameter",
+                                    "required": True,
+                                    "required_paths": [],
+                                }],
                             }],
                             "constraints": ["用户明确约束，没有则空数组"],
                             "scope_note": "实体/范围说明",
@@ -172,32 +216,61 @@ class CoordinatorPlanner:
                     }),
                 },
             ],
-            max_output_tokens=1400,
+            max_output_tokens=1800,
             validator=validate,
             operation=f"upfront_intent_plan:{request_mode}",
             disable_thinking=False,
             repair_mode="targeted",
-            repair_guidance="只修复意图合同结构、need描述、effect_limit；不得加入Worker、Tool、Slot或Capability名称。",
+            repair_guidance=(
+                "只修复意图合同和注册语义Requirement；不得加入Worker、Tool、Capability名称或未注册semantic_key。"
+                "proposal请求必须有实际Proposal输出Need；推荐仓位是output，不得误写成用户parameter。"
+            ),
+        )
+        strict_requirements = (
+            str(payload.get("requirement_contract_version") or "").strip()
+            == NeedRequirementCompiler.SCHEMA_VERSION
         )
         normalized_needs: list[dict[str, Any]] = []
         for index, raw in enumerate(payload.get("needs") or [], start=1):
             row = dict(raw or {})
+            need_id = self._normalize_need_id(index)
             normalized_needs.append({
-                "need_id": self._normalize_need_id(index),
+                "need_id": need_id,
                 "kind": str(row.get("kind") or "business").strip() or "business",
                 "description": str(row.get("description") or "").strip(),
                 "required": bool(row.get("required", True)),
+                "requirements": self.need_compiler.normalize_need_requirements(
+                    need_id=need_id,
+                    raw_requirements=row.get("requirements") or [],
+                    strict=strict_requirements,
+                ),
             })
-        # A user-facing response is a runtime-level terminal requirement, not a
-        # business routing rule. The producer is still selected from descriptions.
+        # Final presentation is a runtime terminal Need. Its output semantic is
+        # deterministic; upstream report inputs are assigned by compact DAG IR.
+        user_report_semantic = self.registry.semantic_requirement("user_report")
         normalized_needs.append({
             "need_id": "N_FINAL",
             "kind": "presentation",
             "description": "将本轮已验证的终端结构化结果转换为面向用户的自然语言回答，不新增业务事实或判断。",
             "required": True,
+            "requirements": [{
+                "requirement_id": "N_FINAL-R01",
+                "semantic_key": "user_report",
+                "direction": "output",
+                "kind": "slot",
+                "slot_id": str(user_report_semantic["slot_id"]),
+                "semantic_role": str(user_report_semantic["semantic_role"]),
+                "source_policy": str(user_report_semantic["source_policy"]),
+                "satisfaction_rule": str(user_report_semantic["satisfaction_rule"]),
+                "required": True,
+                "required_paths": [],
+            }],
         })
         intent = {
             "schema_version": "canonical_intent_contract.v1",
+            "requirement_contract_version": (
+                NeedRequirementCompiler.SCHEMA_VERSION if strict_requirements else "legacy"
+            ),
             "intent_summary": str(payload.get("intent_summary") or "").strip(),
             "needs": normalized_needs,
             "constraints": [str(item).strip() for item in payload.get("constraints") or [] if str(item).strip()],
@@ -211,6 +284,7 @@ class CoordinatorPlanner:
                 "intent_summary": intent["intent_summary"],
                 "need_count": len(intent["needs"]),
                 "needs": intent["needs"],
+                "requirement_contract_version": intent["requirement_contract_version"],
                 "effect_limit": intent["effect_limit"],
                 "raw_request_reinterpretation_allowed_downstream": False,
             },
@@ -443,6 +517,13 @@ class CoordinatorPlanner:
             missing_needs = sorted(required_need_ids - covered)
             if missing_needs:
                 raise WorkerContractViolation("required_intent_need_uncovered", "$.worker_calls", ",".join(missing_needs))
+            # Covers_need_ids is only a responsibility claim. For V23.0.10
+            # canonical Needs, the selected calls must also prove that every
+            # required Need output semantic is produced by a covering Worker.
+            self.need_compiler.validate_worker_call_need_outputs(
+                intent_contract=intent_contract,
+                worker_calls=[dict(item) for item in calls if isinstance(item, dict)],
+            )
 
         user_payload: dict[str, Any] = {
             "canonical_intent_contract": intent_contract,
@@ -487,6 +568,9 @@ class CoordinatorPlanner:
                         "produced_output_patterns是硬命名合同，不是主题提示。output_publication_mode=worker_synthesized时允许创建新Slot，但每个新Key必须字面匹配至少一个produced_output_patterns：例如risk.*只能生成risk.xxx，analysis.risk*只能生成analysis.risk开头的Key；不能改写成concentration_risk_fragment这类命名。没有通配符的pattern只能原样使用。已有能力优先复用output_slot_examples。private_tool_passthrough仍只能从private_tool_semantic_outputs选择。"
                         "required_output_shape只是格式示意，不得把它作为返回包装层；顶层必须直接返回worker_calls和selection_reason。"
                         "选择能够覆盖全部required need的最小充分Worker调用集合。每个required need必须由covers_need_ids显式覆盖。"
+                        "canonical_intent_contract中的每个Need已经包含程序校验过的requirements。对direction=output的requirement，"
+                        "负责覆盖该Need的WorkerCall集合必须在desired_output_slots中真实产出对应slot_id；covers_need_ids本身不等于业务完成。"
+                        "direction=input/parameter不要在本阶段重复转换成合同，下一阶段只负责把这些已注册Requirement分配给已选Worker。"
                         "需要自然语言最终交付的presentation need必须由能真实产出user_facing_report的Worker覆盖，但不要根据Worker编号硬编码。"
                         + planning_gap_instruction +
                         "不要选择Tool，不要生成DAG，不要输出私有Prompt。只输出JSON。"
@@ -588,7 +672,7 @@ class CoordinatorPlanner:
             "intent_need_ids": [str(row.get("need_id")) for row in intent_contract.get("needs") or [] if row.get("need_id")],
         }
 
-    def _generate_worker_dag(
+    def _generate_worker_dag_legacy(
         self,
         *,
         intent_contract: dict[str, Any],
@@ -604,10 +688,29 @@ class CoordinatorPlanner:
         selected_details = [row for row in worker_descriptions if row.get("worker_id") in selected_ids]
         selected_by_id = {str(row.get("worker_id") or ""): row for row in selected_details}
         goal = self._goal_contract(intent_contract=intent_contract, worker_calls=calls)
+        compact_mode = (
+            str(intent_contract.get("requirement_contract_version") or "")
+            == NeedRequirementCompiler.SCHEMA_VERSION
+        )
+
+        def expanded_raw_tasks(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+            if isinstance(candidate.get("tasks"), list):
+                # Compatibility path for existing tests and older checkpoints.
+                return [dict(item) for item in candidate.get("tasks") or [] if isinstance(item, dict)]
+            raw_assignments = candidate.get("task_requirements")
+            if not isinstance(raw_assignments, list) or not raw_assignments:
+                raise WorkerContractViolation("worker_dag_task_requirements_required", "$.task_requirements")
+            return self.need_compiler.expand_compact_tasks(
+                intent_contract=intent_contract,
+                worker_calls=calls,
+                task_requirements=[dict(item) for item in raw_assignments if isinstance(item, dict)],
+                initial_slots=set(initial_slots),
+                request_mode=request_mode,
+            )
 
         def validate(candidate: dict[str, Any]) -> None:
-            raw_tasks = candidate.get("tasks")
-            if not isinstance(raw_tasks, list) or not raw_tasks:
+            raw_tasks = expanded_raw_tasks(candidate)
+            if not raw_tasks:
                 raise WorkerContractViolation("worker_dag_tasks_required", "$.tasks")
             normalized_tasks = self._normalize_task_ids(raw_tasks)
             payload = {"goal_contract": goal, "tasks": normalized_tasks}
@@ -615,24 +718,47 @@ class CoordinatorPlanner:
             unknown = sorted({task.worker_id for task in tasks} - selected_ids)
             if unknown:
                 raise WorkerContractViolation("worker_dag_outside_selected_calls", "$.tasks[*].worker_id", ",".join(unknown))
-            # Every WorkerCall must be realized by same-worker task output coverage.
-            for call in calls:
-                desired = set(call.get("desired_output_slots") or [])
-                produced = {
-                    slot
-                    for task in tasks if task.worker_id == call.get("worker_id")
-                    for slot in task.output_slots()
-                }
-                missing = sorted(desired - produced)
-                if missing:
-                    raise WorkerContractViolation(
-                        "worker_call_not_realized_by_dag",
-                        "$.tasks",
-                        f"{call.get('call_id')}:{','.join(missing)}",
-                    )
+            if len(tasks) != len(calls):
+                raise WorkerContractViolation(
+                    "worker_dag_call_task_count_mismatch",
+                    "$.tasks",
+                    f"calls={len(calls)},tasks={len(tasks)}",
+                )
+            # Compact expansion is one task per WorkerCall in call order. Legacy
+            # plans retain the earlier same-worker aggregate coverage check.
+            if compact_mode and not isinstance(candidate.get("tasks"), list):
+                for call, task in zip(calls, tasks):
+                    if task.worker_id != str(call.get("worker_id") or ""):
+                        raise WorkerContractViolation(
+                            "compact_task_worker_order_mismatch",
+                            "$.task_requirements",
+                            f"{call.get('call_id')}:{task.worker_id}",
+                        )
+                    desired = {str(item) for item in call.get("desired_output_slots") or [] if str(item)}
+                    missing = sorted(desired - set(task.output_slots()))
+                    if missing:
+                        raise WorkerContractViolation(
+                            "worker_call_not_realized_by_dag",
+                            "$.task_requirements",
+                            f"{call.get('call_id')}:{','.join(missing)}",
+                        )
+            else:
+                for call in calls:
+                    desired = set(call.get("desired_output_slots") or [])
+                    produced = {
+                        slot
+                        for task in tasks if task.worker_id == call.get("worker_id")
+                        for slot in task.output_slots()
+                    }
+                    missing = sorted(desired - produced)
+                    if missing:
+                        raise WorkerContractViolation(
+                            "worker_call_not_realized_by_dag",
+                            "$.tasks",
+                            f"{call.get('call_id')}:{','.join(missing)}",
+                        )
             # Every promised output must be legal for the selected Worker's
-            # overall scope. Passthrough Workers remain additionally restricted
-            # to explicit ToolOutputContract semantic slots.
+            # professional scope. Runtime still owns this hard boundary.
             for task in tasks:
                 worker = selected_by_id.get(task.worker_id) or {}
                 unsupported = sorted(
@@ -646,65 +772,127 @@ class CoordinatorPlanner:
                         self._worker_output_contract_error_detail(worker, unsupported),
                     )
 
-        user_payload: dict[str, Any] = {
-            "canonical_intent_contract": intent_contract,
-            "selected_worker_calls": calls,
-            "selected_worker_descriptions": selected_details,
-            "available_initial_information_slots": sorted(initial_slots),
-            "program_owned_goal_contract": goal,
-            "required_output_shape": {
-                "tasks": [{
-                    "worker_id": "must appear in selected_worker_calls",
-                    "objective": "short objective constrained by the WorkerCall",
-                    "effect_limit": "read|proposal",
-                    "priority": 1,
-                    "business_parameters": {},
-                    "contracts": [{
-                        "description": "short obligation",
-                        "required_inputs": [{"slot_id": "runtime semantic slot key", "required": True, "cardinality": "one|many", "required_paths": ["optional minimal.path", "records[*].field"]}],
-                        "promised_outputs": [{"slot_id": "runtime semantic slot key", "provenance_required": True, "required_paths": []}],
-                        "acceptance_rule_ids": ["registered rule id"],
-                        "forbidden_output_slots": [],
-                        "criticality": "required|optional",
+        compact_worker_scopes: list[dict[str, Any]] = []
+        if compact_mode:
+            for call in calls:
+                worker_id = str(call.get("worker_id") or "")
+                card = self.directory.get(worker_id)
+                scope = self.registry.aggregate_scope(card.supported_boundary_ids)
+                compact_worker_scopes.append({
+                    "call_id": str(call.get("call_id") or ""),
+                    "worker_id": worker_id,
+                    "worker_role": str(card.role),
+                    "covers_need_ids": list(call.get("covers_need_ids") or []),
+                    "desired_output_slots": list(call.get("desired_output_slots") or []),
+                    "accepted_input_patterns": list(scope.get("accepted_input_patterns") or []),
+                    "input_slot_examples": list(scope.get("input_slot_examples") or []),
+                    "required_context_slots": list(scope.get("required_context_slots") or []),
+                })
+            user_payload: dict[str, Any] = {
+                "canonical_intent_contract": intent_contract,
+                "selected_worker_calls": calls,
+                "selected_worker_input_scopes": compact_worker_scopes,
+                "available_initial_information_slots": sorted(initial_slots),
+                "available_selected_output_slots": sorted({
+                    str(slot)
+                    for call in calls
+                    for slot in call.get("desired_output_slots") or []
+                    if str(slot)
+                }),
+                "program_owned_goal_contract": goal,
+                "required_output_shape": {
+                    "task_requirements": [{
+                        "call_id": "WC01",
+                        "requirement_ids": ["only canonical direction=input|parameter requirement IDs for Needs covered by this call"],
+                        "additional_required_slots": ["optional selected-output or initial Slot needed by this Worker, e.g. terminal result consumed by report writer"],
+                    }]
+                },
+            }
+            system_prompt = (
+                "你是MainAgent的Worker DAG需求分配阶段。Worker已经选定，Canonical Need Requirement也已经由程序注册并验证。"
+                "你不再生成完整CapabilityContract，只把Canonical requirements分配给已经选定的WorkerCall。"
+                "每个selected_worker_call必须在task_requirements中恰好出现一次；禁止增删Worker、禁止选择Tool、禁止输出contracts、boundary_id、acceptance rules、source_policy或satisfaction_rule。"
+                "requirement_ids只能引用canonical_intent_contract中direction=input或direction=parameter的requirement_id，且只能分配给covers_need_ids包含该Requirement所属Need的WorkerCall。"
+                "每个required input/parameter Requirement必须至少分配一次。direction=output不放进requirement_ids，它已经由WorkerCall的desired_output_slots负责。"
+                "additional_required_slots只用于Canonical Requirement之外、但当前Worker确实要消费的已知Slot；只能从available_initial_information_slots或available_selected_output_slots中选择。"
+                "例如最终报告Worker应优先消费上游已经合成的终端专业结果，不要在已有分析/Proposal时重复消费所有原始证据。"
+                "不要把推荐值反向变成用户参数；用户参数是否存在完全由Canonical Need Requirement决定，本阶段无权新增target_weight等参数。"
+                "依赖边由程序根据展开后的Slot输入输出自动推导。只输出紧凑JSON。"
+            )
+            repair_guidance = (
+                "只修复task_requirements的call_id、requirement_ids和additional_required_slots；"
+                "不得输出完整CapabilityContract、不得新增用户参数、不得增删WorkerCall。"
+            )
+            max_output_tokens = 1400
+        else:
+            # Legacy path retained so existing checkpoints/tests remain readable.
+            user_payload = {
+                "canonical_intent_contract": intent_contract,
+                "selected_worker_calls": calls,
+                "selected_worker_descriptions": selected_details,
+                "available_initial_information_slots": sorted(initial_slots),
+                "program_owned_goal_contract": goal,
+                "required_output_shape": {
+                    "tasks": [{
+                        "worker_id": "must appear in selected_worker_calls",
+                        "objective": "short objective constrained by the WorkerCall",
                         "effect_limit": "read|proposal",
-                    }],
-                }]
-            },
-        }
+                        "priority": 1,
+                        "business_parameters": {},
+                        "contracts": [{
+                            "description": "short obligation",
+                            "required_inputs": [{
+                                "slot_id": "runtime semantic slot key",
+                                "semantic_role": "business meaning of this input",
+                                "source_policy": "system|user|either",
+                                "satisfaction_rule": "exists|non_empty",
+                                "required": True,
+                                "cardinality": "one|many",
+                                "required_paths": [],
+                            }],
+                            "required_parameters": [],
+                            "promised_outputs": [{"slot_id": "runtime semantic slot key", "provenance_required": True, "required_paths": []}],
+                            "acceptance_rule_ids": ["registered rule id"],
+                            "forbidden_output_slots": [],
+                            "criticality": "required|optional",
+                            "effect_limit": "read|proposal",
+                        }],
+                    }]
+                },
+            }
+            system_prompt = (
+                "你是MainAgent的Worker DAG生成阶段。canonical_intent_contract和selected_worker_calls已经是权威决定；"
+                "禁止重新解释原始用户请求，禁止增删WorkerCall。一次性生成完整Worker DAG合同。"
+                "这是兼容旧checkpoint的Legacy规划模式；不要输出Tool、私有Prompt或dependency_task_ids。只输出JSON。"
+            )
+            repair_guidance = "只修复已选WorkerCall到Worker级CapabilityContract的实现；不得重新解释意图或增删WorkerCall。"
+            max_output_tokens = 3200
+
         if recovery_context:
             user_payload["bounded_recovery_context"] = recovery_context
         payload = self.llm_service.generate_json(
             stage="upfront_worker_dag_planning" if not recovery_context else "recovery_worker_dag_planning",
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "你是MainAgent的Worker DAG生成阶段。canonical_intent_contract和selected_worker_calls已经是权威决定；"
-                        "禁止重新解释原始用户请求，禁止增删WorkerCall。每个selected Worker代表一块完整专业能力范围，不要再为Worker选择或发明子Boundary。"
-                        "一次性生成完整Worker DAG的任务/CapabilityContract；只描述Worker之间实际需要传递的信息Slot和本任务承诺产出的信息Slot。"
-                        "每个WorkerCall的desired_output_slots必须由同一worker_id的任务真实承诺产出；Slot是开放的运行时语义Key，不是固定业务枚举。output_publication_mode=private_tool_passthrough时，desired_output_slots必须从private_tool_semantic_outputs选择；新增Tool的OutputContract会自动进入该列表，不需要中央Slot注册。output_publication_mode=worker_synthesized时，可创建新语义Key，但Key必须字面匹配该Worker整体produced_output_patterns；produced_output_patterns是硬命名空间合同，不是语义提示。已有Key优先复用output_slot_examples。生产者/消费者合同必须使用完全相同的Key。依赖关系不要手写，Runtime会根据Slot生产/消费自动推导。"
-                        "session_summary、current_user_request、reply_language、runtime_context属于规划/运行上下文，不是经过验证的业务事实Slot，除系统诊断Worker外不要把它们声明成业务required_inputs。"
-                        "不要输出boundary_id、goal_contract（它由程序从canonical intent和WorkerCall固定生成），不要输出Tool、私有Prompt、dependency_task_ids、GraphRef、模型、超时、重试。"
-                        "合同required_inputs只声明该任务实际不可缺少的输入；当你明确知道下游只需要Slot中的少数字段时，用required_paths声明最小字段路径（支持records[*].field），不知道结构时留空，禁止猜字段。只输出JSON。"
-                    ),
-                },
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": compact_json_dumps(user_payload)},
             ],
-            max_output_tokens=3200,
+            max_output_tokens=max_output_tokens,
             validator=validate,
             operation=f"upfront_worker_dag:{request_mode}",
             disable_thinking=False,
             repair_mode="targeted",
-            repair_guidance=(
-                "只修复已选WorkerCall到Worker级CapabilityContract的实现；不得选择子Boundary、重新解释意图、增删WorkerCall或输出Tool。"
-                "若validation_error.detail包含Worker输出合同，任何修复后的promised_outputs都必须严格匹配其中的produced_output_patterns；"
-                "worker_synthesized允许在pattern内创建新Key，但禁止在pattern外自由命名。"
-            ),
+            repair_guidance=repair_guidance,
         )
-        normalized_tasks = self._normalize_task_ids(payload.get("tasks") or [])
+        raw_tasks = expanded_raw_tasks(payload)
+        normalized_tasks = self._normalize_task_ids(raw_tasks)
         normalized = {"goal_contract": goal, "tasks": normalized_tasks}
+        if isinstance(payload.get("task_requirements"), list):
+            normalized["task_requirements"] = [dict(item) for item in payload.get("task_requirements") or [] if isinstance(item, dict)]
+            normalized["contract_expansion_mode"] = "deterministic_registry_expansion"
+        else:
+            normalized["contract_expansion_mode"] = "legacy_llm_full_contract"
         tasks = self.validator.validate(normalized, request_mode=request_mode, initial_information_slots=set(initial_slots))
-        validate({"tasks": normalized_tasks})
+        validate(payload)
         flow_event(
             "UPFRONT_WORKER_DAG_VALIDATED",
             {
@@ -712,6 +900,7 @@ class CoordinatorPlanner:
                 "contract_count": sum(len(item.contracts) for item in tasks),
                 "worker_ids": [item.worker_id for item in tasks],
                 "worker_scope_ids": [item.boundary_id for item in tasks],
+                "contract_expansion_mode": normalized["contract_expansion_mode"],
                 "main_agent_worker_visibility": "all_public_descriptions_upfront",
                 "main_agent_tool_visibility": "none",
                 "raw_request_used": False,
@@ -719,6 +908,130 @@ class CoordinatorPlanner:
             run_id=run_id,
         )
         return normalized, tasks
+
+    def _generate_worker_dag(
+        self,
+        *,
+        intent_contract: dict[str, Any],
+        worker_call_plan: dict[str, Any],
+        worker_descriptions: list[dict[str, Any]],
+        request_mode: str,
+        run_id: str,
+        initial_slots: set[str],
+        recovery_context: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], list[CapabilityTask]]:
+        """Compile the Worker DAG from Need/Worker contracts without an LLM.
+
+        V23.0.11 ends MainAgent semantic planning after Worker selection.  The
+        selected WorkerCalls, registered Need requirements and public Worker
+        scopes are sufficient to deterministically build CapabilityContracts.
+        SlotBinder remains the owner of producer/consumer dependency edges.
+
+        ``recovery_context`` may change Worker selection upstream, but it never
+        causes a separate Worker-DAG LLM planning call.
+        """
+
+        calls = [dict(item) for item in worker_call_plan.get("worker_calls") or [] if isinstance(item, dict)]
+        if not calls:
+            raise WorkerContractViolation("worker_calls_required", "$.worker_calls")
+
+        goal = self._goal_contract(intent_contract=intent_contract, worker_calls=calls)
+        requirement_contract_version = str(intent_contract.get("requirement_contract_version") or "")
+        if requirement_contract_version != NeedRequirementCompiler.SCHEMA_VERSION:
+            # Compatibility only for pre-V23.0.10 checkpoints/tests.  New V23.0.11
+            # runs always use need-requirement.v1 and never execute this LLM path.
+            return self._generate_worker_dag_legacy(
+                intent_contract=intent_contract,
+                worker_call_plan=worker_call_plan,
+                worker_descriptions=worker_descriptions,
+                request_mode=request_mode,
+                run_id=run_id,
+                initial_slots=initial_slots,
+                recovery_context=recovery_context,
+            )
+
+        task_requirements = self.need_compiler.compile_task_requirements(
+            intent_contract=intent_contract,
+            worker_calls=calls,
+            initial_slots=set(initial_slots),
+        )
+        raw_tasks = self.need_compiler.expand_compact_tasks(
+            intent_contract=intent_contract,
+            worker_calls=calls,
+            task_requirements=task_requirements,
+            initial_slots=set(initial_slots),
+            request_mode=request_mode,
+        )
+        normalized_tasks = self._normalize_task_ids(raw_tasks)
+        payload = {
+            "goal_contract": goal,
+            "tasks": normalized_tasks,
+            "task_requirements": task_requirements,
+            "contract_expansion_mode": "deterministic_need_worker_dag_compiler",
+        }
+
+        tasks = self.validator.validate(
+            payload,
+            request_mode=request_mode,
+            initial_information_slots=set(initial_slots),
+        )
+        selected_ids = {str(row.get("worker_id") or "") for row in calls}
+        unknown = sorted({task.worker_id for task in tasks} - selected_ids)
+        if unknown:
+            raise WorkerContractViolation(
+                "worker_dag_outside_selected_calls", "$.tasks[*].worker_id", ",".join(unknown)
+            )
+        if len(tasks) != len(calls):
+            raise WorkerContractViolation(
+                "worker_dag_call_task_count_mismatch",
+                "$.tasks",
+                f"calls={len(calls)},tasks={len(tasks)}",
+            )
+        for call, task in zip(calls, tasks):
+            worker_id = str(call.get("worker_id") or "")
+            if task.worker_id != worker_id:
+                raise WorkerContractViolation(
+                    "compiled_task_worker_order_mismatch",
+                    "$.task_requirements",
+                    f"{call.get('call_id')}:{task.worker_id}",
+                )
+            desired = {str(item) for item in call.get("desired_output_slots") or [] if str(item)}
+            missing = sorted(desired - set(task.output_slots()))
+            if missing:
+                raise WorkerContractViolation(
+                    "worker_call_not_realized_by_dag",
+                    "$.task_requirements",
+                    f"{call.get('call_id')}:{','.join(missing)}",
+                )
+
+        flow_event(
+            "WORKER_DAG_COMPILED_DETERMINISTIC",
+            {
+                "task_count": len(tasks),
+                "contract_count": sum(len(item.contracts) for item in tasks),
+                "worker_ids": [item.worker_id for item in tasks],
+                "compiler": "need_requirement_registry_slot_compiler",
+                "main_agent_llm_worker_dag_call": False,
+                "dependency_owner": "slot_binder",
+                "worker_private_tool_planning_preserved": True,
+            },
+            run_id=run_id,
+        )
+        flow_event(
+            "UPFRONT_WORKER_DAG_VALIDATED",
+            {
+                "task_count": len(tasks),
+                "contract_count": sum(len(item.contracts) for item in tasks),
+                "worker_ids": [item.worker_id for item in tasks],
+                "worker_scope_ids": [item.boundary_id for item in tasks],
+                "contract_expansion_mode": payload["contract_expansion_mode"],
+                "main_agent_worker_visibility": "all_public_descriptions_upfront",
+                "main_agent_tool_visibility": "none",
+                "raw_request_used": False,
+            },
+            run_id=run_id,
+        )
+        return payload, tasks
 
     def _compile(
         self,
@@ -779,10 +1092,16 @@ class CoordinatorPlanner:
                 },
             ))
         meta = {
-            "planner": "upfront_worker_dag_main_agent",
+            "planner": "need_worker_assignment_runtime_compiler",
             "runtime_version": RUNTIME_VERSION,
-            "planning_mode": "upfront_worker_dag_then_private_tool_dag",
+            "planning_mode": "intent_need_then_worker_assignment_then_runtime_dag_compile_then_private_tool_dag",
             "worker_selection_owner": "main_agent",
+            "main_agent_llm_planning_stages": [
+                "upfront_user_intent_planning",
+                "upfront_worker_call_selection",
+            ],
+            "worker_dag_build_owner": "runtime_deterministic_compiler",
+            "worker_private_planning_owner": "specialist_worker",
             "capability_scope_mode": "worker_level",
             "worker_assignment_runtime_role": "validate_only",
             "raw_request_semantic_owner": "canonical_intent_contract",

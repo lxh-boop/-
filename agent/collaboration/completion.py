@@ -194,6 +194,78 @@ def runtime_completion_report(
     )
 
 
+def evaluate_need_completion(
+    intent_contract: dict[str, Any],
+    observations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Evaluate Canonical Need completion from verified semantic outputs.
+
+    Input/parameter Requirements are enforced before Worker execution by the
+    deterministic RequirementResolver. Need completion therefore checks the
+    required *output* semantics: a Need is complete only when its declared
+    business result was actually published by a semantically satisfied task.
+    Legacy Need contracts remain observable but are not retroactively guessed.
+    """
+
+    produced = {
+        str(slot)
+        for observation in observations or []
+        if bool(observation.get("semantic_satisfied"))
+        for slot in observation.get("produced_information_slots") or []
+        if str(slot)
+    }
+    insufficiency_seen = any(
+        str(item.get("failure_kind") or "") in {"business_insufficient", "business_empty"}
+        or str((item.get("completion") or {}).get("business_status") or "") in {"insufficient", "empty"}
+        for item in observations or []
+    )
+    rows: list[dict[str, Any]] = []
+    required_statuses: list[str] = []
+    for need in intent_contract.get("needs") or []:
+        need_id = str(need.get("need_id") or "")
+        required_outputs = list(dict.fromkeys(
+            str(req.get("slot_id") or "")
+            for req in need.get("requirements") or []
+            if req.get("direction") == "output"
+            and bool(req.get("required", True))
+            and str(req.get("slot_id") or "")
+        ))
+        if not required_outputs:
+            status = "legacy_untracked"
+            missing: list[str] = []
+        else:
+            missing = [slot for slot in required_outputs if slot not in produced]
+            status = (
+                "completed" if not missing else
+                "business_insufficient" if insufficiency_seen else
+                "not_completed"
+            )
+        if bool(need.get("required", True)) and status != "legacy_untracked":
+            required_statuses.append(status)
+        rows.append({
+            "need_id": need_id,
+            "kind": str(need.get("kind") or "business"),
+            "description": str(need.get("description") or ""),
+            "required": bool(need.get("required", True)),
+            "status": status,
+            "required_output_slots": required_outputs,
+            "missing_output_slots": missing,
+        })
+    if not required_statuses:
+        goal_status = "legacy_untracked"
+    elif all(status == "completed" for status in required_statuses):
+        goal_status = "completed"
+    elif any(status == "completed" for status in required_statuses):
+        goal_status = "partially_completed"
+    else:
+        goal_status = "not_completed"
+    return {
+        "schema_version": "need-completion-report.v1",
+        "goal_status": goal_status,
+        "needs": rows,
+    }
+
+
 def flow_decision(
     result_status: ResultStatus,
     completion: dict[str, Any],
@@ -208,7 +280,14 @@ def flow_decision(
         status = ResultStatus.PROPOSAL_READY if result_status == ResultStatus.PROPOSAL_READY else ResultStatus.COMPLETED
         return CompletionFlowDecision(status, True, True, True, False, "none", "required_contracts_satisfied")
     if result_status == ResultStatus.NEED_CONTEXT:
-        return CompletionFlowDecision(ResultStatus.NEED_CONTEXT, False, False, False, True, failure_kind or "context_missing", "context_required")
+        resolved_failure = failure_kind or "context_missing"
+        # User-owned parameter gaps are wait states, not replanning triggers.
+        # System/context gaps remain repairable by MainAgent orchestration.
+        replan_recommended = resolved_failure != "user_input_required"
+        return CompletionFlowDecision(
+            ResultStatus.NEED_CONTEXT, False, False, False, replan_recommended,
+            resolved_failure, "user_input_required" if not replan_recommended else "context_required",
+        )
     if result_status == ResultStatus.BLOCKED:
         return CompletionFlowDecision(
             ResultStatus.BLOCKED, False, False, False, bool(retryable),

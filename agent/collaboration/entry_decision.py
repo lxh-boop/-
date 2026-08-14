@@ -26,16 +26,27 @@ class EntityScope(str, Enum):
     NONE = "none"
 
 
+class ReferenceEntityType(str, Enum):
+    SECURITY = "security"
+    PORTFOLIO = "portfolio"
+    ACCOUNT = "account"
+    EVENT = "event"
+    UNKNOWN = "unknown"
+    NONE = "none"
+
+
 @dataclass(frozen=True)
 class ContextBinding:
     entity_scope: EntityScope = EntityScope.NONE
     inherit_previous_focus: bool = False
+    reference_entity_type: ReferenceEntityType = ReferenceEntityType.NONE
     reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "entity_scope": self.entity_scope.value,
             "inherit_previous_focus": bool(self.inherit_previous_focus),
+            "reference_entity_type": self.reference_entity_type.value,
             "reason": str(self.reason or ""),
         }
 
@@ -123,6 +134,9 @@ def _validate_decision(payload: dict[str, Any]) -> None:
         raise EntryDecisionError(f"invalid_entity_scope:{scope}")
     if not isinstance(binding.get("inherit_previous_focus"), bool):
         raise EntryDecisionError("invalid_inherit_previous_focus")
+    reference_type = str(binding.get("reference_entity_type") or "none").strip().lower()
+    if reference_type not in {item.value for item in ReferenceEntityType}:
+        raise EntryDecisionError(f"invalid_reference_entity_type:{reference_type}")
 
 
 
@@ -176,11 +190,15 @@ class MainEntryDecisionPlanner:
             "同时输出 context_binding，描述当前任务应绑定的实体范围。entity_scope 只能是："
             "explicit_entities（当前请求明确对象）、conversation_focus（需要延续上轮对象）、portfolio（完整组合）、"
             "account（账户）、global（全局市场或系统）、none（无实体范围）。"
-            "inherit_previous_focus 由语义决定：只有当前目标确实延续上一轮对象时为 true；"
-            "账户、完整组合、全局或无对象任务不得继承上一轮单一证券。不要用关键词规则解释，按用户最终目标判断。"
+            "inherit_previous_focus 由语义决定：只有当前目标确实延续历史对象时为 true；"
+            "账户、完整组合、全局或无对象任务不得把历史单一证券直接作为当前业务焦点。"
+            "reference_entity_type用于声明当前请求中的指代对象类型，只能是security、portfolio、account、event、unknown、none。"
+            "像‘刚刚那只股票/上面那个标的/它怎么样’这类没有重新点名、但语义上明确指向历史证券的请求，应使用conversation_focus、inherit_previous_focus=true、reference_entity_type=security；"
+            "当前请求直接点名证券时使用explicit_entities且reference_entity_type=security。完整组合请求使用portfolio且reference_entity_type=portfolio。"
+            "不要用字符串关键词硬编码解释，按用户最终目标和指代关系判断。"
             '严格输出 JSON：{"mode":"...","reason":"...",'
             '"reply_language":"zh|en|","confidence":0.0,'
-            '"context_binding":{"entity_scope":"...","inherit_previous_focus":false,"reason":"..."}}。'
+            '"context_binding":{"entity_scope":"...","inherit_previous_focus":false,"reference_entity_type":"none","reason":"..."}}。'
         )
         payload = self.llm_service.generate_json(
             stage="main_agent_single_entry",
@@ -218,6 +236,9 @@ class MainEntryDecisionPlanner:
         context_binding = ContextBinding(
             entity_scope=EntityScope(str(raw_binding.get("entity_scope") or EntityScope.NONE.value)),
             inherit_previous_focus=bool(raw_binding.get("inherit_previous_focus")),
+            reference_entity_type=ReferenceEntityType(
+                str(raw_binding.get("reference_entity_type") or ReferenceEntityType.NONE.value)
+            ),
             reason=str(raw_binding.get("reason") or "")[:500],
         )
         return EntryDecision(

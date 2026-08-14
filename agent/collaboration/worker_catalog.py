@@ -77,6 +77,7 @@ class WorkerDescriptionCatalog:
                 "input_slot_examples": list(dict.fromkeys(input_examples)),
                 "output_slot_examples": list(dict.fromkeys(output_examples)),
                 "allowed_acceptance_rule_ids": list(scope["allowed_acceptance_rule_ids"]),
+                "accepted_business_parameter_patterns": list(scope.get("accepted_business_parameter_patterns") or []),
                 "capability_scope_mode": "worker_level",
                 "private_tool_semantic_outputs": list(private_tool_output_slots),
                 "private_tool_details_visible_to_main_agent": False,

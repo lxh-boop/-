@@ -26,7 +26,7 @@ from agent.graph.portfolio_graph import PortfolioGraphService
 from agent.graph.provider_adapter import GraphProviderAdapter
 from agent.graph.impact_service import GraphImpactService
 
-from .completion import flow_decision, non_success_completion_report, validate_completion_report
+from .completion import evaluate_need_completion, flow_decision, non_success_completion_report, validate_completion_report
 from .worker_directory import CapabilityWorkerDirectory, REPORT_WRITER
 from .control_gateway import ControlGateway
 from .entry_decision import MainEntryDecisionPlanner, RequestMode
@@ -47,6 +47,25 @@ def _dedupe_refs(refs: list[GraphRef]) -> list[GraphRef]:
         seen.add(key)
         result.append(ref)
     return result
+
+
+def _graph_ref_semantic_type(ref: GraphRef) -> str:
+    node_id = str(getattr(ref, "node_id", "") or "").lower()
+    role = str(getattr(ref, "role", "") or "").lower()
+    if node_id.startswith("cn:security:"):
+        return "security"
+    if "portfolio" in node_id or role in {"portfolio", "holding"}:
+        return "portfolio"
+    if ref.node_kind in {GraphNodeKind.EVIDENCE, GraphNodeKind.ASSERTION} or role in {"event", "cause"}:
+        return "event"
+    return "unknown"
+
+
+def _refs_for_semantic_type(refs: list[GraphRef], semantic_type: str) -> list[GraphRef]:
+    wanted = str(semantic_type or "").strip().lower()
+    if wanted in {"", "none", "unknown"}:
+        return list(refs)
+    return [ref for ref in refs if _graph_ref_semantic_type(ref) == wanted]
 
 
 def _walk_graph_refs(value: Any, *, depth: int = 0) -> list[GraphRef]:
@@ -301,6 +320,7 @@ class AgentCollaborationCoordinator:
         *,
         query: str,
         inherited_refs: list[GraphRef],
+        typed_inherited_refs: list[GraphRef] | None = None,
         context_refs: list[GraphRef],
         as_of_time: str,
         language: str,
@@ -355,6 +375,9 @@ class AgentCollaborationCoordinator:
         # not accidentally retain a prior single-security focus.
         binding = dict(context_binding or {})
         inherit_previous = bool(binding.get("inherit_previous_focus"))
+        reference_type = str(binding.get("reference_entity_type") or "none").strip().lower()
+        typed_refs = _refs_for_semantic_type(list(typed_inherited_refs or []), reference_type)
+        previous_refs = _refs_for_semantic_type(list(inherited_refs or []), reference_type)
         if explicit_resolved:
             focus = explicit_resolved
         elif context_refs:
@@ -362,15 +385,56 @@ class AgentCollaborationCoordinator:
                 ref for ref in context_refs
                 if ref.role in {"focus", "cause", "impact_target", "comparison", "event"}
             ]
-            focus = focus or context_refs
-        elif inherit_previous:
-            focus = inherited_refs
+            focus = _refs_for_semantic_type(focus or context_refs, reference_type)
+        elif inherit_previous and previous_refs:
+            focus = previous_refs
+        elif reference_type not in {"", "none", "unknown"} and typed_refs:
+            # Typed focus is a durable per-entity-class conversation pointer. It
+            # survives unrelated portfolio/account turns and is used only when
+            # MainEntryDecision says the current request refers to that class.
+            focus = typed_refs
+            audit.append({
+                "mention": "<typed_conversation_focus>",
+                "role": "focus",
+                "resolution": {
+                    "source": f"typed_graph_focus:{reference_type}",
+                    "ref_count": len(typed_refs),
+                },
+            })
         else:
             focus = []
+
+        entity_scope = str(binding.get("entity_scope") or "none").strip().lower()
+        if (
+            not focus
+            and reference_type not in {"", "none", "unknown"}
+            and entity_scope in {"conversation_focus", "explicit_entities"}
+            and not missing
+        ):
+            missing.append(MissingContextItem(
+                key=f"unresolved_conversation_{reference_type}",
+                description=(
+                    "无法确认当前指代的是哪只证券，请明确证券名称或代码。"
+                    if reference_type == "security"
+                    else f"无法确认当前指代的{reference_type}对象，请明确具体对象。"
+                ),
+                expected_format="明确名称、代码或已解析GraphRef",
+                reason=(
+                    "typed entity reference requested but no authoritative current/typed focus is available; "
+                    "planning must not invent the referenced entity"
+                ),
+                searched_sources=[
+                    "current explicit GraphRef resolution",
+                    "runtime context GraphRefs",
+                    "previous active GraphRefs",
+                    f"typed_graph_focus:{reference_type}",
+                ],
+            ))
         return _dedupe_refs(focus), missing, {
             "mentions": mentions,
             "items": audit,
             "context_binding": binding,
+            "typed_focus_source_count": len(typed_refs),
         }
 
     def execute(
@@ -460,6 +524,14 @@ class AgentCollaborationCoordinator:
                 source_preferences=["session_state", "run_checkpoint"],
                 allow_session_inheritance=True,
             ))
+        reference_entity_type = decision.context_binding.reference_entity_type.value
+        if reference_entity_type not in {"none", "unknown"}:
+            requirements.append(ContextRequirement(
+                slot_id=f"typed_focus:{reference_entity_type}",
+                required=False,
+                source_preferences=["session_state"],
+                allow_session_inheritance=True,
+            ))
         hydrated = self.context_hydrator.hydrate(
             user_id=user_id,
             session_id=session_id,
@@ -485,6 +557,9 @@ class AgentCollaborationCoordinator:
             {
                 "source_audit": hydrated.source_audit,
                 "previous_focus_ref_count": len(hydrated.previous_focus_refs),
+                "typed_focus_ref_counts": {
+                    key: len(refs) for key, refs in hydrated.typed_focus_refs.items()
+                },
                 "pending_run_ids": hydrated.pending_run_ids,
                 "available_parameter_keys": sorted(hydrated.available_parameters),
                 "long_term_memory_ref_count": len(hydrated.long_term_memory_refs),
@@ -493,12 +568,15 @@ class AgentCollaborationCoordinator:
         )
         context_refs = _walk_graph_refs(context)
         inherited_refs = hydrated.previous_focus_refs
+        typed_inherited_refs = list(hydrated.typed_focus_refs.get(reference_entity_type, []))
         explicit_as_of = str(context.get("as_of_time") or context.get("as_of_date") or "")
         flow_event(
             "GRAPH_REF_RESOLUTION_STARTED",
             {
                 "context_ref_count": len(context_refs),
                 "inherited_ref_count": len(inherited_refs),
+                "typed_inherited_ref_count": len(typed_inherited_refs),
+                "reference_entity_type": reference_entity_type,
                 "as_of_time": explicit_as_of,
                 "context_binding": decision.context_binding.to_dict(),
             },
@@ -507,6 +585,7 @@ class AgentCollaborationCoordinator:
         focus_refs, resolution_missing, resolution_audit = self._resolve_request_refs(
             query=query,
             inherited_refs=inherited_refs,
+            typed_inherited_refs=typed_inherited_refs,
             context_refs=context_refs,
             as_of_time=explicit_as_of,
             language=language,
@@ -579,6 +658,23 @@ class AgentCollaborationCoordinator:
                 confirmed=True,
                 confidence=1.0,
             )
+            typed_groups: dict[str, list[GraphRef]] = {}
+            for ref in focus_refs:
+                focus_type = _graph_ref_semantic_type(ref)
+                if focus_type in {"security", "portfolio", "event"}:
+                    typed_groups.setdefault(focus_type, []).append(ref)
+            for focus_type, refs in typed_groups.items():
+                self.session_state.put(
+                    session_id=session_id,
+                    key=f"typed_graph_focus:{focus_type}",
+                    value=[ref.to_dict() for ref in _dedupe_refs(refs)],
+                    value_type="graph_ref_list",
+                    summary=f"最近一次已确认的{focus_type}类型金融图对象引用。",
+                    source_type="graph_entity_resolution",
+                    source_ref=run_id,
+                    confirmed=True,
+                    confidence=1.0,
+                )
 
         self.checkpoints.save(RunCheckpoint(
             run_id=run_id,
@@ -859,6 +955,10 @@ class AgentCollaborationCoordinator:
 
         tasks = active_tasks
         final_observations = self._build_task_observations(tasks, results)
+        need_completion = evaluate_need_completion(
+            dict(plan_meta.get("canonical_intent_contract") or {}),
+            final_observations,
+        )
         flow_event(
             "WORKER_EXECUTION_COMPLETED",
             {
@@ -866,6 +966,7 @@ class AgentCollaborationCoordinator:
                 "execution_batches": batches,
                 "timeline": timeline,
                 "task_observations": final_observations,
+                "need_completion": need_completion,
                 "replan_count": len([item for item in replan_audit if item.get("status") == "executed"]),
                 "replan_audit": replan_audit,
             },
@@ -1023,6 +1124,7 @@ class AgentCollaborationCoordinator:
             "context_sufficiency": final_sufficiency.to_dict() if final_sufficiency else {},
             "missing_context": [item.to_dict() for item in need_context],
             "observations": final_observations,
+            "need_completion": need_completion,
             "replan_audit": replan_audit,
             "replan_count": len([item for item in replan_audit if item.get("status") == "executed"]),
             "invalid_replan_block_count": invalid_replan_block_count,

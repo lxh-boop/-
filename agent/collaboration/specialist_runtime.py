@@ -8,7 +8,7 @@ from typing import Any
 
 from core.llm import LLMService
 
-from agent.capabilities import CapabilityContract, CapabilityContractValidator
+from agent.capabilities import CapabilityContract, CapabilityContractValidator, RequirementResolver
 from agent.capabilities.semantic_slots import SemanticSlotError
 from agent.communication import MessageType, publish_agent_message
 from agent.console_trace import flow_event, get_llm_execution_timing, get_tool_execution_timing
@@ -50,8 +50,11 @@ from .workers import (
 from .workers.common import dependency_results as _dependency_results
 from .workers.common import refs_from_dependencies as _refs_from_dependencies
 from .workers.common import safe_public_value as _safe
-from .workers.slot_inputs import missing_contract_required_slot_ids
 
+
+# V23.0.9: RequirementResolver统一接管输入充分性。
+# 兼容说明：它覆盖旧的 missing_contract_required_slot_ids 仅检查Slot存在性的职责，
+# 并进一步处理source_policy与用户业务参数。
 
 class SpecialistRuntime:
     """Execute one Worker-selected capability task.
@@ -92,6 +95,7 @@ class SpecialistRuntime:
             executor=ToolDagExecutor(self.worker_tool_executor, max_parallel=4),
         )
         self.contract_validator = CapabilityContractValidator()
+        self.requirement_resolver = RequirementResolver()
 
     @staticmethod
     def _produced_slots(task: GraphAgentTask, result: GraphWorkerResult) -> list[str]:
@@ -222,18 +226,37 @@ class SpecialistRuntime:
                 run_id=task.run_id,
             )
 
-        # Input sufficiency is a Runtime responsibility, not a Worker judgment.
-        # A Worker receives only the inputs that were actually bound to its
-        # CapabilityContract.  Missing contract-required bindings are stopped
-        # here before the domain Worker is invoked; unbound non-required slots
-        # are simply outside that Worker's world view.  Empty containers are
-        # valid bound values (e.g. explicit business_empty) and only None counts
-        # as absent.
-        missing_required = sorted(
-            missing_contract_required_slot_ids(task, resolved_inputs)
+        # Capability requirement sufficiency is a Runtime responsibility, not a
+        # domain Worker judgment.  Slot requirements and user business-parameter
+        # requirements are evaluated from the public CapabilityContract before any
+        # private Tool DAG is invoked.  Internal/system gaps take precedence over
+        # user questions, so the system never asks the user for data it can still
+        # recover from an upstream capability.
+        parsed_contracts = [CapabilityContract.from_dict(item) for item in task.contracts]
+        requirement_resolution = self.requirement_resolver.resolve(
+            contracts=parsed_contracts,
+            resolved_inputs=resolved_inputs,
+            business_parameters=task.business_parameters,
+            available_parameters=dict(context.get("available_parameters") or {}),
         )
-        if missing_required:
+        if not requirement_resolution.satisfied:
             task.status = TaskStatus.WAITING_CONTEXT
+            failure_kind = requirement_resolution.failure_kind
+            selected_gaps = (
+                requirement_resolution.system_gaps
+                if requirement_resolution.system_gaps
+                else requirement_resolution.user_gaps
+            )
+            user_required = failure_kind == "user_input_required"
+            reason = (
+                "CapabilityContract仍缺少必须由用户明确提供的业务参数。"
+                if user_required and language != "en"
+                else "CapabilityContract still requires an explicit user business parameter."
+                if user_required
+                else "CapabilityContract要求的内部业务Slot在绑定/物化后仍不可用或不完整。"
+                if language != "en"
+                else "A system-owned CapabilityContract input is still unavailable or incomplete after binding/materialization."
+            )
             result = GraphWorkerResult(
                 task_id=task.task_id,
                 agent_id=task.assigned_agent,
@@ -241,46 +264,53 @@ class SpecialistRuntime:
                 output_type="CapabilityResult",
                 data=None,
                 error={
-                    "error_id": "worker_input_slot_unresolved",
+                    "error_id": failure_kind,
                     "operation": task.objective or task.boundary_id,
-                    "reason": "CapabilityContract required input Slot is unavailable after binding/materialization; report to MainAgent for capability/context repair.",
+                    "reason": reason,
+                    "retryable": not user_required,
                 },
                 focus_refs=task.focus_refs,
-                summary=(
-                    "Runtime未能绑定CapabilityContract要求的输入。"
-                    if language != "en"
-                    else "Runtime could not bind required CapabilityContract inputs."
-                ),
+                summary=reason,
                 missing_items=[
                     MissingContextItem(
-                        key=slot_id,
-                        description=f"CapabilityContract required input is not bound: {slot_id}",
-                        expected_format="Runtime SlotBinder input slot",
-                        reason="worker_input_slot_unresolved: this is a Worker input Slot gap, not automatically a user parameter.",
-                        searched_sources=["resolved_input_bindings", "resolved_inputs"],
+                        key=gap.requirement_id,
+                        description=gap.description,
+                        expected_format=gap.expected_format or (
+                            "one of: " + ", ".join(gap.satisfy_by)
+                            if gap.satisfy_by else "Runtime semantic Slot"
+                        ),
+                        reason=(
+                            f"parameter missing; source_policy={gap.source_policy}; "
+                            f"satisfy_by={','.join(gap.satisfy_by)}"
+                            if gap.kind == "parameter"
+                            else f"worker_input_slot_unresolved; source_policy={gap.source_policy}; "
+                            f"missing_paths={','.join(gap.missing_paths)}"
+                        ),
+                        searched_sources=list(gap.searched_sources),
+                        blocking=True,
                     )
-                    for slot_id in missing_required
+                    for gap in selected_gaps
                 ],
                 completion=non_success_completion_report(
                     task,
                     execution_status="need_context",
-                    reason="CapabilityContract required input bindings are unavailable.",
-                    failure_kind="worker_input_slot_unresolved",
+                    reason=reason,
+                    failure_kind=failure_kind,
                 ),
+                metadata={
+                    "boundary_id": task.boundary_id,
+                    "attempt": task.attempt,
+                    "resolved_input_slots": sorted(resolved_inputs),
+                    "produced_information_slots": [],
+                    "input_gate_owner": "runtime_requirement_resolver",
+                    "requirement_resolution": requirement_resolution.to_dict(),
+                },
             )
-            produced = self._produced_slots(task, result)
-            result.metadata.update({
-                "boundary_id": task.boundary_id,
-                "attempt": task.attempt,
-                "resolved_input_slots": sorted(resolved_inputs),
-                "produced_information_slots": produced,
-                "input_gate_owner": "runtime",
-            })
             decision = flow_decision(
                 result.status,
                 result.completion,
                 output_type=result.output_type,
-                retryable=False,
+                retryable=not user_required,
             )
             result.status = decision.result_status
             result.metadata.update({

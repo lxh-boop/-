@@ -27,6 +27,123 @@ ACCEPTANCE_RULES: dict[str, str] = {
 }
 
 
+# Stable semantic vocabulary used by Canonical Need Requirement compilation.
+# These are business-data meanings, not business scenarios or Worker IDs.
+# A semantic may intentionally have no current producer (for example
+# ``entity_fundamentals``); that is a valid way for planning to discover that
+# the current system cannot satisfy a user Need instead of letting a Worker
+# improvise from unrelated evidence.
+SEMANTIC_REQUIREMENTS: dict[str, dict[str, Any]] = {
+    "authoritative_entity": {
+        "kind": "slot", "slot_id": "authoritative_entity_refs",
+        "semantic_role": "已解析并锁定的权威金融实体引用",
+        "source_policy": "system", "satisfaction_rule": "non_empty",
+    },
+    "external_evidence": {
+        "kind": "slot", "slot_id": "entity_external_evidence",
+        "semantic_role": "目标实体的可追溯外部证据集合",
+        "source_policy": "system", "satisfaction_rule": "non_empty",
+    },
+    "entity_model_signals": {
+        "kind": "slot", "slot_id": "entity_model_signals",
+        "semantic_role": "本系统针对目标实体产生的模型预测与评分信号",
+        "source_policy": "system", "satisfaction_rule": "non_empty",
+    },
+    "market_ranking": {
+        "kind": "slot", "slot_id": "market_ranking_signals",
+        "semantic_role": "本系统产生的市场排名与候选信号",
+        "source_policy": "system", "satisfaction_rule": "non_empty",
+    },
+    "entity_analysis": {
+        "kind": "slot", "slot_id": "entity_analysis",
+        "semantic_role": "基于已验证事实形成的结构化实体分析",
+        "source_policy": "system", "satisfaction_rule": "non_empty",
+    },
+    "entity_uncertainty": {
+        "kind": "slot", "slot_id": "entity_analysis_uncertainty",
+        "semantic_role": "实体分析的不确定性与数据边界",
+        "source_policy": "system", "satisfaction_rule": "non_empty",
+    },
+    "portfolio_state": {
+        "kind": "slot", "slot_id": "current_portfolio_state",
+        "semantic_role": "当前完整投资组合状态快照",
+        "source_policy": "system", "satisfaction_rule": "exists",
+    },
+    "portfolio_positions": {
+        "kind": "slot", "slot_id": "portfolio_positions",
+        "semantic_role": "当前完整投资组合的持仓明细",
+        "source_policy": "system", "satisfaction_rule": "non_empty",
+    },
+    "user_constraints": {
+        "kind": "slot", "slot_id": "user_constraints",
+        "semantic_role": "用户投资目标、风险与流动性等约束",
+        "source_policy": "system", "satisfaction_rule": "exists",
+    },
+    "user_profile": {
+        "kind": "slot", "slot_id": "user_profile_state",
+        "semantic_role": "用户画像与投资偏好状态",
+        "source_policy": "system", "satisfaction_rule": "exists",
+    },
+    "portfolio_risk": {
+        "kind": "slot", "slot_id": "portfolio_risk_result",
+        "semantic_role": "组合风险、集中度与约束审查结果",
+        "source_policy": "system", "satisfaction_rule": "non_empty",
+    },
+    "risk_constraint_review": {
+        "kind": "slot", "slot_id": "risk_constraint_review",
+        "semantic_role": "对用户硬约束与风险边界的结构化审查",
+        "source_policy": "system", "satisfaction_rule": "non_empty",
+    },
+    "rebalance_proposal": {
+        "kind": "slot", "slot_id": "reviewed_proposal",
+        "semantic_role": "已审查且等待用户审批的调仓/配置方案",
+        "source_policy": "system", "satisfaction_rule": "non_empty",
+    },
+    "rebalance_instructions": {
+        "kind": "slot", "slot_id": "proposal.rebalance",
+        "semantic_role": "调仓方案中的具体目标配置与变更指令",
+        "source_policy": "system", "satisfaction_rule": "non_empty",
+    },
+    "user_report": {
+        "kind": "slot", "slot_id": "user_facing_report",
+        "semantic_role": "只基于已验证上游结果生成的用户可读报告",
+        "source_policy": "system", "satisfaction_rule": "non_empty",
+    },
+    "target_allocation": {
+        "kind": "parameter", "parameter_id": "target_asset_allocation",
+        "semantic_role": "用户明确指定、用于情景测算的目标配置比例或投入金额",
+        "source_policy": "user", "satisfaction_rule": "one_of",
+        "satisfy_by": ["target_weight", "target_ratio", "target_amount", "investment_amount"],
+        "description": "需用户明确指定的目标配置比例或投入金额",
+        "expected_format": "percentage or cash amount",
+    },
+    # The following semantic facts are deliberately registered even though the
+    # current Worker/Tool catalog may not yet produce them.  This lets Runtime
+    # report an unsatisfied planning requirement instead of treating news/RAG as
+    # a substitute for missing structured fundamentals or market snapshots.
+    "entity_fundamentals": {
+        "kind": "slot", "slot_id": "entity_fundamentals",
+        "semantic_role": "连续期间的结构化财务基本面事实",
+        "source_policy": "system", "satisfaction_rule": "non_empty",
+    },
+    "market_snapshot": {
+        "kind": "slot", "slot_id": "market_snapshot",
+        "semantic_role": "满足本轮时点要求的行情与估值快照",
+        "source_policy": "system", "satisfaction_rule": "non_empty",
+    },
+    "peer_valuation_context": {
+        "kind": "slot", "slot_id": "peer_valuation_context",
+        "semantic_role": "同业可比公司估值与比较事实",
+        "source_policy": "system", "satisfaction_rule": "non_empty",
+    },
+    "market_flow_context": {
+        "kind": "slot", "slot_id": "market_flow_context",
+        "semantic_role": "目标实体或行业的资金流与市场风格事实",
+        "source_policy": "system", "satisfaction_rule": "non_empty",
+    },
+}
+
+
 def _boundary(
     *,
     boundary_id: str,
@@ -37,6 +154,7 @@ def _boundary(
     accepted_input_patterns: list[str],
     produced_output_patterns: list[str],
     input_slot_examples: list[str],
+    accepted_business_parameter_patterns: list[str] | None = None,
     output_slot_examples: list[str],
     allowed_acceptance_rule_ids: list[str],
     required_context_slots: list[str] | None = None,
@@ -52,6 +170,7 @@ def _boundary(
         non_responsibilities=non_responsibilities,
         accepted_input_patterns=accepted_input_patterns,
         produced_output_patterns=produced_output_patterns,
+        accepted_business_parameter_patterns=list(accepted_business_parameter_patterns or []),
         input_slot_examples=input_slot_examples,
         output_slot_examples=output_slot_examples,
         allowed_acceptance_rule_ids=allowed_acceptance_rule_ids,
@@ -143,7 +262,7 @@ _BOUNDARIES: dict[str, CapabilityBoundary] = {
         description="基于上游证据和内部事实形成结构化实体分析；存在 entity_external_evidence 时优先消费统一主证据，避免把同源 evidence.* 派生视图重复送入分析。",
         responsibilities=["区分事实与分析", "优先消费统一主证据而非重复派生视图", "解释模型信号", "表达不确定性"],
         non_responsibilities=["自行检索证据", "生成交易方案", "提交业务写入"],
-        accepted_input_patterns=["authoritative_entity_refs", "entity.*", "evidence.*", "ranking.*", "metric.*", "graph.*", "relation.*", "entity_external_evidence", "evidence_source_records", "entity_model_signals", "market_ranking_signals", "model_quality_metrics", "financial_relation_paths", "graph_relation_facts"],
+        accepted_input_patterns=["authoritative_entity_refs", "entity.*", "evidence.*", "ranking.*", "metric.*", "graph.*", "relation.*", "entity_external_evidence", "evidence_source_records", "entity_model_signals", "market_ranking_signals", "model_quality_metrics", "financial_relation_paths", "graph_relation_facts", "entity_fundamentals", "market_snapshot", "peer_valuation_context", "market_flow_context"],
         produced_output_patterns=["analysis.*", "entity_analysis", "entity_analysis_uncertainty"],
         input_slot_examples=["entity_external_evidence", "entity_model_signals", "financial_relation_paths"],
         output_slot_examples=["entity_analysis", "entity_analysis_uncertainty", "analysis.entity"],
@@ -157,13 +276,14 @@ _BOUNDARIES: dict[str, CapabilityBoundary] = {
         description="基于组合状态和用户约束评估集中度、暴露和风险边界。",
         responsibilities=["计算风险事实", "审查风险约束", "结构化风险结论"],
         non_responsibilities=["修改持仓", "执行订单", "绕过 Proposal 审批"],
-        accepted_input_patterns=["state.*", "portfolio.*", "profile.*", "constraint.*", "ranking.*", "current_portfolio_state", "portfolio_positions", "account_financial_state", "user_profile_state", "user_constraints", "market_ranking_signals"],
+        accepted_input_patterns=["state.*", "portfolio.*", "profile.*", "constraint.*", "ranking.*", "analysis.*", "impact.*", "current_portfolio_state", "portfolio_positions", "account_financial_state", "user_profile_state", "user_constraints", "market_ranking_signals", "entity_analysis", "entity_model_signals", "impact_facts"],
         produced_output_patterns=["risk.*", "analysis.risk*", "constraint.risk*", "portfolio_risk_result", "risk_constraint_review"],
-        input_slot_examples=["current_portfolio_state", "portfolio_positions", "user_constraints"],
+        accepted_business_parameter_patterns=["target_asset_allocation", "target_weight", "target_amount", "target_ratio", "allocation_ratio", "investment_amount", "planned_amount"],
+        input_slot_examples=["current_portfolio_state", "portfolio_positions", "user_constraints", "entity_analysis", "impact_facts"],
         output_slot_examples=["portfolio_risk_result", "risk_constraint_review", "analysis.risk", "constraint.risk"],
         allowed_acceptance_rule_ids=["schema_valid", "provenance_present", "claims_traceable", "failure_kind_classified", "no_persistent_write"],
         allowed_information_sources=["verified_upstream_slots", "registered_risk_tools"],
-        completion_principles=["风险事实与建议分离", "不把业务为空当工具失败"],
+        completion_principles=["风险事实与建议分离", "不把业务为空当工具失败", "执行前由Capability requirement contract统一确认必需Slot和用户业务参数"],
     ),
     "state_change.proposal": _boundary(
         boundary_id="state_change.proposal",
@@ -173,6 +293,7 @@ _BOUNDARIES: dict[str, CapabilityBoundary] = {
         non_responsibilities=["直接 Commit", "绕过 Approval", "修改持仓或资金"],
         accepted_input_patterns=["state.*", "portfolio.*", "profile.*", "constraint.*", "risk.*", "analysis.*", "ranking.*", "strategy.*", "current_portfolio_state", "portfolio_positions", "account_financial_state", "user_profile_state", "user_constraints", "portfolio_risk_result", "risk_constraint_review", "market_ranking_signals", "selected_strategy_state", "entity_analysis"],
         produced_output_patterns=["proposal.*", "reviewed_proposal"],
+        accepted_business_parameter_patterns=["target_asset_allocation", "target_weight", "target_amount", "target_ratio", "allocation_ratio", "investment_amount", "planned_amount"],
         input_slot_examples=["current_portfolio_state", "portfolio_positions", "user_constraints", "portfolio_risk_result"],
         output_slot_examples=["reviewed_proposal", "proposal.rebalance"],
         allowed_acceptance_rule_ids=["schema_valid", "claims_traceable", "proposal_requires_approval", "no_persistent_write", "goal_coverage"],
@@ -278,6 +399,7 @@ class CapabilityRegistry:
             "source_boundary_ids": [boundary.boundary_id for boundary in boundaries],
             "accepted_input_patterns": merge("accepted_input_patterns"),
             "produced_output_patterns": merge("produced_output_patterns"),
+            "accepted_business_parameter_patterns": merge("accepted_business_parameter_patterns"),
             "input_slot_examples": merge("input_slot_examples"),
             "output_slot_examples": merge("output_slot_examples"),
             "allowed_acceptance_rule_ids": merge("allowed_acceptance_rule_ids"),
@@ -285,6 +407,25 @@ class CapabilityRegistry:
             "allowed_information_sources": merge("allowed_information_sources"),
             "completion_principles": merge("completion_principles"),
         }
+
+    def semantic_requirement_exists(self, semantic_key: str) -> bool:
+        return str(semantic_key or "").strip() in SEMANTIC_REQUIREMENTS
+
+    def semantic_requirement(self, semantic_key: str) -> dict[str, Any]:
+        key = str(semantic_key or "").strip()
+        if key not in SEMANTIC_REQUIREMENTS:
+            raise KeyError(f"unknown_semantic_requirement:{key}")
+        return dict(SEMANTIC_REQUIREMENTS[key])
+
+    def semantic_requirement_catalog(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for key, raw in sorted(SEMANTIC_REQUIREMENTS.items()):
+            row = dict(raw)
+            row["semantic_key"] = key
+            # Keep the MainAgent catalog small and safe. Concrete Worker IDs are
+            # intentionally absent; Worker selection remains a later stage.
+            rows.append(row)
+        return rows
 
     def public_catalog(
         self,
@@ -318,4 +459,4 @@ class CapabilityRegistry:
         return str(ACCEPTANCE_RULES.get(str(rule_id or ""), ""))
 
 
-__all__ = ["ACCEPTANCE_RULES", "CapabilityRegistry"]
+__all__ = ["ACCEPTANCE_RULES", "SEMANTIC_REQUIREMENTS", "CapabilityRegistry"]

@@ -150,6 +150,66 @@ class CapabilityPlanValidator:
 
                 input_slots = set(contract.input_slots())
                 output_slots = set(contract.output_slots())
+                for rindex, requirement in enumerate(contract.required_inputs):
+                    if requirement.source_policy not in {"system", "user", "either"}:
+                        raise WorkerContractViolation(
+                            "invalid_requirement_source_policy",
+                            f"$.tasks[{index-1}].contracts[{cindex-1}].required_inputs[{rindex}].source_policy",
+                            requirement.source_policy,
+                        )
+                    if requirement.satisfaction_rule not in {"exists", "non_empty"}:
+                        raise WorkerContractViolation(
+                            "invalid_input_requirement_satisfaction_rule",
+                            f"$.tasks[{index-1}].contracts[{cindex-1}].required_inputs[{rindex}].satisfaction_rule",
+                            requirement.satisfaction_rule,
+                        )
+                for pindex, requirement in enumerate(contract.required_parameters):
+                    if not requirement.parameter_id:
+                        raise WorkerContractViolation(
+                            "capability_parameter_requirement_id_missing",
+                            f"$.tasks[{index-1}].contracts[{cindex-1}].required_parameters[{pindex}]",
+                        )
+                    if requirement.source_policy not in {"system", "user", "either"}:
+                        raise WorkerContractViolation(
+                            "invalid_requirement_source_policy",
+                            f"$.tasks[{index-1}].contracts[{cindex-1}].required_parameters[{pindex}].source_policy",
+                            requirement.source_policy,
+                        )
+                    if requirement.satisfaction_rule not in {"exists", "non_empty", "one_of"}:
+                        raise WorkerContractViolation(
+                            "invalid_requirement_satisfaction_rule",
+                            f"$.tasks[{index-1}].contracts[{cindex-1}].required_parameters[{pindex}].satisfaction_rule",
+                            requirement.satisfaction_rule,
+                        )
+                    parameter_keys = [requirement.parameter_id, *requirement.satisfy_by]
+                    allowed_parameter_patterns = worker_scope.get("accepted_business_parameter_patterns") or []
+                    unsupported_parameter_keys = sorted({
+                        str(parameter_key)
+                        for parameter_key in parameter_keys
+                        if not slot_matches_patterns(str(parameter_key), allowed_parameter_patterns)
+                    })
+                    if unsupported_parameter_keys:
+                        raise WorkerContractViolation(
+                            "capability_business_parameter_outside_worker_scope",
+                            f"$.tasks[{index-1}].contracts[{cindex-1}].required_parameters[{pindex}]",
+                            ",".join(unsupported_parameter_keys),
+                        )
+                    for parameter_key in parameter_keys:
+                        try:
+                            validate_slot_id(parameter_key)
+                        except Exception as exc:
+                            raise WorkerContractViolation(
+                                "invalid_capability_business_parameter",
+                                f"$.tasks[{index-1}].contracts[{cindex-1}].required_parameters[{pindex}]",
+                                str(parameter_key),
+                            ) from exc
+                        lowered = str(parameter_key).lower()
+                        if lowered in _RUNTIME_OWNED_PARAMETER_NAMES or lowered.endswith("_ref_ids"):
+                            raise WorkerContractViolation(
+                                "runtime_owned_parameter_in_requirement_contract",
+                                f"$.tasks[{index-1}].contracts[{cindex-1}].required_parameters[{pindex}]",
+                                str(parameter_key),
+                            )
                 for slot_id in sorted(input_slots | output_slots):
                     try:
                         validate_slot_id(slot_id)

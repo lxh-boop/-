@@ -26,6 +26,7 @@ class HydratedContext:
     session_id: str
     session_summary: str
     previous_focus_refs: list[GraphRef]
+    typed_focus_refs: dict[str, list[GraphRef]]
     pending_run_ids: list[str]
     pending_proposal_ids: list[str]
     permission_context: dict[str, Any]
@@ -37,6 +38,10 @@ class HydratedContext:
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
         result["previous_focus_refs"] = [item.to_dict() for item in self.previous_focus_refs]
+        result["typed_focus_refs"] = {
+            key: [item.to_dict() for item in refs]
+            for key, refs in self.typed_focus_refs.items()
+        }
         return result
 
 
@@ -81,6 +86,29 @@ class ContextHydrator:
                     audit.append({"slot_id": "previous_focus_entities", "source": "session_state"})
             except Exception:
                 previous_refs = []
+        typed_focus_refs: dict[str, list[GraphRef]] = {}
+        typed_requirements = [
+            item for item in requirements or []
+            if str(item.slot_id or "").startswith("typed_focus:")
+            and item.allow_session_inheritance
+        ]
+        for requirement in typed_requirements:
+            focus_type = str(requirement.slot_id).split(":", 1)[1].strip().lower()
+            if not focus_type:
+                continue
+            try:
+                item = self.session_state.get(session_id, f"typed_graph_focus:{focus_type}")
+                if item is not None:
+                    refs = refs_from(item.value)
+                    if refs:
+                        typed_focus_refs[focus_type] = refs
+                        audit.append({
+                            "slot_id": f"typed_focus:{focus_type}",
+                            "source": "session_state",
+                            "record_count": len(refs),
+                        })
+            except Exception:
+                typed_focus_refs[focus_type] = []
         if not required_ids or "session_summary" in required_ids:
             try:
                 rows = self.session_state.list_latest(session_id, limit=20)
@@ -146,6 +174,7 @@ class ContextHydrator:
             session_id=str(session_id or ""),
             session_summary=summary,
             previous_focus_refs=previous_refs,
+            typed_focus_refs=typed_focus_refs,
             pending_run_ids=pending_runs,
             pending_proposal_ids=pending_proposals,
             permission_context=dict(context.get("permission_context") or {}),

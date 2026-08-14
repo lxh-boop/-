@@ -63,6 +63,34 @@ def _proposal_output_schema() -> dict[str, Any]:
     )
 
 
+def _collect_hard_constraint_breaches(value: Any) -> list[dict[str, Any]]:
+    found: dict[str, dict[str, Any]] = {}
+
+    def visit(item: Any) -> None:
+        if isinstance(item, dict):
+            for key in ("hard_constraint_breaches", "single_position_limit_breaches"):
+                rows = item.get(key)
+                if isinstance(rows, list):
+                    for row in rows:
+                        if not isinstance(row, dict):
+                            continue
+                        security_ref = str(row.get("security_ref") or "").strip()
+                        if security_ref:
+                            found[security_ref] = dict(row)
+            for nested in item.values():
+                visit(nested)
+        elif isinstance(item, list):
+            for nested in item:
+                visit(nested)
+
+    visit(value)
+    return sorted(
+        found.values(),
+        key=lambda item: float(item.get("current_asset_weight") or 0.0),
+        reverse=True,
+    )
+
+
 def run_strategy_guard(
     llm_service: LLMService,
     task: GraphAgentTask,
@@ -84,6 +112,7 @@ def run_strategy_guard(
         if row.get("source_task_ids")
     ]
     safe_dependencies = execution_safe_value(input_envelopes)
+    hard_constraint_breaches = _collect_hard_constraint_breaches(resolved_inputs or {})
     allowed_source_ids = {
         str(source_id)
         for row in input_envelopes
@@ -105,6 +134,28 @@ def run_strategy_guard(
                 raise RuntimeError("proposal_execution_allowed_must_be_false")
             if not isinstance(payload.get("proposal"), dict) or not payload.get("proposal"):
                 raise RuntimeError("proposal_payload_required")
+            if hard_constraint_breaches:
+                responses = payload["proposal"].get("constraint_response")
+                if not isinstance(responses, list):
+                    raise RuntimeError("proposal_constraint_response_required")
+                by_security = {
+                    str(item.get("security_ref") or ""): item
+                    for item in responses if isinstance(item, dict) and str(item.get("security_ref") or "")
+                }
+                for breach in hard_constraint_breaches:
+                    security_ref = str(breach.get("security_ref") or "")
+                    response = by_security.get(security_ref)
+                    if not response:
+                        raise RuntimeError("proposal_constraint_response_missing:" + security_ref)
+                    if str(response.get("action") or "") != "reduce_to_limit":
+                        raise RuntimeError("proposal_constraint_action_invalid:" + security_ref)
+                    try:
+                        target = float(response.get("target_asset_weight"))
+                        limit = float(breach.get("max_allowed_asset_weight"))
+                    except (TypeError, ValueError):
+                        raise RuntimeError("proposal_constraint_target_invalid:" + security_ref)
+                    if target > limit + 1e-12 or target < 0:
+                        raise RuntimeError("proposal_constraint_target_exceeds_limit:" + security_ref)
 
     generation_messages = [
             {
@@ -115,7 +166,11 @@ def run_strategy_guard(
                     "分析、建议和待审批 Proposal 都属于 READ；不得调用写工具，不得保存 Proposal，不得修改账户、"
                     "持仓、策略、画像或配置，不得声称已经执行。只使用 structured_upstream_results 中的事实，"
                     "不得补造证券、持仓、风险、模型信号或约束。proposal_ready 时 requires_approval 必须为 true，"
-                    "execution_allowed 必须为 false。Runtime负责完成度和合同验收。规则只校验结构和引用，业务方案由你依据结构化输入完成。"
+                    "execution_allowed 必须为 false。若 hard_constraint_breaches 非空，这些是确定性的用户硬约束违例："
+                    "proposal 必须包含 constraint_response 数组，逐一覆盖每个 security_ref；每项 action 必须为 reduce_to_limit，"
+                    "target_asset_weight 不得高于 max_allowed_asset_weight。行业数据缺失可以限制新增配置，但不能成为忽略已有硬约束违例的理由。"
+                    "涉及集中度时必须标明 total_assets 或 position_market_value 分母，不得混用 asset_weight 与 invested_weight。"
+                    "Runtime负责完成度和合同验收。规则只校验结构和引用，业务方案由你依据结构化输入完成。"
                     "严格输出 proposal_output_schema 对应的 JSON，不要 Markdown。"
                 ),
             },
@@ -127,6 +182,13 @@ def run_strategy_guard(
                         "task": task.safe_for_coordinator(),
                         "worker_args": safe_public_value(task.args),
                         "structured_input_slots": safe_dependencies,
+                        "hard_constraint_breaches": safe_public_value(hard_constraint_breaches),
+                        "constraint_response_contract": {
+                            "required_when_breaches_exist": True,
+                            "required_fields": ["security_ref", "action", "target_asset_weight"],
+                            "required_action": "reduce_to_limit",
+                            "target_rule": "target_asset_weight <= max_allowed_asset_weight",
+                        },
                         "allowed_source_task_ids": sorted(allowed_source_ids),
                         "proposal_persistence_policy": {
                             "access_mode": "read",
@@ -151,12 +213,14 @@ def run_strategy_guard(
         validator=validate,
         immutable_repair_context={
             "allowed_source_task_ids": sorted(allowed_source_ids),
+            "hard_constraint_breaches": safe_public_value(hard_constraint_breaches),
             "requires_approval": True,
             "execution_allowed": False,
         },
         repair_guidance=(
-            "Only repair JSON shape, source_task_ids, requires_approval and execution_allowed. "
-            "Do not add upstream facts and do not turn the proposal into a write operation."
+            "Repair JSON shape, source_task_ids, approval flags, and constraint_response using only immutable hard_constraint_breaches. "
+            "Every breached security_ref must have action=reduce_to_limit and target_asset_weight <= max_allowed_asset_weight. "
+            "Do not add other upstream facts and do not turn the proposal into a write operation."
         ),
         primary_max_output_tokens=3200,
         repair_max_output_tokens=1800,

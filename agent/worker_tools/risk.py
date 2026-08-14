@@ -60,48 +60,129 @@ def _number(row: dict[str, Any], *keys: str) -> float:
     return 0.0
 
 
+def _security_ref(row: dict[str, Any]) -> str:
+    for key in ("security_ref", "graph_ref", "stock_code", "code", "symbol"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    position_id = str(row.get("position_id") or "").strip()
+    tail = position_id.rsplit("_", 1)[-1] if position_id else ""
+    if len(tail) == 6 and tail.isdigit():
+        return tail
+    return position_id
+
+
+def _root_number(root: dict[str, Any], *keys: str) -> float:
+    value = _number(root, *keys)
+    if value > 0:
+        return value
+    for nested_key in (
+        "account", "account_summary", "cash_state", "portfolio_totals",
+        "account_snapshot", "portfolio_summary",
+    ):
+        nested = root.get(nested_key)
+        if isinstance(nested, dict):
+            value = _number(nested, *keys)
+            if value > 0:
+                return value
+    return 0.0
+
+
+def _user_constraints(root: dict[str, Any]) -> dict[str, Any]:
+    value = root.get("user_constraints")
+    return dict(value) if isinstance(value, dict) else {}
+
+
 def build_risk_tool_definitions() -> list[ToolDefinition]:
     def concentration(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         del context
-        rows = _positions(arguments.get("portfolio_state"))
+        root = _unwrap(arguments.get("portfolio_state"))
+        rows = _positions(root)
         values = [max(0.0, _number(row, "market_value", "position_market_value")) for row in rows]
-        total = sum(values)
-        weights = [value / total for value in values] if total > 0 else []
-        sorted_weights = sorted(weights, reverse=True)
+        position_market_value = sum(values)
+
+        invested_weights = [
+            value / position_market_value for value in values
+        ] if position_market_value > 0 else []
+        sorted_invested_weights = sorted(invested_weights, reverse=True)
+
+        total_assets = max(0.0, _root_number(root, "total_assets", "total_asset", "asset_total"))
+        asset_weights = [value / total_assets for value in values] if total_assets > 0 else []
+        sorted_asset_weights = sorted(asset_weights, reverse=True)
+
+        constraints = _user_constraints(root)
+        max_single_position = max(0.0, _number(constraints, "max_single_position"))
+        breaches: list[dict[str, Any]] = []
+        if total_assets > 0 and max_single_position > 0:
+            for index, row in enumerate(rows):
+                asset_weight = asset_weights[index] if index < len(asset_weights) else 0.0
+                if asset_weight > max_single_position + 1e-12:
+                    breaches.append({
+                        "security_ref": _security_ref(row),
+                        "current_asset_weight": asset_weight,
+                        "max_allowed_asset_weight": max_single_position,
+                        "excess_asset_weight": asset_weight - max_single_position,
+                    })
+            breaches.sort(key=lambda item: float(item["current_asset_weight"]), reverse=True)
+
+        limitations: list[str] = []
+        if max_single_position > 0 and total_assets <= 0:
+            limitations.append("total_assets_missing_for_single_position_constraint")
+
+        metric_basis = {
+            "legacy_weight_fields": "position_market_value",
+            "invested_weight": "position_market_value",
+            "asset_weight": "total_assets",
+            "max_single_position_constraint": "total_assets",
+        }
+        weight_rows = [
+            {
+                "security_ref": _security_ref(row),
+                "weight": invested_weights[index] if index < len(invested_weights) else 0.0,
+                "invested_weight": invested_weights[index] if index < len(invested_weights) else 0.0,
+                "asset_weight": asset_weights[index] if index < len(asset_weights) else None,
+            }
+            for index, row in enumerate(rows)
+        ]
+        facts = {
+            "position_count": len(rows),
+            "position_market_value": position_market_value,
+            "total_assets": total_assets,
+            "largest_position_weight": sorted_invested_weights[0] if sorted_invested_weights else 0.0,
+            "top3_weight": sum(sorted_invested_weights[:3]),
+            "herfindahl_index": sum(weight * weight for weight in invested_weights),
+            "largest_position_invested_weight": sorted_invested_weights[0] if sorted_invested_weights else 0.0,
+            "top3_invested_weight": sum(sorted_invested_weights[:3]),
+            "herfindahl_index_invested": sum(weight * weight for weight in invested_weights),
+            "largest_position_asset_weight": sorted_asset_weights[0] if sorted_asset_weights else 0.0,
+            "top3_asset_weight": sum(sorted_asset_weights[:3]),
+            "invested_asset_ratio": (position_market_value / total_assets if total_assets > 0 else 0.0),
+            "metric_basis": metric_basis,
+            "weights": weight_rows,
+            "max_single_position_limit": max_single_position,
+            "single_position_limit_breach_count": len(breaches),
+            "single_position_limit_breaches": breaches,
+        }
+        source_refs = ["upstream_portfolio_state"]
+        if constraints:
+            source_refs.append("upstream_user_constraints")
         return {
             "success": True,
-            "message": "Portfolio concentration facts calculated.",
+            "message": "Portfolio concentration facts calculated with explicit asset and invested bases.",
             "data": {
-                "position_count": len(rows),
-                "position_market_value": total,
-                "largest_position_weight": sorted_weights[0] if sorted_weights else 0.0,
-                "top3_weight": sum(sorted_weights[:3]),
-                "herfindahl_index": sum(weight * weight for weight in weights),
-                "weights": [
-                    {
-                        "security_ref": str(row.get("security_ref") or row.get("graph_ref") or row.get("stock_code") or ""),
-                        "weight": weights[index] if index < len(weights) else 0.0,
-                    }
-                    for index, row in enumerate(rows)
-                ],
+                **facts,
                 "business_empty": not bool(rows),
                 "risk_fact_fragment": {
                     "fact_type": "concentration",
-                    "facts": {
-                        "position_count": len(rows),
-                        "position_market_value": total,
-                        "largest_position_weight": sorted_weights[0] if sorted_weights else 0.0,
-                        "top3_weight": sum(sorted_weights[:3]),
-                        "herfindahl_index": sum(weight * weight for weight in weights),
-                    },
-                    "source_refs": ["upstream_portfolio_state"],
-                    "limitations": [],
+                    "facts": facts,
+                    "source_refs": source_refs,
+                    "limitations": limitations,
                     "business_empty": not bool(rows),
                 },
             },
-            "warnings": [],
+            "warnings": limitations,
             "errors": [],
-            "sources": [{"source_id": "upstream_portfolio_state"}],
+            "sources": [{"source_id": item} for item in source_refs],
         }
 
     def account_risk(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -239,16 +320,16 @@ def build_risk_tool_definitions() -> list[ToolDefinition]:
             name=RISK_CALCULATE_CONCENTRATION,
             display_name="Calculate Portfolio Concentration",
             description=description(
-                "Calculate concentration metrics from the supplied portfolio snapshot.",
-                "W04 needs position weights, largest-position share, top-three share, or HHI.",
+                "Calculate concentration metrics with explicit invested-capital and total-asset bases and detect hard single-position constraint breaches.",
+                "W04 needs labeled position weights, concentration metrics, or deterministic max_single_position compliance facts.",
                 "Business risk judgment, proposal generation, persistence, or execution.",
                 "A structured upstream portfolio_state.",
                 "Deterministic concentration facts.",
             ),
             input_schema=common_input,
-            output_schema=result_schema(["largest_position_weight", "top3_weight", "herfindahl_index"]),
+            output_schema=result_schema(["largest_position_weight", "top3_weight", "herfindahl_index", "largest_position_asset_weight", "top3_asset_weight", "single_position_limit_breaches"]),
             execution_handler=concentration,
-            produced_outputs=["largest_position_weight", "top3_weight", "herfindahl_index"],
+            produced_outputs=["largest_position_weight", "top3_weight", "herfindahl_index", "largest_position_asset_weight", "top3_asset_weight", "single_position_limit_breaches"],
             input_contracts=[ToolInputContract(slot_id="portfolio_state", required=True)],
             output_contracts=[
                 ToolOutputContract(slot_id="largest_position_weight", source_path="data.largest_position_weight"),

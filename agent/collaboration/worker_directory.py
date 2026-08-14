@@ -145,26 +145,36 @@ _CARDS = {
         short_description="消费本任务已绑定的组合、账户、用户约束等风险相关Slot，计算风险事实并形成风险评估。",
         full_description=(
             "负责基于CapabilityContract实际绑定的权威业务Slot完成集中度、暴露、账户风险事实和约束审查，不修改持仓。"
-            "W04依赖的是本轮所需的信息Slot，而不是固定依赖某个Worker；如果完成风险任务所需的业务Slot没有绑定，"
-            "应向MainAgent上报缺失信息，由MainAgent决定增加上游能力、补充上下文，或在确认属于用户参数时再询问用户。"
+            "W04依赖的是本轮所需的信息Slot，而不是固定依赖某个Worker。普通组合风险分析可消费组合、持仓、账户和用户约束Slot；"
+            "若任务要求评估外部目标标的/事件对组合的影响，应消费CapabilityContract已经绑定的目标分析或impact facts Slot；"
+            "目标配置比例或投入金额等用户决策参数必须由CapabilityContract声明，W04不能自行假设仓位。"
+            "W04不自行判定用户还缺什么参数；Capability Requirement Resolver会在W04执行前统一检查必需Slot和用户业务参数，"
+            "并以结构化Escalation向MainAgent上报缺失信息。"
+            "只有通过Runtime输入充分性检查后的合同才进入W04私有Tool DAG。"
         ),
         supported_boundary_ids=["portfolio.risk_assessment", "context.resolution"],
         delegation_description=(
             "当用户目标需要对已经取得的组合、账户、持仓、用户约束或其他风险相关事实做集中度、暴露和风险边界分析时委派W04。"
-            "W04不负责假设或补造未绑定的业务事实；缺少所需Slot时只向MainAgent报告缺口。"
+            "W04不负责假设或补造未绑定的业务事实；输入充分性由Runtime根据CapabilityContract统一检查。"
         ),
         delegate_when=[
             "需要基于已绑定组合或账户事实计算集中度、暴露或风险边界",
             "需要审查已绑定用户约束与当前组合之间的风险关系",
+            "需要评估已验证目标标的加入当前组合后的风险/集中度影响",
             "下游调仓或方案Worker需要结构化风险分析Slot作为依据",
         ],
-        capability_tags=["risk", "concentration", "exposure", "constraint"],
-        supported_scenarios=["组合集中度分析", "账户风险事实分析", "风险约束审查", "为下游方案提供结构化风险Slot"],
+        capability_tags=["risk", "concentration", "exposure", "constraint", "portfolio_scenario"],
+        supported_scenarios=["组合集中度分析", "账户风险事实分析", "风险约束审查", "目标标的纳入组合的风险情景分析", "为下游方案提供结构化风险Slot"],
         unsupported_scenarios=["读取未绑定的原始业务事实", "订单执行", "持仓写入", "最终调仓Proposal生成"],
-        limitations=["只消费本轮CapabilityContract绑定的业务Slot", "不与任何特定上游Worker ID硬绑定"],
-        escalation_policy="所需业务Slot未绑定或私有Tool无法完成时，先向MainAgent上报缺失信息；W04不直接向用户索取内部业务对象。",
+        limitations=[
+            "只消费本轮CapabilityContract绑定的业务Slot",
+            "外部目标/事件影响分析需要合同绑定已验证的分析或impact facts Slot",
+            "用户决策参数必须由CapabilityContract声明并由Runtime校验，W04不得自行假设",
+            "不与任何特定上游Worker ID硬绑定",
+        ],
+        escalation_policy="Runtime输入充分性检查通过后才执行W04；若私有Tool仍无法完成，则按能力级错误合同上报MainAgent。",
         execution_mode="hybrid",
-        private_worker_prompt="根据风险合同和已绑定Slot选择最小只读Tool DAG，区分风险事实和建议；缺少合同必需Slot时上报MainAgent，不补造输入。",
+        private_worker_prompt="根据已经通过Runtime充分性检查的风险合同和已绑定Slot选择最小只读Tool DAG，区分风险事实和建议；不得补造未绑定输入或用户参数。",
         private_tool_ids=[
             "risk.calculate_concentration", "risk.read_account_risk_facts",
             "risk.summarize_exposure", "risk.finalize_facts",
