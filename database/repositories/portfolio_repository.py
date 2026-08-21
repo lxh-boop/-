@@ -4,7 +4,8 @@ from pathlib import Path
 from typing import Any
 
 from database.schemas import json_dumps, json_loads
-from database.sqlite_store import SQLiteStore
+from database.connection import get_connection
+from database.sqlite_store import SQLiteStore, quote_identifier, run_with_sqlite_lock_retry
 
 
 class PortfolioRepository:
@@ -13,6 +14,35 @@ class PortfolioRepository:
 
     def insert_position(self, record: dict[str, Any]) -> dict[str, Any]:
         return self.store.upsert("portfolio_position", record)
+
+    def replace_positions(self, user_id: str, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        user = str(user_id or "")
+        payloads = [dict(record) for record in records]
+        if any(str(record.get("user_id") or "") != user for record in payloads):
+            raise ValueError("position_owner_mismatch")
+
+        def operation() -> None:
+            conn = get_connection(self.store.db_path)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("DELETE FROM portfolio_position WHERE user_id=?", (user,))
+                for record in payloads:
+                    columns = list(record)
+                    column_sql = ", ".join(quote_identifier(column) for column in columns)
+                    placeholders = ", ".join("?" for _ in columns)
+                    conn.execute(
+                        f"INSERT INTO portfolio_position ({column_sql}) VALUES ({placeholders})",
+                        [record[column] for column in columns],
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        run_with_sqlite_lock_retry(operation)
+        return payloads
 
     def get_position(self, position_id: str) -> dict[str, Any] | None:
         return self.store.get("portfolio_position", {"position_id": position_id})
@@ -40,17 +70,57 @@ class PortfolioRepository:
         return self.store.update("paper_account", {"account_id": account_id}, changes)
 
     def insert_paper_order(self, record: dict[str, Any]) -> dict[str, Any]:
-        payload = dict(record)
-        payload.setdefault("is_paper_trading", 1)
-        payload["resolved_config_json"] = json_dumps(
-            payload.pop("resolved_config", {})
-        )
+        payload = self._paper_order_record(record)
         saved = self.store.upsert("paper_order", payload)
         saved["resolved_config"] = json_loads(
             saved.pop("resolved_config_json", "{}"),
             default={},
         )
         return saved
+
+    @staticmethod
+    def _paper_order_record(record: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(record)
+        payload.setdefault("is_paper_trading", 1)
+        payload["resolved_config_json"] = json_dumps(
+            payload.pop("resolved_config", {})
+        )
+        return payload
+
+    def replace_paper_orders(
+        self,
+        user_id: str,
+        records: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        user = str(user_id or "")
+        payloads = [self._paper_order_record(record) for record in records]
+        if any(str(record.get("user_id") or "") != user for record in payloads):
+            raise ValueError("paper_order_owner_mismatch")
+
+        def operation() -> None:
+            conn = get_connection(self.store.db_path)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("DELETE FROM paper_order WHERE user_id=?", (user,))
+                for record in payloads:
+                    columns = list(record)
+                    column_sql = ", ".join(
+                        quote_identifier(column) for column in columns
+                    )
+                    placeholders = ", ".join("?" for _ in columns)
+                    conn.execute(
+                        f"INSERT INTO paper_order ({column_sql}) VALUES ({placeholders})",
+                        [record[column] for column in columns],
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        run_with_sqlite_lock_retry(operation)
+        return payloads
 
     def get_paper_order(self, order_id: str) -> dict[str, Any] | None:
         return self.store.get("paper_order", {"order_id": order_id})
@@ -212,4 +282,25 @@ class PortfolioRepository:
         row = self.store.get("trading_behavior", {"behavior_id": behavior_id})
         if row:
             row["preferred_industries"] = json_loads(row.get("preferred_industries"), default=[])
+        return row
+
+    def upsert_risk_snapshot(self, record: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(record)
+        payload["report_json"] = json_dumps(payload.pop("report", {}))
+        saved = self.store.upsert("portfolio_risk_snapshot", payload)
+        saved["report"] = json_loads(saved.pop("report_json", "{}"), default={})
+        return saved
+
+    def get_latest_risk_snapshot(self, user_id: str) -> dict[str, Any] | None:
+        rows = self.store.list(
+            "portfolio_risk_snapshot",
+            filters={"user_id": str(user_id)},
+            order_by="as_of_date",
+            descending=True,
+            limit=1,
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        row["report"] = json_loads(row.pop("report_json", "{}"), default={})
         return row

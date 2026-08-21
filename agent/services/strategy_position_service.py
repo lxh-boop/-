@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 from datetime import datetime
@@ -16,6 +15,7 @@ from agent.session.confirmation_manager import (
     validate_confirmation,
 )
 from agent.tools.tool_schemas import ToolPermission, ToolResult
+from database.repositories import PredictionRepository, RecommendationRepository
 from pipelines.paper_trading_pipeline import run_paper_trading_pipeline
 from pipelines.schemas import PipelineContext
 from portfolio.paper_trading_engine import execute_paper_rebalance
@@ -72,21 +72,19 @@ class StrategyPositionService:
 
     def _recommendations(
         self,
+        user_id: str,
         value: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]]:
         if value:
             return [dict(item or {}) for item in value]
-        paths = [
-            self.output_dir
-            / "recommendations"
-            / "final_recommendations_latest.csv",
-            self.output_dir / "ranking_latest.csv",
-        ]
-        for path in paths:
-            if not path.exists() or path.stat().st_size <= 0:
-                continue
-            with path.open("r", encoding="utf-8-sig", newline="") as file:
-                return [dict(row) for row in csv.DictReader(file)]
+        recommendations = RecommendationRepository(self.db_path).list_latest(
+            user_id
+        )
+        if recommendations:
+            return recommendations
+        ranking = PredictionRepository(self.db_path).list_latest_predictions()
+        if ranking:
+            return ranking
         raise ValueError("latest_strategy_recommendations_not_found")
 
     def _state(
@@ -125,7 +123,7 @@ class StrategyPositionService:
                 user_id,
                 account_id,
             )
-            rows = self._recommendations(recommendations)
+            rows = self._recommendations(user_id, recommendations)
         except ValueError as exc:
             return ToolResult(
                 success=False,

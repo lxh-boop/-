@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import csv
 import json
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -48,48 +46,34 @@ def get_active_user_ids(
     db_path: str | Path | None = AGENT_QUANT_DB_PATH,
     output_dir: str | Path = "outputs",
 ) -> list[str]:
+    del output_dir
     users: set[str] = set()
-    try:
-        for profile in UserRepository(db_path).list_user_profiles():
-            user_id = _safe_user_id(profile.get("user_id"))
-            if not user_id:
-                continue
-            is_active = profile.get("is_active", 1)
-            if str(is_active).lower() not in {"0", "false", "no", "inactive"}:
-                users.add(user_id)
-    except Exception:
-        pass
-
-    root = Path(output_dir)
-    for parent in [root / "users", root / "portfolio"]:
-        if parent.exists():
-            for child in parent.iterdir():
-                if child.is_dir() and child.name not in {"history", "shared"}:
-                    users.add(child.name)
+    for profile in UserRepository(db_path).list_user_profiles():
+        user_id = _safe_user_id(profile.get("user_id"))
+        if not user_id:
+            continue
+        is_active = profile.get("is_active", 1)
+        if str(is_active).lower() not in {"0", "false", "no", "inactive"}:
+            users.add(user_id)
     return sorted(users)
 
 
-def _has_real_orders(path: Path) -> bool:
-    if not path.exists() or path.stat().st_size == 0:
-        return False
-    try:
-        with path.open("r", encoding="utf-8-sig", newline="") as file:
-            for row in csv.DictReader(file):
-                action = str(row.get("paper_action") or row.get("action") or "")
-                quantity = float(row.get("quantity") or row.get("order_quantity") or 0.0)
-                if action in {"paper_buy", "paper_sell", "paper_reduce", "buy", "sell"} and quantity > 0:
-                    return True
-    except Exception:
-        return False
-    return False
+def has_existing_orders_for_trade_date(
+    user_id: str,
+    trade_date: str,
+    output_dir: str | Path = "outputs",
+    db_path: str | Path | None = AGENT_QUANT_DB_PATH,
+) -> bool:
+    del output_dir
+    from database.repositories import PortfolioRepository
 
-
-def has_existing_orders_for_trade_date(user_id: str, trade_date: str, output_dir: str | Path = "outputs") -> bool:
-    token = str(trade_date or "").replace("-", "")[:8]
-    if len(token) != 8:
-        return False
-    path = portfolio_user_dir(user_id, output_dir) / "history" / "orders" / f"orders_{token}.csv"
-    return _has_real_orders(path)
+    expected = str(trade_date or "")[:10]
+    return any(
+        str(row.get("trade_date") or "")[:10] == expected
+        and str(row.get("action") or "") in {"buy", "sell"}
+        and float(row.get("quantity") or 0.0) > 0
+        for row in PortfolioRepository(db_path).list_paper_orders(user_id=user_id)
+    )
 
 
 def apply_due_cash_flows_for_user(
@@ -122,19 +106,6 @@ def apply_due_cash_flows_for_user(
     }
 
 
-def _sync_legacy_recommendations(user_id: str, paths: dict[str, str], output_dir: str | Path = "outputs") -> None:
-    root = Path(output_dir)
-    legacy = root / "recommendations"
-    legacy.mkdir(parents=True, exist_ok=True)
-    for key, name in [("latest_csv", "final_recommendations_latest.csv"), ("latest_json", "final_recommendations_latest.json")]:
-        source = paths.get(key)
-        if source and Path(source).exists():
-            shutil.copy2(source, legacy / name)
-    dated = paths.get("dated_csv")
-    if dated and Path(dated).exists():
-        shutil.copy2(dated, legacy / Path(dated).name)
-
-
 def run_user_daily_job(
     user_id: str,
     trade_date: str,
@@ -145,7 +116,6 @@ def run_user_daily_job(
     skip_news: bool = False,
     skip_paper_trading: bool = False,
     force: bool = False,
-    sync_legacy: bool = False,
     job_id: str = "",
     run_id: str = "",
     execution_source: str = "",
@@ -195,10 +165,12 @@ def run_user_daily_job(
         raise RuntimeError(scoring.message)
     result["recommendation_count"] = len(scoring.recommendations)
     result["output_paths"].update({f"recommendations.{k}": str(v) for k, v in scoring.output_paths.items()})
-    if sync_legacy and not dry_run:
-        _sync_legacy_recommendations(user_id, scoring.output_paths, output_dir)
-
-    existing_orders = has_existing_orders_for_trade_date(user_id, trade_date, output_dir)
+    existing_orders = has_existing_orders_for_trade_date(
+        user_id,
+        trade_date,
+        output_dir,
+        db_path,
+    )
     paper = None
     if skip_paper_trading:
         result["warnings"].append("paper trading skipped by scheduler option.")
@@ -225,7 +197,12 @@ def run_user_daily_job(
         eval_dir = user_evaluation_dir(user_id, output_dir)
         try:
             evaluation = evaluate_due_adjustments(as_of_date=trade_date, output_dir=eval_dir)
-            reliability = update_ai_reliability(user_id=user_id, as_of_date=trade_date, output_dir=eval_dir)
+            reliability = update_ai_reliability(
+                user_id=user_id,
+                as_of_date=trade_date,
+                output_dir=eval_dir,
+                db_path=db_path,
+            )
             result["evaluation"] = {
                 "evaluated_count": len(evaluation.get("evaluations", [])),
                 "ai_reliability_weight": reliability.get("ai_reliability_weight"),

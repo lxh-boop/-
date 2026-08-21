@@ -45,6 +45,7 @@ from application.paper_profile_service import (
     load_classic_user_context,
     save_classic_user_context,
 )
+from database.repositories import PredictionRepository
 
 
 class PaperTradingApplicationService:
@@ -66,6 +67,8 @@ class PaperTradingApplicationService:
         output_dir: str | Path,
         db_path: str | Path | None = None,
     ) -> tuple[tuple[str, int, int], ...]:
+        if db_path:
+            return (self.path_cache_version(db_path),)
         root = Path(output_dir) / "portfolio" / str(user_id)
         paths = [
             root / "paper_account_latest.json",
@@ -83,8 +86,6 @@ class PaperTradingApplicationService:
             root / "history" / "orders",
             root / "history" / "positions",
         ]
-        if db_path:
-            paths.append(Path(db_path))
         return tuple(self.path_cache_version(path) for path in paths)
 
     def ai_reliability_cache_version(
@@ -99,11 +100,12 @@ class PaperTradingApplicationService:
         output_dir: str | Path,
         db_path: str | Path | None = None,
     ) -> tuple[tuple[str, int, int], ...]:
+        if db_path:
+            return (self.path_cache_version(db_path),)
         root = Path(output_dir) / "portfolio" / str(user_id)
         return (
             self.path_cache_version(root / "cash_flows.json"),
             self.path_cache_version(root / "paper_cash_flows.json"),
-            self.path_cache_version(db_path) if db_path else ("", 0, 0),
         )
 
     def daily_order_cache_versions(
@@ -128,26 +130,22 @@ class PaperTradingApplicationService:
             self.path_cache_version(root / "paper_positions_latest.csv"),
         )
 
-    def load_latest_ranking(self, output_dir: str | Path) -> pd.DataFrame:
-        return self.read_csv(Path(output_dir) / "ranking_latest.csv")
+    def load_latest_ranking(
+        self,
+        output_dir: str | Path,
+        db_path: str | Path | None = None,
+    ) -> pd.DataFrame:
+        del output_dir
+        return pd.DataFrame(
+            PredictionRepository(db_path).list_latest_predictions()
+        )
 
-    @staticmethod
-    def ranking_exists(output_dir: str | Path) -> bool:
-        return (Path(output_dir) / "ranking_latest.csv").exists()
-
-    @staticmethod
-    def read_csv(path: str | Path) -> pd.DataFrame:
-        file_path = Path(path)
-        if not file_path.exists():
-            return pd.DataFrame()
-        try:
-            return pd.read_csv(
-                file_path,
-                dtype={"stock_code": str, "code": str},
-                encoding="utf-8-sig",
-            )
-        except Exception:
-            return pd.DataFrame()
+    def ranking_exists(
+        self,
+        output_dir: str | Path,
+        db_path: str | Path | None = None,
+    ) -> bool:
+        return not self.load_latest_ranking(output_dir, db_path).empty
 
     @staticmethod
     def execute_tool(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -159,10 +157,6 @@ class PaperTradingApplicationService:
 
 
 paper_trading_service = PaperTradingApplicationService()
-
-
-def read_csv(path: str | Path) -> pd.DataFrame:
-    return paper_trading_service.read_csv(path)
 
 
 def execute_tool(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -207,12 +201,18 @@ def daily_position_cache_versions(
     return paper_trading_service.daily_position_cache_versions(user_id, trade_date, output_dir)
 
 
-def load_latest_ranking(output_dir: str | Path) -> pd.DataFrame:
-    return paper_trading_service.load_latest_ranking(output_dir)
+def load_latest_ranking(
+    output_dir: str | Path,
+    db_path: str | Path | None = None,
+) -> pd.DataFrame:
+    return paper_trading_service.load_latest_ranking(output_dir, db_path)
 
 
-def ranking_exists(output_dir: str | Path) -> bool:
-    return paper_trading_service.ranking_exists(output_dir)
+def ranking_exists(
+    output_dir: str | Path,
+    db_path: str | Path | None = None,
+) -> bool:
+    return paper_trading_service.ranking_exists(output_dir, db_path)
 
 
 __all__ = [
@@ -252,7 +252,6 @@ __all__ = [
     "load_replay_audit_markdown",
     "normalize_trading_permissions",
     "ranking_exists",
-    "read_csv",
     "render_decision_attribution_markdown",
     "run_paper_trading_from_latest",
     "save_classic_user_context",

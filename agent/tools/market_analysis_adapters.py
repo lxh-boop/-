@@ -49,6 +49,7 @@ def market_get_ranking_adapter(args: dict[str, Any], context: dict[str, Any]) ->
         ),
         output_dir=_output_dir(context),
         model_name=args.get("model_name"),
+        db_path=_db_path(context),
     )
 
 
@@ -75,6 +76,7 @@ def market_lookup_stock_adapter(args: dict[str, Any], context: dict[str, Any]) -
         str(args.get("stock_query") or args.get("stock_code") or ""),
         user_id=str(_context_value(args, context, "user_id", "default")),
         output_dir=_output_dir(context),
+        db_path=_db_path(context),
     )
 
 
@@ -100,6 +102,7 @@ def market_signal_summary_adapter(args: dict[str, Any], context: dict[str, Any])
             user_id=str(_context_value(args, context, "user_id", "default")),
             sort_by=str(args.get("sort_by") or "original_rank"),
             include_dataframe=False,
+            db_path=_db_path(context),
         )
     )
 

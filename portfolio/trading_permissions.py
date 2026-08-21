@@ -384,7 +384,23 @@ def user_profile_json_path(
 def load_user_trading_permissions(
     user_id: str,
     output_dir: str | Path = "outputs",
+    db_path: str | Path | None = None,
+    *,
+    use_database: bool = True,
 ) -> dict[str, bool]:
+    if use_database:
+        from database.repositories import UserRepository
+
+        profile = UserRepository(db_path).get_user_profile(
+            str(user_id or "default")
+        )
+        if not profile:
+            return dict(DEFAULT_TRADING_PERMISSIONS)
+        return normalize_trading_permissions(
+            profile.get("trading_permissions")
+        )
+
+    # Explicit offline/import mode only. Live runtime never falls back here.
     path = user_profile_json_path(
         user_id,
         output_dir,

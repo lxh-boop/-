@@ -1,4 +1,5 @@
 import json
+import pytest
 
 from application.paper_profile_service import load_classic_user_context, save_classic_user_context, user_output_dir
 from database.repositories import UserRepository
@@ -48,24 +49,19 @@ def test_user_profile_writes_database_and_fallback_json(tmp_path) -> None:
     assert json.loads(fallback.read_text(encoding="utf-8"))["nickname"] == "tester"
 
 
-def test_user_profile_falls_back_when_database_unavailable(tmp_path) -> None:
+def test_user_profile_database_failure_is_explicit(tmp_path) -> None:
     class BrokenRepository:
         def __init__(self, db_path):
             raise RuntimeError("db down")
 
-    result = save_classic_user_context(
-        _form("fallback_user"),
-        db_path=tmp_path / "missing" / "db.sqlite",
-        output_dir=tmp_path / "outputs",
-        repository_factory=BrokenRepository,
-    )
-
-    assert result["status"] == "fallback"
-    loaded = load_classic_user_context(
-        "fallback_user",
-        db_path=tmp_path / "missing" / "db.sqlite",
-        output_dir=tmp_path / "outputs",
-        repository_factory=BrokenRepository,
-    )
-    assert loaded["user_id"] == "fallback_user"
-    assert loaded["available_capital"] == 123456
+    with pytest.raises(RuntimeError, match="db down"):
+        save_classic_user_context(
+            _form("fallback_user"),
+            db_path=tmp_path / "missing" / "db.sqlite",
+            output_dir=tmp_path / "outputs",
+            repository_factory=BrokenRepository,
+        )
+    assert not (
+        user_output_dir("fallback_user", tmp_path / "outputs")
+        / "user_profile.json"
+    ).exists()

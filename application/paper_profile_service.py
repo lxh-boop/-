@@ -83,16 +83,6 @@ CLASSIC_DISPLAY_RENAME = {
 }
 
 
-def _read_csv_if_exists(path):
-    path = Path(path)
-    if not path.exists():
-        return pd.DataFrame()
-    try:
-        return pd.read_csv(path, dtype={"code": str})
-    except Exception:
-        return pd.DataFrame()
-
-
 def _canonical_ranking(ranking):
     if ranking is None or ranking.empty:
         return ranking
@@ -130,7 +120,13 @@ def format_classic_ranking_for_display(df):
 
 
 
-def load_classic_ranking_with_ai_adjustment(output_dir=".", ranking_path=None, recommendations_path=None, sort_by="original_rank"):
+def load_classic_ranking_with_ai_adjustment(
+    output_dir=".",
+    ranking_path=None,
+    recommendations_path=None,
+    sort_by="original_rank",
+    db_path=AGENT_QUANT_DB_PATH,
+):
     from agent.services.market_analysis_service import market_analysis_service
 
     result = market_analysis_service.get_signal_summary(
@@ -139,6 +135,7 @@ def load_classic_ranking_with_ai_adjustment(output_dir=".", ranking_path=None, r
         recommendations_path=recommendations_path,
         sort_by=sort_by,
         include_dataframe=True,
+        db_path=db_path,
     )
     frame = (result.get("data") or {}).get("dataframe")
     if isinstance(frame, pd.DataFrame):
@@ -171,16 +168,14 @@ def build_ai_adjustment_detail(row):
 
 
 
-def load_current_ai_reliability_state(user_id, output_dir="."):
-    import json
-    state_path = Path(output_dir) / "portfolio" / str(user_id) / "ai_reliability_state.json"
-    if state_path.exists():
-        try:
-            with open(state_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {"user_id": user_id, "ai_reliability_weight": 0.0, "adjustment_count": 0, "is_cold_start": True}
+def load_current_ai_reliability_state(
+    user_id,
+    output_dir=".",
+    db_path=None,
+):
+    from evaluation.evaluation_store import load_ai_reliability_state
+
+    return load_ai_reliability_state(user_id, output_dir, db_path)
 
 
 
@@ -303,6 +298,7 @@ def _parse_percent(value, default=0.0):
 def _classic_profile_payload(form: dict) -> dict:
     return {
         "user_id": str(form.get("user_id") or "default"),
+        "profile_type": form.get("profile_type") or "稳健型",
         "nickname": form.get("nickname", ""),
         "age_range": form.get("age_range", ""),
         "income_level": form.get("income_level", ""),
@@ -310,11 +306,14 @@ def _classic_profile_payload(form: dict) -> dict:
         "available_capital": float(form.get("available_capital") or form.get("initial_capital") or 0.0),
         "investment_experience": form.get("investment_experience", ""),
         "liquidity_need": form.get("liquidity_need", ""),
+        "trading_permissions": normalize_trading_permissions(
+            form.get("trading_permissions")
+        ),
     }
 
 
 def save_classic_user_context(form, db_path=None, output_dir=".", repository_factory=None):
-    """Save classic user context to database and a user-scoped JSON fallback."""
+    """Save user context to the database, then emit an offline file mirror."""
     import json
     from datetime import datetime
     from database.repositories import UserRepository
@@ -331,61 +330,58 @@ def save_classic_user_context(form, db_path=None, output_dir=".", repository_fac
         data.get("trading_permissions")
     )
 
-    root = user_output_dir(user_id, output_dir)
-    root.mkdir(parents=True, exist_ok=True)
-    fallback_path = root / "user_profile.json"
-    fallback_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
     repository_factory = repository_factory or UserRepository
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        repo = repository_factory(db_path)
-        repo.insert_user_profile(_classic_profile_payload(data))
-        repo.insert_risk_assessment(
-            {
-                "assessment_id": f"risk_{user_id}",
-                "user_id": user_id,
-                "risk_score": _parse_percent(data.get("risk_score"), 0.0),
-                "risk_level": data.get("risk_level", ""),
-                "max_drawdown_tolerance": _parse_percent(data.get("max_drawdown_tolerance"), 0.0),
-                "single_loss_tolerance": _parse_percent(data.get("single_loss_tolerance"), 0.0),
-                "volatility_tolerance": data.get("volatility_tolerance", ""),
-                "investment_horizon": data.get("investment_horizon", ""),
-                "questionnaire_version": "classic_v1",
-                "assessment_time": now,
-                "is_valid": 1,
-            }
-        )
-        repo.insert_investment_goal(
-            {
-                "goal_id": f"goal_{user_id}",
-                "user_id": user_id,
-                "goal_type": data.get("goal_type", ""),
-                "target_return": _parse_percent(data.get("target_return"), 0.0),
-                "target_period": data.get("target_period", ""),
-                "priority": data.get("priority", ""),
-                "capital_usage": data.get("capital_usage", ""),
-            }
-        )
-        repo.insert_trading_behavior(
-            {
-                "behavior_id": f"behavior_{user_id}",
-                "user_id": user_id,
-                "avg_holding_days": float(data.get("avg_holding_days") or 0.0),
-                "turnover_rate": float(data.get("turnover_rate") or 0.0),
-                "avg_position_size": float(data.get("avg_position_size") or 0.0),
-                "preferred_industries": json.dumps(data.get("preferred_industries") or [], ensure_ascii=False),
-                "avoided_industries": json.dumps(data.get("avoided_industries") or [], ensure_ascii=False),
-                "stop_loss_behavior": data.get("stop_loss_behavior", ""),
-                "max_historical_loss": _parse_percent(data.get("max_historical_loss"), 0.0),
-                "holding_period_preference": data.get("holding_period_preference", ""),
-                "allow_high_volatility": int(bool(data.get("allow_high_volatility", False))),
-                "trading_style": data.get("trading_style", ""),
-            }
-        )
-        return {"status": "database", "path": str(fallback_path)}
-    except Exception as exc:
-        return {"status": "fallback", "path": str(fallback_path), "error": str(exc)}
+    repo = repository_factory(db_path)
+    repo.insert_user_profile(_classic_profile_payload(data))
+    repo.insert_risk_assessment(
+        {
+            "assessment_id": f"risk_{user_id}",
+            "user_id": user_id,
+            "risk_score": _parse_percent(data.get("risk_score"), 0.0),
+            "risk_level": data.get("risk_level", ""),
+            "max_drawdown_tolerance": _parse_percent(data.get("max_drawdown_tolerance"), 0.0),
+            "single_loss_tolerance": _parse_percent(data.get("single_loss_tolerance"), 0.0),
+            "volatility_tolerance": data.get("volatility_tolerance", ""),
+            "investment_horizon": data.get("investment_horizon", ""),
+            "questionnaire_version": "classic_v1",
+            "assessment_time": now,
+            "is_valid": 1,
+        }
+    )
+    repo.insert_investment_goal(
+        {
+            "goal_id": f"goal_{user_id}",
+            "user_id": user_id,
+            "goal_type": data.get("goal_type", ""),
+            "target_return": _parse_percent(data.get("target_return"), 0.0),
+            "target_period": data.get("target_period", ""),
+            "priority": data.get("priority", ""),
+            "capital_usage": data.get("capital_usage", ""),
+        }
+    )
+    repo.insert_trading_behavior(
+        {
+            "behavior_id": f"behavior_{user_id}",
+            "user_id": user_id,
+            "avg_holding_days": float(data.get("avg_holding_days") or 0.0),
+            "turnover_rate": float(data.get("turnover_rate") or 0.0),
+            "avg_position_size": float(data.get("avg_position_size") or 0.0),
+            "preferred_industries": json.dumps(data.get("preferred_industries") or [], ensure_ascii=False),
+            "avoided_industries": json.dumps(data.get("avoided_industries") or [], ensure_ascii=False),
+            "stop_loss_behavior": data.get("stop_loss_behavior", ""),
+            "max_historical_loss": _parse_percent(data.get("max_historical_loss"), 0.0),
+            "holding_period_preference": data.get("holding_period_preference", ""),
+            "allow_high_volatility": int(bool(data.get("allow_high_volatility", False))),
+            "trading_style": data.get("trading_style", ""),
+        }
+    )
+
+    root = user_output_dir(user_id, output_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    mirror_path = root / "user_profile.json"
+    mirror_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"status": "database", "path": str(mirror_path)}
 
 
 def load_classic_user_context(
@@ -503,4 +499,3 @@ def get_classic_user_profile_form_options():
         "avoided_industries": ["ST股票", "高杠杆行业", "高波动题材", "退市风险"],
         "trading_style": ["保守", "稳健", "积极", "激进"],
     }
-

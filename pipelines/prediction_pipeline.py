@@ -52,11 +52,20 @@ def run_prediction_pipeline(
     rows: list[dict[str, Any]] = []
     source = ""
 
-    if path.exists():
+    if ranking_path is not None:
+        if not path.exists():
+            return PredictionPipelineResult(
+                status=PipelineStatus.FAILED,
+                message="Explicit offline ranking file is missing.",
+                input_count=0,
+                output_count=0,
+                errors=[f"missing offline ranking file: {path}"],
+                predictions=[],
+                source=str(path),
+            )
         rows = _read_csv(path)
         source = str(path)
     else:
-        warnings.append(f"ranking file not found: {path}")
         try:
             rows = _from_database(context)
             source = "database.model_prediction"
@@ -66,11 +75,11 @@ def run_prediction_pipeline(
     if not rows:
         return PredictionPipelineResult(
             status=PipelineStatus.FAILED,
-            message="No model predictions available. Expected ranking_latest.csv or database.model_prediction records.",
+            message="No model predictions are available in database.model_prediction.",
             input_count=0,
             output_count=0,
             output_paths={},
-            errors=errors or [f"missing ranking file: {path}"],
+            errors=errors or ["database.model_prediction is empty"],
             warnings=warnings,
             predictions=[],
             source=source,
@@ -113,7 +122,7 @@ def run_prediction_pipeline(
     limit = 15 if fixed_top15 else max(1, int(context.top_k))
     predictions = [_to_prediction(row, total) for row in rows[:limit]]
     actual_trade_dates = [item.trade_date for item in predictions if item.trade_date]
-    output_paths = {"ranking": str(path)} if path.exists() else {}
+    output_paths = {"ranking": str(path)} if ranking_path is not None else {}
     return PredictionPipelineResult(
         status=PipelineStatus.SUCCESS,
         message=f"Loaded {len(predictions)} model predictions.",

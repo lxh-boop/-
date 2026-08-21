@@ -43,7 +43,7 @@ POSITION_SNAPSHOT_FIELDNAMES = [
 
 
 class PortfolioStorage:
-    """Database-first storage with local paper-trading fallback files."""
+    """Database-authoritative live storage with explicit file-only offline mode."""
 
     def __init__(
         self,
@@ -128,60 +128,47 @@ class PortfolioStorage:
         return action()
 
     def save_account(self, account: PaperAccount) -> dict[str, Any]:
-        try:
-            record = self._try_database(lambda: self.repo.insert_paper_account(account.to_dict()))
-            self._ensure_output_dir()
-            self.account_path.write_text(
-                json.dumps(account.to_dict(), ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            self.account_latest_path.write_text(
-                json.dumps(account.to_dict(), ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            return record
-        except Exception:
-            self._ensure_output_dir()
-            self.account_path.write_text(
-                json.dumps(account.to_dict(), ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            self.account_latest_path.write_text(
-                json.dumps(account.to_dict(), ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            return account.to_dict()
+        record = (
+            self.repo.insert_paper_account(account.to_dict())
+            if self.use_database
+            else account.to_dict()
+        )
+        self._ensure_output_dir()
+        payload = json.dumps(account.to_dict(), ensure_ascii=False, indent=2)
+        self.account_path.write_text(payload, encoding="utf-8")
+        self.account_latest_path.write_text(payload, encoding="utf-8")
+        return record
 
     def load_account(self, account_id: str | None = None) -> PaperAccount | None:
+        if self.use_database:
+            if not account_id:
+                raise ValueError("account_id_required_for_database_authority")
+            row = self.repo.get_paper_account(account_id)
+            return account_from_dict(row) if row else None
         for path in [self.account_latest_path, self.account_path]:
             if path.exists():
                 return account_from_dict(json.loads(path.read_text(encoding="utf-8")))
-        if account_id:
-            try:
-                row = self._try_database(lambda: self.repo.get_paper_account(account_id))
-                if row:
-                    return account_from_dict(row)
-            except Exception:
-                pass
         return None
 
     def save_positions(self, positions: list[PaperPosition]) -> list[dict[str, Any]]:
         records = [position.to_dict() for position in positions]
-        try:
-            saved = self._try_database(
-                lambda: [self.repo.insert_position(position.to_database_record()) for position in positions]
+        saved = (
+            self.repo.replace_positions(
+                str(positions[0].user_id if positions else self.output_dir.name),
+                [position.to_database_record() for position in positions],
             )
-            self._ensure_output_dir()
-            self._write_csv(self.positions_path, records)
-            self._write_csv(self.positions_latest_path, records)
-            return saved
-        except Exception:
-            self._ensure_output_dir()
-            self._write_csv(self.positions_path, records)
-            self._write_csv(self.positions_latest_path, records)
-            return records
+            if self.use_database
+            else records
+        )
+        self._ensure_output_dir()
+        self._write_csv(self.positions_path, records)
+        self._write_csv(self.positions_latest_path, records)
+        return saved
 
     def load_positions(self, user_id: str | None = None) -> list[PaperPosition]:
+        if self.use_database:
+            rows = self.repo.list_positions(user_id)
+            return [self._position_from_record(row) for row in rows]
         local_path = self.positions_latest_path if self.positions_latest_path.exists() else self.positions_path
         if local_path.exists():
             with local_path.open("r", encoding="utf-8-sig", newline="") as file:
@@ -189,12 +176,6 @@ class PortfolioStorage:
             if user_id:
                 rows = [row for row in rows if row.get("user_id") == user_id]
             return [self._position_from_record(row) for row in rows]
-        try:
-            rows = self._try_database(lambda: self.repo.list_positions(user_id))
-            if rows:
-                return [self._position_from_record(row) for row in rows]
-        except Exception:
-            pass
         return []
 
     def _position_snapshot_records(
@@ -288,37 +269,29 @@ class PortfolioStorage:
         else:
             record = dict(settings)
         record.setdefault("settings_id", f"paper_trading_settings_{record.get('user_id') or self.output_dir.name}_default")
-        try:
-            saved = self._try_database(lambda: self.repo.upsert_trading_settings(record))
-        except Exception:
-            saved = record
+        saved = self.repo.upsert_trading_settings(record) if self.use_database else record
         self._ensure_output_dir()
         self.trading_settings_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
         return saved
 
     def load_trading_settings(self, user_id: str | None = None) -> TradingCostConfig:
         user = user_id or self.output_dir.name or "default"
+        if self.use_database:
+            row = self.repo.get_trading_settings(user)
+            return cost_config_from_dict(row, user) if row else default_trading_cost_config(user)
         if self.trading_settings_path.exists():
             try:
                 return cost_config_from_dict(json.loads(self.trading_settings_path.read_text(encoding="utf-8")), user)
             except Exception:
                 pass
-        try:
-            row = self._try_database(lambda: self.repo.get_trading_settings(user))
-            if row:
-                return cost_config_from_dict(row, user)
-        except Exception:
-            pass
         return default_trading_cost_config(user)
 
     def save_nav_record(self, record: dict[str, Any] | PaperNavRecord) -> dict[str, Any]:
         payload = record.to_dict() if hasattr(record, "to_dict") else dict(record)
         payload.setdefault("composite_nav", payload.get("nav", 1.0))
         payload.setdefault("nav", payload.get("composite_nav", 1.0))
-        try:
-            self._try_database(lambda: self.repo.insert_nav_record(payload))
-        except Exception:
-            pass
+        if self.use_database:
+            self.repo.insert_nav_record(payload)
         self._ensure_output_dir()
         existing = []
         if self.nav_latest_path.exists():
@@ -333,6 +306,11 @@ class PortfolioStorage:
         return payload
 
     def load_nav_history(self, user_id: str | None = None) -> list[dict[str, Any]]:
+        if self.use_database:
+            rows = self.repo.list_nav_history(user_id)
+            for row in rows:
+                row.setdefault("composite_nav", row.get("nav", 1.0))
+            return rows
         if self.nav_latest_path.exists():
             with self.nav_latest_path.open("r", encoding="utf-8-sig", newline="") as file:
                 rows = list(csv.DictReader(file))
@@ -341,13 +319,7 @@ class PortfolioStorage:
             for row in rows:
                 row.setdefault("composite_nav", row.get("nav", "1.0"))
             return rows
-        try:
-            rows = self._try_database(lambda: self.repo.list_nav_history(user_id))
-            for row in rows:
-                row.setdefault("composite_nav", row.get("nav", 1.0))
-            return rows
-        except Exception:
-            return []
+        return []
 
     def save_orders(self, orders: list[PaperOrder]) -> list[dict[str, Any]]:
         records = [
@@ -358,33 +330,27 @@ class PortfolioStorage:
             and float(order.quantity or 0.0) > 0
             and float(order.executed_price or 0.0) > 0
         ]
-        try:
-            saved = self._try_database(lambda: [self.repo.insert_paper_order(record) for record in records])
-            self._ensure_output_dir()
-            existing = []
-            if self.orders_path.exists():
-                with self.orders_path.open("r", encoding="utf-8-sig", newline="") as file:
-                    existing = list(csv.DictReader(file))
-            by_id = {row.get("order_id"): row for row in existing if row.get("order_id")}
-            for record in records:
-                by_id[record["order_id"]] = {key: str(value) for key, value in record.items()}
-            self._write_csv(self.orders_path, list(by_id.values()))
-            self._write_csv(self.orders_latest_path, records)
-            return saved
-        except Exception:
-            self._ensure_output_dir()
-            existing = []
-            if self.orders_path.exists():
-                with self.orders_path.open("r", encoding="utf-8-sig", newline="") as file:
-                    existing = list(csv.DictReader(file))
-            by_id = {row.get("order_id"): row for row in existing if row.get("order_id")}
-            for record in records:
-                by_id[record["order_id"]] = {key: str(value) for key, value in record.items()}
-            self._write_csv(self.orders_path, list(by_id.values()))
-            self._write_csv(self.orders_latest_path, records)
-            return records
+        saved = (
+            [self.repo.insert_paper_order(record) for record in records]
+            if self.use_database
+            else records
+        )
+        self._ensure_output_dir()
+        existing = []
+        if self.orders_path.exists():
+            with self.orders_path.open("r", encoding="utf-8-sig", newline="") as file:
+                existing = list(csv.DictReader(file))
+        by_id = {row.get("order_id"): row for row in existing if row.get("order_id")}
+        for record in records:
+            by_id[record["order_id"]] = {key: str(value) for key, value in record.items()}
+        self._write_csv(self.orders_path, list(by_id.values()))
+        self._write_csv(self.orders_latest_path, records)
+        return saved
 
     def load_orders(self, user_id: str | None = None, account_id: str | None = None) -> list[PaperOrder]:
+        if self.use_database:
+            rows = self.repo.list_paper_orders(user_id=user_id, account_id=account_id)
+            return [self._order_from_record(row) for row in rows]
         local_path = self.orders_latest_path if self.orders_latest_path.exists() else self.orders_path
         if local_path.exists():
             with local_path.open("r", encoding="utf-8-sig", newline="") as file:
@@ -394,15 +360,23 @@ class PortfolioStorage:
             if account_id:
                 rows = [row for row in rows if row.get("account_id") == account_id]
             return [self._order_from_record(row) for row in rows]
-        try:
-            rows = self._try_database(lambda: self.repo.list_paper_orders(user_id=user_id, account_id=account_id))
-            if rows:
-                return [self._order_from_record(row) for row in rows]
-        except Exception:
-            pass
         return []
 
     def save_risk_report(self, report: PortfolioRiskReport) -> Path:
+        if self.use_database:
+            now = datetime.now().isoformat(timespec="seconds")
+            as_of_date = now[:10]
+            self.repo.upsert_risk_snapshot(
+                {
+                    "risk_snapshot_id": f"portfolio_risk_{report.user_id}_{as_of_date.replace('-', '')}",
+                    "user_id": report.user_id,
+                    "account_id": f"paper_{report.user_id}",
+                    "as_of_date": as_of_date,
+                    "report": report.to_dict(),
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
         self._ensure_output_dir()
         self.risk_report_path.write_text(
             json.dumps(report.to_dict(), ensure_ascii=False, indent=2),
@@ -422,10 +396,8 @@ class PortfolioStorage:
     ) -> dict[str, Path]:
         self._ensure_output_dir()
         for record in decisions:
-            try:
-                self._try_database(lambda record=record: self.repo.insert_paper_decision(record))
-            except Exception:
-                pass
+            if self.use_database:
+                self.repo.insert_paper_decision(record)
         payload = json.dumps(decisions, ensure_ascii=False, indent=2)
         self.decisions_latest_path.write_text(payload, encoding="utf-8")
         dated = self.output_dir / "history" / "decisions" / f"ai_paper_decisions_{self._latest_date_token(trade_date)}.json"
@@ -556,14 +528,10 @@ class PortfolioStorage:
                     strategy_metadata.get("resolved_config") or {}
                 ),
             }
-            try:
-                self._try_database(
-                    lambda: self.repo.insert_account_snapshot(
-                        snapshot_record
-                    )
+            if self.use_database:
+                self.repo.insert_account_snapshot(
+                    snapshot_record
                 )
-            except Exception:
-                pass
             account_payload = json.dumps(account_record, ensure_ascii=False, indent=2)
             dated_account = self.output_dir / "history" / "accounts" / f"account_{self._latest_date_token(trade_date)}.json"
             account_path = self._history_path("accounts", "account", trade_date, f"{decision_time}.json")
@@ -645,56 +613,49 @@ class PortfolioStorage:
             "execution_history_id",
             f"strategy_execution_{identity}",
         )
-        try:
-            return self._try_database(
-                lambda: self.repo.insert_strategy_execution_history(
-                    payload
-                )
-            )
-        except Exception:
-            history_path = self._history_path(
-                "strategy",
-                "strategy_execution",
-                str(payload.get("trade_date") or ""),
-                f"{payload.get('run_id') or 'run'}.json",
-            )
-            history_path.parent.mkdir(parents=True, exist_ok=True)
-            history_path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            return payload
+        if self.use_database:
+            return self.repo.insert_strategy_execution_history(payload)
+        history_path = self._history_path(
+            "strategy",
+            "strategy_execution",
+            str(payload.get("trade_date") or ""),
+            f"{payload.get('run_id') or 'run'}.json",
+        )
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        history_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return payload
 
     def list_strategy_execution_history(
         self,
         user_id: str,
         account_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        try:
-            return self._try_database(
-                lambda: self.repo.list_strategy_execution_history(
-                    user_id,
-                    account_id,
-                )
+        if self.use_database:
+            return self.repo.list_strategy_execution_history(
+                user_id,
+                account_id,
             )
-        except Exception:
-            root = self.output_dir / "history" / "strategy"
-            rows: list[dict[str, Any]] = []
-            for path in sorted(root.glob("strategy_execution_*.json")):
-                try:
-                    row = json.loads(path.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
-                if str(row.get("user_id") or "") != str(user_id):
-                    continue
-                if account_id and str(row.get("account_id") or "") != str(
-                    account_id
-                ):
-                    continue
-                rows.append(row)
-            return rows
+        root = self.output_dir / "history" / "strategy"
+        rows: list[dict[str, Any]] = []
+        for path in sorted(root.glob("strategy_execution_*.json")):
+            try:
+                row = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if str(row.get("user_id") or "") != str(user_id):
+                continue
+            if account_id and str(row.get("account_id") or "") != str(account_id):
+                continue
+            rows.append(row)
+        return rows
 
     def load_risk_report(self) -> dict[str, Any] | None:
+        if self.use_database:
+            row = self.repo.get_latest_risk_snapshot(self.output_dir.name or "default")
+            return dict(row.get("report") or {}) if row else None
         if not self.risk_report_path.exists():
             return None
         return json.loads(self.risk_report_path.read_text(encoding="utf-8"))

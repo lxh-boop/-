@@ -130,12 +130,8 @@ def list_cash_flows(
     use_database: bool = True,
 ) -> list[PaperCashFlow]:
     if use_database:
-        try:
-            rows = PortfolioRepository(db_path).list_cash_flows(user_id)
-            if rows:
-                return [cash_flow_from_dict(row) for row in rows]
-        except Exception:
-            pass
+        rows = PortfolioRepository(db_path).list_cash_flows(user_id)
+        return [cash_flow_from_dict(row) for row in rows]
     return _read_local_flows(user_id, output_dir)
 
 
@@ -146,10 +142,7 @@ def save_cash_flow(
     use_database: bool = True,
 ) -> PaperCashFlow:
     if use_database:
-        try:
-            PortfolioRepository(db_path).insert_cash_flow(flow.to_dict())
-        except Exception:
-            pass
+        PortfolioRepository(db_path).insert_cash_flow(flow.to_dict())
     flows = [item for item in _read_local_flows(flow.user_id, output_dir) if item.cash_flow_id != flow.cash_flow_id]
     if flow.idempotency_key:
         flows = [item for item in flows if item.idempotency_key != flow.idempotency_key]
@@ -208,13 +201,10 @@ def update_cash_flow_status(
         }
     )
     if use_database:
-        try:
-            PortfolioRepository(db_path).update_cash_flow(
-                flow.cash_flow_id,
-                {"status": updated.status, "applied_at": updated.applied_at},
-            )
-        except Exception:
-            pass
+        PortfolioRepository(db_path).update_cash_flow(
+            flow.cash_flow_id,
+            {"status": updated.status, "applied_at": updated.applied_at},
+        )
     flows = [item for item in _read_local_flows(flow.user_id, output_dir) if item.cash_flow_id != flow.cash_flow_id]
     flows.append(updated)
     _write_local_flows(flows, flow.user_id, output_dir)
@@ -231,6 +221,9 @@ def cancel_cash_flow(
     flows: list[PaperCashFlow] = []
     if user_id:
         flows = list_cash_flows(user_id, db_path=db_path, output_dir=output_dir, use_database=use_database)
+    elif use_database:
+        row = PortfolioRepository(db_path).get_cash_flow(cash_flow_id)
+        flows = [cash_flow_from_dict(row)] if row else []
     else:
         root = Path(output_dir) / "portfolio"
         for child in root.iterdir() if root.exists() else []:

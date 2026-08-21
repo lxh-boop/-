@@ -7,7 +7,6 @@ from typing import Any
 import pandas as pd
 
 from agent.tools._common import (
-    dataframe_records,
     first_present,
     latest_trade_date,
     normalize_stock_code as _normalize_stock_code,
@@ -15,6 +14,10 @@ from agent.tools._common import (
 )
 from agent.top_k import DEFAULT_TOOL_TOP_K, resolve_requested_top_k
 from agent.tools.tool_schemas import ToolPermission, ToolResult
+from database.repositories import (
+    PredictionRepository as DatabasePredictionRepository,
+    RecommendationRepository as DatabaseRecommendationRepository,
+)
 
 
 CLASSIC_AI_COLUMNS = [
@@ -71,18 +74,6 @@ def _records_from_df(df: pd.DataFrame) -> list[dict[str, Any]]:
     ]
 
 
-def _read_csv_if_exists(path: str | Path, *, nrows: int | None = None) -> pd.DataFrame:
-    path = Path(path)
-    if not path.exists() or path.stat().st_size == 0:
-        return pd.DataFrame()
-    try:
-        return pd.read_csv(path, dtype={"code": str}, encoding="utf-8-sig", nrows=nrows)
-    except UnicodeDecodeError:
-        return pd.read_csv(path, dtype={"code": str}, nrows=nrows)
-    except Exception:
-        return pd.DataFrame()
-
-
 def _row_code(row: dict[str, Any]) -> str:
     return _normalize_stock_code(first_present(row, ["stock_code", "code", "ts_code"], ""))
 
@@ -106,8 +97,20 @@ def _find_stock_row(records: list[dict[str, Any]], stock_query: str) -> dict[str
 
 
 class RankingRepository:
+    def __init__(self, db_path: str | Path | None = None) -> None:
+        self.db_path = db_path
+
+    def _predictions(self, db_path: str | Path | None = None) -> DatabasePredictionRepository:
+        return DatabasePredictionRepository(db_path if db_path is not None else self.db_path)
+
+    def _recommendations(self, db_path: str | Path | None = None) -> DatabaseRecommendationRepository:
+        return DatabaseRecommendationRepository(db_path if db_path is not None else self.db_path)
+
     def ranking_path(self, output_dir: str | Path = "outputs", ranking_path: str | Path | None = None) -> Path:
-        return Path(ranking_path) if ranking_path else Path(output_dir) / "ranking_latest.csv"
+        del output_dir
+        if ranking_path:
+            raise RuntimeError("runtime_csv_source_disabled:ranking")
+        return Path("database") / "model_prediction"
 
     def recommendation_paths(
         self,
@@ -115,14 +118,10 @@ class RankingRepository:
         output_dir: str | Path = "outputs",
         recommendations_path: str | Path | None = None,
     ) -> list[Path]:
+        del user_id, output_dir
         if recommendations_path:
-            return [Path(recommendations_path)]
-        root = Path(output_dir)
-        return [
-            root / "users" / str(user_id) / "recommendations" / "final_recommendations_latest.csv",
-            root / "recommendations" / "final_recommendations_latest.csv",
-            root / "final_recommendations_latest.csv",
-        ]
+            raise RuntimeError("runtime_csv_source_disabled:recommendations")
+        return [Path("database") / "portfolio_recommendation_result"]
 
     def load_latest_ranking(
         self,
@@ -130,11 +129,13 @@ class RankingRepository:
         *,
         ranking_path: str | Path | None = None,
         limit: int | None = None,
+        db_path: str | Path | None = None,
+        model_name: str | None = None,
     ) -> list[dict[str, Any]]:
-        path = self.ranking_path(output_dir, ranking_path)
-        if limit is None:
-            return dataframe_records(path)
-        return _records_from_df(_read_csv_if_exists(path, nrows=max(0, int(limit))))
+        self.ranking_path(output_dir, ranking_path)
+        return self._predictions(db_path).list_latest_predictions(
+            limit=limit, model_name=model_name
+        )
 
     def load_latest_recommendations(
         self,
@@ -142,28 +143,21 @@ class RankingRepository:
         output_dir: str | Path = "outputs",
         *,
         recommendations_path: str | Path | None = None,
+        db_path: str | Path | None = None,
     ) -> list[dict[str, Any]]:
-        seen: set[str] = set()
-        records: list[dict[str, Any]] = []
-        for path in self.recommendation_paths(user_id, output_dir, recommendations_path):
-            for row in dataframe_records(path):
-                code = _row_code(row)
-                key = f"{path}:{code}:{first_present(row, ['trade_date', 'date'], '')}"
-                if key in seen:
-                    continue
-                seen.add(key)
-                records.append(row)
-            if records:
-                break
-        return records
+        self.recommendation_paths(user_id, output_dir, recommendations_path)
+        return self._recommendations(db_path).list_latest(user_id)
 
     def load_ranking_frame(
         self,
         output_dir: str | Path = "outputs",
         *,
         ranking_path: str | Path | None = None,
+        db_path: str | Path | None = None,
     ) -> pd.DataFrame:
-        return _read_csv_if_exists(self.ranking_path(output_dir, ranking_path))
+        return pd.DataFrame(
+            self.load_latest_ranking(output_dir, ranking_path=ranking_path, db_path=db_path)
+        )
 
     def load_recommendations_frame(
         self,
@@ -171,12 +165,16 @@ class RankingRepository:
         output_dir: str | Path = "outputs",
         *,
         recommendations_path: str | Path | None = None,
+        db_path: str | Path | None = None,
     ) -> pd.DataFrame:
-        for path in self.recommendation_paths(user_id, output_dir, recommendations_path):
-            frame = _read_csv_if_exists(path)
-            if not frame.empty:
-                return frame
-        return pd.DataFrame()
+        return pd.DataFrame(
+            self.load_latest_recommendations(
+                user_id,
+                output_dir,
+                recommendations_path=recommendations_path,
+                db_path=db_path,
+            )
+        )
 
 
 class StockMetadataRepository:
@@ -186,13 +184,17 @@ class StockMetadataRepository:
 
 
 class PredictionRepository(RankingRepository):
-    def load_model_predictions(self, output_dir: str | Path = "outputs") -> list[dict[str, Any]]:
-        return self.load_latest_ranking(output_dir)
+    def load_model_predictions(
+        self, output_dir: str | Path = "outputs", *, db_path: str | Path | None = None
+    ) -> list[dict[str, Any]]:
+        return self.load_latest_ranking(output_dir, db_path=db_path)
 
 
 class ScoreRepository(RankingRepository):
-    def load_latest_scores(self, output_dir: str | Path = "outputs") -> list[dict[str, Any]]:
-        return self.load_latest_ranking(output_dir)
+    def load_latest_scores(
+        self, output_dir: str | Path = "outputs", *, db_path: str | Path | None = None
+    ) -> list[dict[str, Any]]:
+        return self.load_latest_ranking(output_dir, db_path=db_path)
 
 
 class MarketAnalysisService:
@@ -212,20 +214,38 @@ class MarketAnalysisService:
     def normalize_stock_code(self, value: Any) -> str:
         return _normalize_stock_code(value)
 
-    def resolve_stock_name(self, stock_query: str, *, output_dir: str | Path = "outputs") -> str:
+    def resolve_stock_name(
+        self,
+        stock_query: str,
+        *,
+        output_dir: str | Path = "outputs",
+        db_path: str | Path | None = None,
+    ) -> str:
         return self.stock_metadata_repository.resolve_stock_name(
-            self.ranking_repository.load_latest_ranking(output_dir),
+            self.ranking_repository.load_latest_ranking(output_dir, db_path=db_path),
             stock_query,
         )
 
-    def load_latest_scores(self, output_dir: str | Path = "outputs") -> list[dict[str, Any]]:
-        return self.score_repository.load_latest_scores(output_dir)
+    def load_latest_scores(
+        self, output_dir: str | Path = "outputs", *, db_path: str | Path | None = None
+    ) -> list[dict[str, Any]]:
+        return self.score_repository.load_latest_scores(output_dir, db_path=db_path)
 
-    def load_model_predictions(self, output_dir: str | Path = "outputs") -> list[dict[str, Any]]:
-        return self.prediction_repository.load_model_predictions(output_dir)
+    def load_model_predictions(
+        self, output_dir: str | Path = "outputs", *, db_path: str | Path | None = None
+    ) -> list[dict[str, Any]]:
+        return self.prediction_repository.load_model_predictions(output_dir, db_path=db_path)
 
     def _source(self, label: str, path: str | Path) -> dict[str, Any]:
         path = Path(path)
+        normalized = str(path).replace("\\", "/")
+        if normalized.startswith("database/"):
+            return {
+                "label": label,
+                "source_type": "database",
+                "table": normalized.split("/", 1)[1],
+                "exists": True,
+            }
         return {"label": label, "path": str(path), "exists": path.exists()}
 
     def _filter_model_name(self, rows: list[dict[str, Any]], model_name: str | None) -> list[dict[str, Any]]:
@@ -248,6 +268,7 @@ class MarketAnalysisService:
         *,
         ranking_path: str | Path | None = None,
         model_name: str | None = None,
+        db_path: str | Path | None = None,
     ) -> dict[str, Any]:
         path = self.ranking_repository.ranking_path(output_dir, ranking_path)
         requested_top_k = resolve_requested_top_k(
@@ -259,6 +280,8 @@ class MarketAnalysisService:
             output_dir,
             ranking_path=ranking_path,
             limit=requested_top_k if direct_limited_read else None,
+            db_path=db_path,
+            model_name=model_name,
         )
         rows = self._filter_model_name(rows, model_name)
         normalized = self.normalize_stock_code(stock_code)
@@ -310,13 +333,16 @@ class MarketAnalysisService:
         model_name: str | None = None,
         output_dir: str | Path = "outputs",
         ranking_path: str | Path | None = None,
+        db_path: str | Path | None = None,
     ) -> dict[str, Any]:
         path = self.ranking_repository.ranking_path(output_dir, ranking_path)
-        df = self.ranking_repository.load_ranking_frame(output_dir, ranking_path=ranking_path)
+        df = self.ranking_repository.load_ranking_frame(
+            output_dir, ranking_path=ranking_path, db_path=db_path
+        )
         if df.empty:
             return {
                 "success": False,
-                "message": "未找到最新预测排名文件，请先运行 daily_incremental_update.py。",
+                "message": "数据库中未找到最新预测排名，请先运行每日更新任务。",
                 "records": [],
             }
         try:
@@ -330,7 +356,7 @@ class MarketAnalysisService:
         if "code" not in df.columns:
             return {
                 "success": False,
-                "message": "ranking file is missing stock code column.",
+                "message": "ranking rows are missing the stock code field.",
                 "records": [],
             }
         if model_name and "model_name" in df.columns:
@@ -404,9 +430,12 @@ class MarketAnalysisService:
         stock_query: str,
         user_id: str = "default",
         output_dir: str | Path = "outputs",
+        db_path: str | Path | None = None,
     ) -> dict[str, Any]:
-        ranking = self.ranking_repository.load_latest_ranking(output_dir)
-        recommendations = self.ranking_repository.load_latest_recommendations(user_id, output_dir)
+        ranking = self.ranking_repository.load_latest_ranking(output_dir, db_path=db_path)
+        recommendations = self.ranking_repository.load_latest_recommendations(
+            user_id, output_dir, db_path=db_path
+        )
         ranking_row = _find_stock_row(ranking, stock_query)
         recommendation_row = _find_stock_row(recommendations, stock_query)
         row = recommendation_row or ranking_row or {}
@@ -592,9 +621,12 @@ class MarketAnalysisService:
         recommendations_path: str | Path | None = None,
         sort_by: str = "original_rank",
         include_dataframe: bool = False,
+        db_path: str | Path | None = None,
     ) -> dict[str, Any]:
         ranking_file = self.ranking_repository.ranking_path(output_dir, ranking_path)
-        ranking = self.ranking_repository.load_ranking_frame(output_dir, ranking_path=ranking_path)
+        ranking = self.ranking_repository.load_ranking_frame(
+            output_dir, ranking_path=ranking_path, db_path=db_path
+        )
         if ranking.empty:
             empty = pd.DataFrame(columns=CLASSIC_AI_COLUMNS + ["has_ai_adjustment"])
             data = {
@@ -614,6 +646,7 @@ class MarketAnalysisService:
                 user_id,
                 output_dir,
                 recommendations_path=recommendations_path,
+                db_path=db_path,
             )
         )
         if recommendations.empty:
@@ -672,8 +705,11 @@ class MarketAnalysisService:
         *,
         user_id: str = "default",
         output_dir: str | Path = "outputs",
+        db_path: str | Path | None = None,
     ) -> dict[str, Any]:
-        lookup = self.lookup_stock(stock_query, user_id=user_id, output_dir=output_dir)
+        lookup = self.lookup_stock(
+            stock_query, user_id=user_id, output_dir=output_dir, db_path=db_path
+        )
         row = dict(lookup.get("ranking_row") or lookup.get("recommendation_row") or {})
         return {
             "success": bool(row),

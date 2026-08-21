@@ -129,7 +129,22 @@ def append_ai_adjustment_evaluations(
 def load_ai_reliability_state(
     user_id: str,
     output_dir: str | Path = "outputs",
+    db_path: str | Path | None = None,
+    *,
+    use_database: bool = True,
 ) -> dict[str, Any]:
+    if use_database:
+        from database.repositories import RuntimeStateRepository
+
+        state = RuntimeStateRepository(db_path).get(
+            "ai_reliability_state",
+            user_id=str(user_id),
+        )
+        if not isinstance(state, dict) or not state:
+            return _cold_start_state(user_id)
+        return _normalize_reliability_state(state, user_id)
+
+    # Explicit offline evaluation mode only.
     path = reliability_state_path(output_dir)
     states: dict[str, Any] = {}
     if path.exists() and path.stat().st_size > 0:
@@ -147,7 +162,21 @@ def load_ai_reliability_state(
 def save_ai_reliability_state(
     state: dict[str, Any],
     output_dir: str | Path = "outputs",
+    db_path: str | Path | None = None,
+    *,
+    use_database: bool = True,
 ) -> Path:
+    user_id = str(state.get("user_id") or "default")
+    if use_database:
+        from database.repositories import RuntimeStateRepository
+
+        RuntimeStateRepository(db_path).put(
+            "ai_reliability_state",
+            dict(state),
+            user_id=user_id,
+            as_of_date=str(state.get("as_of_date") or ""),
+        )
+
     path = reliability_state_path(output_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     states: dict[str, Any] = {}
@@ -157,7 +186,6 @@ def save_ai_reliability_state(
             states = loaded if isinstance(loaded, dict) else {}
         except Exception:
             states = {}
-    user_id = str(state.get("user_id") or "default")
     states[user_id] = dict(state)
     path.write_text(json.dumps(states, ensure_ascii=False, indent=2), encoding="utf-8")
     return path

@@ -30,9 +30,10 @@ def update_ai_reliability(
     user_id: str,
     as_of_date: str = "",
     output_dir: str | Path = "outputs",
+    db_path: str | Path | None = None,
 ) -> dict[str, Any]:
     records = load_ai_adjustment_evaluations(output_dir)
-    old_state = load_ai_reliability_state(user_id, output_dir)
+    old_state = load_ai_reliability_state(user_id, output_dir, db_path)
     state = _update_ai_reliability_state(records, user_id=user_id, old_state=old_state, as_of_date=as_of_date)
-    save_ai_reliability_state(state, output_dir)
+    save_ai_reliability_state(state, output_dir, db_path)
     return state

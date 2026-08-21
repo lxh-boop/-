@@ -115,11 +115,21 @@ def save_final_recommendations(
     records: list[FinalRecommendationRecord],
     output_dir: str | Path = DEFAULT_RECOMMENDATION_DIR,
     trade_date: str | None = None,
+    *,
+    user_id: str = "",
+    db_path: str | Path | None = None,
+    persist_database: bool = False,
 ) -> dict[str, Path]:
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     rows = [record.to_dict() for record in records]
     trade_date = trade_date or (records[0].output.trade_date if records else "unknown")
+    if persist_database:
+        if not user_id:
+            raise ValueError("user_id_required_for_recommendation_database_write")
+        from database.repositories import RecommendationRepository
+
+        RecommendationRepository(db_path).replace_snapshot(user_id, rows)
     date_token = str(trade_date).replace("-", "")
     latest_csv = out_dir / "final_recommendations_latest.csv"
     dated_csv = out_dir / f"final_recommendations_{date_token}.csv"

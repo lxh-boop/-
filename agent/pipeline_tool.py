@@ -63,22 +63,37 @@ def run_daily_pipeline(
         }
 
 
-def get_latest_outputs(output_dir: str | Path = "outputs") -> dict[str, Any]:
-    root = Path(output_dir)
-    paths = {
-        "recommendations_csv": root / "recommendations" / "final_recommendations_latest.csv",
-        "recommendations_json": root / "recommendations" / "final_recommendations_latest.json",
-        "paper_account": root / "portfolio" / "paper_account.json",
-        "paper_positions": root / "portfolio" / "paper_positions.csv",
-        "paper_orders": root / "portfolio" / "paper_orders.csv",
-        "portfolio_risk_report": root / "portfolio" / "portfolio_risk_report.json",
-        "latest_ranking": root / "ranking_latest.csv",
+def get_latest_outputs(
+    output_dir: str | Path = "outputs",
+    *,
+    user_id: str = "default",
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    del output_dir
+    from database.repositories import (
+        PortfolioRepository,
+        PredictionRepository,
+        RecommendationRepository,
+    )
+
+    portfolio = PortfolioRepository(db_path)
+    counts = {
+        "recommendations": len(RecommendationRepository(db_path).list_latest(user_id)),
+        "paper_account": int(bool(portfolio.get_paper_account(f"paper_{user_id}"))),
+        "paper_positions": len(portfolio.list_positions(user_id)),
+        "paper_orders": len(portfolio.list_paper_orders(user_id=user_id)),
+        "portfolio_risk_report": int(bool(portfolio.get_latest_risk_snapshot(user_id))),
+        "latest_ranking": len(PredictionRepository(db_path).list_latest_predictions()),
     }
     return {
-        "ok": any(path.exists() for path in paths.values()),
+        "ok": any(counts.values()),
         "outputs": {
-            name: {"path": str(path), "exists": path.exists(), "size": path.stat().st_size if path.exists() else 0}
-            for name, path in paths.items()
+            name: {
+                "path": f"database/{name}",
+                "exists": count > 0,
+                "size": count,
+            }
+            for name, count in counts.items()
         },
         "compliance_disclaimer": COMPLIANCE_DISCLAIMER,
     }

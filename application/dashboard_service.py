@@ -236,37 +236,36 @@ class DashboardApplicationService:
 
     @staticmethod
     def get_ranking_file_snapshot(path: str | Path = RANKING_LATEST_PATH) -> dict[str, Any]:
-        ranking_path = Path(path)
-        if not ranking_path.exists():
+        from database.repositories import PredictionRepository
+
+        del path
+        db_path = Path(AGENT_QUANT_DB_PATH)
+        rows = PredictionRepository(db_path).list_latest_predictions()
+        if not rows:
             return {
                 "exists": False,
-                "path": str(ranking_path),
+                "path": "database/model_prediction",
                 "mtime": 0.0,
-                "mtime_text": "不存在",
+                "mtime_text": "无数据",
                 "rows": 0,
                 "signal_date": "",
                 "prediction_date": "",
             }
-        stat = ranking_path.stat()
+        stat = db_path.stat()
+        first = rows[0]
         snapshot: dict[str, Any] = {
             "exists": True,
-            "path": str(ranking_path),
+            "path": "database/model_prediction",
             "mtime": float(stat.st_mtime),
             "mtime_text": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-            "rows": 0,
-            "signal_date": "",
-            "prediction_date": "",
+            "rows": len(rows),
+            "signal_date": str(first.get("trade_date") or first.get("date") or ""),
+            "prediction_date": str(
+                first.get("prediction_for_date")
+                or first.get("prediction_date")
+                or ""
+            ),
         }
-        try:
-            frame = pd.read_csv(ranking_path, dtype={"code": str}, encoding="utf-8-sig")
-            snapshot["rows"] = int(len(frame))
-            if not frame.empty:
-                if "date" in frame.columns:
-                    snapshot["signal_date"] = str(frame["date"].iloc[0])
-                if "prediction_date" in frame.columns:
-                    snapshot["prediction_date"] = str(frame["prediction_date"].iloc[0])
-        except Exception as exc:
-            snapshot["read_error"] = str(exc)
         return snapshot
 
     def start_rolling_update_job(
@@ -321,17 +320,35 @@ class DashboardApplicationService:
         return result if isinstance(result, pd.DataFrame) else pd.DataFrame(result or [])
 
     @staticmethod
-    def retrieve_stock_context(*args: Any, **kwargs: Any) -> pd.DataFrame:
-        from rag_retriever import retrieve_stock_context
-        result = retrieve_stock_context(*args, **kwargs)
-        return result if isinstance(result, pd.DataFrame) else pd.DataFrame(result or [])
+    def retrieve_stock_context(
+        code: str,
+        query: str,
+        top_k: int = 5,
+        force_rebuild: bool = False,
+    ) -> pd.DataFrame:
+        """Frozen transport adapter to the one canonical hybrid RAG service."""
+
+        del force_rebuild
+        from agent.services.evidence_service import evidence_service
+
+        result = evidence_service.search_documents(
+            query,
+            stock_code=str(code or ""),
+            top_k=top_k,
+            output_dir=OUTPUT_DIR,
+        )
+        records = list((result.get("data") or {}).get("records") or [])
+        return pd.DataFrame(records)
 
     @staticmethod
     def load_ranking(path: str | Path = RANKING_LATEST_PATH) -> pd.DataFrame | None:
-        file_path = Path(path)
-        if not file_path.exists():
+        from database.repositories import PredictionRepository
+
+        del path
+        rows = PredictionRepository(AGENT_QUANT_DB_PATH).list_latest_predictions()
+        if not rows:
             return None
-        frame = pd.read_csv(file_path, dtype={"code": str})
+        frame = pd.DataFrame(rows)
         frame["code"] = frame["code"].astype(str).str.zfill(6)
         if "prediction_date" not in frame.columns and "date" in frame.columns:
             dates = pd.to_datetime(frame["date"], errors="coerce")
