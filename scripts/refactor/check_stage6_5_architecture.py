@@ -66,11 +66,26 @@ def main() -> int:
             violations.append(f"retired Streamlit/Python-client artifact remains: {relative}")
 
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    service_lines = [
-        line.strip()
-        for line in compose.splitlines()
-        if line.startswith("  ") and not line.startswith("    ") and line.strip().endswith(":")
-    ]
+    service_lines: list[str] = []
+    in_services = False
+    for line in compose.splitlines():
+        if line.strip() == "services:" and not line.startswith((" ", "\t")):
+            in_services = True
+            continue
+        if (
+            in_services
+            and line.strip()
+            and not line.lstrip().startswith("#")
+            and not line.startswith((" ", "\t"))
+        ):
+            break
+        if (
+            in_services
+            and line.startswith("  ")
+            and not line.startswith("    ")
+            and line.strip().endswith(":")
+        ):
+            service_lines.append(line.strip())
     if set(service_lines) != {"api:", "frontend:"}:
         violations.append(f"production Compose services must be api/frontend only: {service_lines}")
     for forbidden in ("streamlit", "react-preview", "8501", "_stcore"):
