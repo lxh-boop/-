@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -68,7 +69,7 @@ def test_internal_mcp_configs_use_official_stdio_and_no_old_fixture() -> None:
     for server_id, (server, tool_names) in configs.items():
         assert server.server_id == server_id
         assert server.transport == "stdio"
-        assert server.command.endswith("python.exe")
+        assert Path(server.command).resolve() == Path(sys.executable).resolve()
         assert server.args[:2] == ("-m", f"agent.mcp.servers.{server_id}_server")
         assert server.allowed_tools == tool_names
         assert Path(server.cwd).resolve() == Path(__file__).resolve().parents[2]

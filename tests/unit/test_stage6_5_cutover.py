@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 from agent.tool_adapter import safe_read_csv, safe_read_json
 from application.support.backtest_display import build_display_date_options
 from application.support.model_search_results import BACKTEST_DISCLAIMER, load_table_file
@@ -23,12 +25,8 @@ def test_streamlit_and_python_client_are_removed() -> None:
 
 def test_final_compose_has_only_api_and_frontend() -> None:
     source = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    service_lines = {
-        line.strip()
-        for line in source.splitlines()
-        if line.startswith("  ") and not line.startswith("    ") and line.strip().endswith(":")
-    }
-    assert service_lines == {"api:", "frontend:"}
+    compose = yaml.safe_load(source)
+    assert set((compose or {}).get("services") or {}) == {"api", "frontend"}
     assert "${STOCK_APP_WEB_PORT:-3000}:80" in source
     assert "streamlit" not in source.lower()
     assert "react-preview" not in source.lower()
