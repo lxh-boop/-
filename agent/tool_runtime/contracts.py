@@ -17,6 +17,7 @@ AGENT_READ = "read_worker"
 AGENT_WRITE = "write_worker"
 
 TOOL_RESULT_SCHEMA_VERSION = "tool-result-v1"
+TOOL_IO_CONTRACT_VERSION = "tool-io-contract.v2"
 
 TOOL_VISIBILITY_PUBLIC = "public"
 TOOL_VISIBILITY_WORKER_PRIVATE = "worker_private"
@@ -104,11 +105,34 @@ class ToolInputContract:
     accepted_sources: tuple[str, ...] = ("context", "upstream_tool")
     cardinality: Literal["one", "many"] = "one"
     description: str = ""
+    contract: str = ""
+    version: str = "1.0"
+    accepted_versions: tuple[str, ...] = ()
+
+    def contract_descriptor(self) -> dict[str, Any]:
+        contract = str(self.contract or self.slot_id).strip()
+        version = str(self.version or "1.0").strip()
+        schema_id = str(self.schema_id or f"{contract}@{version}").strip()
+        accepted = tuple(
+            str(item).strip()
+            for item in (self.accepted_versions or (version,))
+            if str(item).strip()
+        )
+        return {
+            "contract": contract,
+            "version": version,
+            "schema_id": schema_id,
+            "accepted_versions": list(accepted),
+        }
 
     def planner_view(self) -> dict[str, Any]:
+        descriptor = self.contract_descriptor()
         return {
             "slot_id": str(self.slot_id),
-            "schema_id": str(self.schema_id or ""),
+            "contract": descriptor["contract"],
+            "version": descriptor["version"],
+            "schema_id": descriptor["schema_id"],
+            "accepted_versions": descriptor["accepted_versions"],
             "required": bool(self.required),
             "accepted_sources": list(self.accepted_sources or ()),
             "cardinality": str(self.cardinality),
@@ -130,11 +154,26 @@ class ToolOutputContract:
     source_path: str = ""
     description: str = ""
     provenance_required: bool = True
+    contract: str = ""
+    version: str = "1.0"
+
+    def contract_descriptor(self) -> dict[str, Any]:
+        contract = str(self.contract or self.slot_id).strip()
+        version = str(self.version or "1.0").strip()
+        schema_id = str(self.schema_id or f"{contract}@{version}").strip()
+        return {
+            "contract": contract,
+            "version": version,
+            "schema_id": schema_id,
+        }
 
     def planner_view(self) -> dict[str, Any]:
+        descriptor = self.contract_descriptor()
         return {
             "slot_id": str(self.slot_id),
-            "schema_id": str(self.schema_id or ""),
+            "contract": descriptor["contract"],
+            "version": descriptor["version"],
+            "schema_id": descriptor["schema_id"],
             "description": str(self.description or ""),
             "provenance_required": bool(self.provenance_required),
         }

@@ -31,7 +31,13 @@ from agent.worker_tools.risk import (
 )
 
 
-def _producer(name: str, output_slot: str, schema_id: str) -> ToolDefinition:
+def _producer(
+    name: str,
+    output_slot: str,
+    schema_id: str,
+    *,
+    version: str = "1.0",
+) -> ToolDefinition:
     return ToolDefinition(
         name=name,
         display_name=name,
@@ -55,6 +61,8 @@ def _producer(name: str, output_slot: str, schema_id: str) -> ToolDefinition:
                 slot_id=output_slot,
                 schema_id=schema_id,
                 source_path=f"data.{output_slot}",
+                contract="test.collection",
+                version=version,
             )
         ],
         operation_type=OP_READ,
@@ -88,6 +96,8 @@ def _finalizer() -> ToolDefinition:
                 required=True,
                 accepted_sources=("upstream_tool",),
                 cardinality="many",
+                contract="test.collection",
+                version="1.0",
             )
         ],
         output_contracts=[
@@ -104,6 +114,12 @@ def _validator() -> ToolDagValidator:
         _producer("test.a", "output_a", "TestCollection.v1"),
         _producer("test.b", "output_b", "TestCollection.v1"),
         _producer("test.bad", "wrong_output", "WrongCollection.v1"),
+        _producer(
+            "test.bad_version",
+            "versioned_output",
+            "TestCollection.v1",
+            version="2.0",
+        ),
         _finalizer(),
     ])
     return ToolDagValidator(registry, WorkerToolDirectory(registry))
@@ -205,6 +221,22 @@ def test_many_input_rejects_wrong_element_schema() -> None:
             worker_task_id="T01",
             available_context_keys=set(),
             allowed_tool_names={"test.bad", "test.finalize"},
+            read_only=True,
+        )
+
+
+def test_many_input_rejects_incompatible_artifact_contract_version() -> None:
+    validator = _validator()
+    payload = _payload(
+        [{"tool_name": "test.bad_version", "output_slot": "versioned_output"}]
+    )
+    with pytest.raises(Exception, match="tool_slot_artifact_contract_mismatch"):
+        validator.validate_payload(
+            payload,
+            worker_role=EVIDENCE_COLLECTOR,
+            worker_task_id="T01",
+            available_context_keys=set(),
+            allowed_tool_names={"test.bad_version", "test.finalize"},
             read_only=True,
         )
 

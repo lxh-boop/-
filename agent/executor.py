@@ -376,15 +376,13 @@ def run_agent_request(
         return failure
 
     execution_status = str(execution.get("execution_status") or "failed")
-    plan_id = ""
     proposal_id = ""
     for payload in (execution.get("task_results") or {}).values():
         if not isinstance(payload, dict):
             continue
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-        plan_id = plan_id or str(metadata.get("plan_id") or "")
         proposal_id = proposal_id or str(metadata.get("proposal_id") or "")
-    requires_confirmation = bool(plan_id) and str(execution.get("control_action") or "").lower() not in {"confirm", "reject"}
+    requires_confirmation = bool(proposal_id) and str(execution.get("control_action") or "").lower() not in {"confirm", "reject"}
     if execution_status == "waiting_context":
         final_runtime_status = RUN_PARTIALLY_COMPLETED
     elif requires_confirmation:
@@ -478,8 +476,6 @@ def run_agent_request(
         "clarification_question": str(execution.get("clarification_question") or ""),
         "safe_to_write": True,
     }
-    if plan_id:
-        result_data["plan_id"] = plan_id
     if proposal_id:
         result_data["proposal_id"] = proposal_id
     result = {
@@ -491,7 +487,7 @@ def run_agent_request(
         "tool_name": "financial_graph_agent",
         "status": execution_status,
         "requires_confirmation": requires_confirmation,
-        "plan_id": plan_id,
+        "proposal_id": proposal_id,
     }
     trace_event(
         "executor.graph_request.completed",

@@ -22,7 +22,7 @@ export function PendingActionPanel({
       agentApi.confirmPendingAction(
         userId,
         conversationId,
-        item.plan_id,
+        item.proposal_id,
         text,
         uniqueId('agent-confirm'),
         uniqueId('agent-confirm-idem'),
@@ -38,7 +38,7 @@ export function PendingActionPanel({
       agentApi.rejectPendingAction(
         userId,
         conversationId,
-        item.plan_id,
+        item.proposal_id,
         uniqueId('agent-reject'),
         uniqueId('agent-reject-idem'),
       ),
@@ -86,7 +86,7 @@ export function PendingActionPanel({
         extra={<Typography.Text type="secondary">{item.created_at}</Typography.Text>}
       >
         <Space direction="vertical" style={{ width: '100%' }}>
-          <Typography.Text>计划：{item.plan_id}</Typography.Text>
+          <Typography.Text>Proposal：{item.proposal_id}</Typography.Text>
           <pre className="agent-json-block">{JSON.stringify({
             before: item.before_state_summary,
             changes: item.proposed_changes,

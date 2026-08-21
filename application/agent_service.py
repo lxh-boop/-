@@ -19,7 +19,6 @@ from agent.react.react_context_bridge import (
 )
 from agent.runtime import load_run_snapshot
 from agent.services.strategy_proposal_service import StrategyProposalService
-from agent.session.pending_action_store import load_pending_actions
 from agent.tools.portfolio_state_tool import query_portfolio_state
 from agent.tools.scheduler_tool import query_scheduler_status
 from agent.tools.tool_registry import list_tools
@@ -169,9 +168,6 @@ class AgentApplicationService:
 
     def list_registered_tools(self) -> list[Any]:
         return list(list_tools() or [])
-
-    def list_pending_actions(self, user_id: str, output_dir: str | Path) -> dict[str, dict[str, Any]]:
-        return dict(load_pending_actions(str(user_id), output_dir) or {})
 
     def query_portfolio(self, user_id: str, *, output_dir: str, db_path: str | None = None) -> dict[str, Any]:
         return query_portfolio_state(

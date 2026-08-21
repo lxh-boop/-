@@ -8,13 +8,12 @@ graph through the explicit write method.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from agent.graph.contracts import GraphRef
 from agent.graph.evidence_ingestion import EvidenceIngestionService, ExtractedMention
 
-from .common import ProviderIdentityResolver, records_from_payload, sources_from_payload
+from .common import ProviderIdentityResolver
 
 
 @dataclass
@@ -23,114 +22,6 @@ class EvidenceGraphProvider:
 
     identity_resolver: ProviderIdentityResolver
     evidence_ingestion: EvidenceIngestionService
-
-    def analyze_entities(
-        self,
-        refs: list[GraphRef],
-        *,
-        user_id: str,
-        output_dir: str | Path,
-        db_path: str | Path | None,
-    ) -> dict[str, Any]:
-        """Compatibility read path retained for older callers.
-
-        W01 no longer exposes analysis as a public capability. New entity-level
-        interpretation belongs to W09.
-        """
-        from agent.services.market_analysis_service import MarketAnalysisService
-
-        service = MarketAnalysisService()
-        results: list[dict[str, Any]] = []
-        for ref in refs:
-            code = self.identity_resolver.provider_symbol(ref)
-            raw = service.analyze_stock(
-                stock_query=code,
-                user_id=user_id,
-                output_dir=output_dir,
-                db_path=db_path,
-            )
-            results.append(
-                {
-                    "focus_ref": ref.to_dict(),
-                    "success": bool(raw.get("success")),
-                    "status": str(raw.get("status") or ""),
-                    "message": str(raw.get("message") or ""),
-                    "data": raw.get("data") if isinstance(raw.get("data"), dict) else {},
-                    "records": records_from_payload(raw),
-                    "sources": sources_from_payload(raw),
-                    "warnings": list(raw.get("warnings") or []),
-                    "errors": list(raw.get("errors") or []),
-                }
-            )
-        return {
-            "success": bool(results) and any(item["success"] for item in results),
-            "results": results,
-        }
-
-    def collect_external_evidence(
-        self,
-        refs: list[GraphRef],
-        *,
-        query: str,
-        top_k: int,
-        output_dir: str | Path,
-        db_path: str | Path | None,
-        as_of_time: str = "",
-    ) -> dict[str, Any]:
-        """Collect external evidence without writing Neo4j or business state."""
-        from agent.services.evidence_service import EvidenceService
-
-        service = EvidenceService()
-        results: list[dict[str, Any]] = []
-        for ref in refs:
-            code = self.identity_resolver.provider_symbol(ref)
-            raw = service.get_stock_evidence(
-                code,
-                query=query,
-                as_of_date=as_of_time or None,
-                top_k=top_k,
-                output_dir=output_dir,
-                db_path=db_path,
-            )
-            results.append(
-                {
-                    "focus_ref": ref.to_dict(),
-                    "success": bool(raw.get("success")),
-                    "message": str(raw.get("message") or ""),
-                    "records": records_from_payload(raw),
-                    "sources": sources_from_payload(raw),
-                    "warnings": list(raw.get("warnings") or []),
-                    "errors": list(raw.get("errors") or []),
-                }
-            )
-        return {
-            "success": bool(results) and any(item["success"] for item in results),
-            "results": results,
-            "write_performed": False,
-        }
-
-    def retrieve_evidence(
-        self,
-        refs: list[GraphRef],
-        *,
-        query: str,
-        top_k: int,
-        output_dir: str | Path,
-        db_path: str | Path | None,
-        source_task_id: str = "",
-        source_agent_id: str = "",
-        as_of_time: str = "",
-    ) -> dict[str, Any]:
-        """Backward-compatible alias for the read-only collection path."""
-        del source_task_id, source_agent_id
-        return self.collect_external_evidence(
-            refs,
-            query=query,
-            top_k=top_k,
-            output_dir=output_dir,
-            db_path=db_path,
-            as_of_time=as_of_time,
-        )
 
     def materialize_evidence_graph(
         self,

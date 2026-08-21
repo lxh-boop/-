@@ -71,7 +71,9 @@ def _first_mcp_evidence_task(
     task_results: dict[str, dict[str, Any]],
 ) -> dict[str, Any] | None:
     for result in task_results.values():
-        if str(result.get("intent") or "").startswith("mcp.") and result.get("success"):
+        metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+        provider = metadata.get("provider") if isinstance(metadata.get("provider"), dict) else {}
+        if str(provider.get("provider_type") or "") == "mcp" and result.get("success"):
             return result
     return None
 
@@ -356,7 +358,17 @@ def _aggregate_portfolio_stability_recommendation(
     records = ranking_data.get("records") or ranking_data.get("items") or []
     if not isinstance(records, list):
         records = []
-    evidence_source = "mcp" if str(ranking_task.get("intent") or "").startswith("mcp.") else "local_ranking"
+    ranking_metadata = (
+        ranking_task.get("metadata")
+        if isinstance(ranking_task.get("metadata"), dict)
+        else {}
+    )
+    provider = (
+        ranking_metadata.get("provider")
+        if isinstance(ranking_metadata.get("provider"), dict)
+        else {}
+    )
+    evidence_source = str(provider.get("provider_type") or "local_ranking")
 
     candidate_lines: list[str] = []
     held_codes = {

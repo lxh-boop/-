@@ -13,7 +13,7 @@ from time import perf_counter
 from typing import Any, Callable
 
 from config import AGENT_QUANT_DB_PATH, NEWS_EVENT_LOOKBACK_DAYS
-from database.repositories import NewsRepository
+from database.repositories import NewsRepository, PredictionRepository
 from scheduler.job_lock import JobLock, JobLockError
 from scheduler.job_state import run_recorded_step, save_job_status
 from scheduler.schemas import JobStatus, SchedulerStatus, make_run_id, now_text
@@ -38,14 +38,16 @@ def _csv_signal_date(path: str | Path) -> str:
         return ""
 
 
-def _ranking_signal_date(output_dir: str | Path) -> str:
-    return _csv_signal_date(Path(output_dir) / "ranking_latest.csv")
+def _ranking_signal_date(db_path: str | Path | None) -> str:
+    rows = PredictionRepository(db_path).list_latest_predictions(limit=1)
+    return str((rows[0] if rows else {}).get("trade_date") or "")[:10]
 
 
 def run_market_update_from_local_config(
     *,
     trade_date: str,
     output_dir: str | Path = "outputs",
+    db_path: str | Path | None = AGENT_QUANT_DB_PATH,
     root: str | Path = ".",
     force: bool = False,
     dry_run: bool = False,
@@ -60,10 +62,10 @@ def run_market_update_from_local_config(
         return {
             "status": SchedulerStatus.SKIPPED,
             "warnings": ["market update skipped by scheduler option."],
-            "metadata": {"signal_date": _ranking_signal_date(output_dir)},
+            "metadata": {"signal_date": _ranking_signal_date(db_path)},
         }
 
-    current_signal_date = _ranking_signal_date(output_dir)
+    current_signal_date = _ranking_signal_date(db_path)
     if current_signal_date == trade_date and not force:
         return {
             "status": SchedulerStatus.SKIPPED,
@@ -112,6 +114,7 @@ def run_market_update_from_local_config(
     environment = os.environ.copy()
     environment["PYTHONUTF8"] = "1"
     environment["PYTHONIOENCODING"] = "utf-8"
+    environment["STOCK_AGENT_DB_PATH"] = str(db_path or AGENT_QUANT_DB_PATH)
 
     with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
         completed = subprocess.run(
@@ -129,7 +132,7 @@ def run_market_update_from_local_config(
             f"see {stderr_path}"
         )
 
-    signal_date = _ranking_signal_date(output_dir)
+    signal_date = _ranking_signal_date(db_path)
     if signal_date != trade_date:
         raise RuntimeError(
             f"ranking signal date mismatch: expected={trade_date}, actual={signal_date or 'missing'}"
@@ -189,12 +192,23 @@ def _write_public_marker(trade_date: str, payload: dict[str, Any], root: str | P
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
 
-def _copy_ranking_to_shared(output_dir: str | Path, dry_run: bool) -> str:
+def _copy_ranking_to_shared(
+    output_dir: str | Path,
+    dry_run: bool,
+    db_path: str | Path | None,
+) -> str:
+    from database.runtime_data_import import import_ranking_file
+
     root = Path(output_dir)
     source = root / "ranking_latest.csv"
     shared = root / "shared" / "ranking_latest.csv"
     if not source.exists():
         raise FileNotFoundError(f"ranking_latest.csv not found: {source}")
+    import_ranking_file(
+        source,
+        db_path=db_path,
+        dry_run=dry_run,
+    )
     if not dry_run:
         shared.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, shared)
@@ -464,7 +478,7 @@ def run_public_daily_tasks(
     root: str | Path = ".",
 ) -> dict[str, Any]:
     warnings: list[str] = []
-    source_signal_date = _ranking_signal_date(output_dir)
+    source_signal_date = _ranking_signal_date(db_path)
     shared_signal_date = _csv_signal_date(Path(output_dir) / "shared" / "ranking_latest.csv")
     marker_dates_are_current = (
         source_signal_date == trade_date and shared_signal_date == trade_date
@@ -489,7 +503,11 @@ def run_public_daily_tasks(
             },
         }
 
-    ranking_path = _copy_ranking_to_shared(output_dir, dry_run=dry_run)
+    ranking_path = _copy_ranking_to_shared(
+        output_dir,
+        dry_run=dry_run,
+        db_path=db_path,
+    )
     news_event_count = 0
     news_chunk_count = 0
     news_refresh: dict[str, Any] = {}
@@ -619,6 +637,7 @@ def run_scheduled_daily_update(
                     lambda: market_update_runner(
                         trade_date=resolved_trade_date,
                         output_dir=output_dir,
+                        db_path=db_path,
                         root=root,
                         force=force,
                         dry_run=dry_run,
@@ -657,8 +676,8 @@ def run_scheduled_daily_update(
                 job.warnings.append("no active users found; default user was used for dry scheduler validation.")
             user_task_runner = user_task_runner or run_user_daily_job
             user_results: dict[str, Any] = {}
-            for index, user_id in enumerate(selected_users):
-                def _run_user(user_id=user_id, sync_legacy=index == 0):
+            for user_id in selected_users:
+                def _run_user(user_id=user_id):
                     return user_task_runner(
                         user_id=user_id,
                         trade_date=resolved_trade_date,
@@ -669,7 +688,6 @@ def run_scheduled_daily_update(
                         skip_news=skip_news,
                         skip_paper_trading=skip_paper_trading,
                         force=force,
-                        sync_legacy=sync_legacy,
                         job_id=job.job_id,
                         run_id=job.run_id,
                         execution_source=job.execution_source,

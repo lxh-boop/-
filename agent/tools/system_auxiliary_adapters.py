@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from agent.services.mcp_readonly_client import mcp_readonly_client
 from agent.services.python_sandbox_service import python_sandbox_service
 from agent.services.system_auxiliary_service import system_auxiliary_service
 from agent.services.user_profile_service import user_profile_service
@@ -66,14 +65,4 @@ def scheduler_status_adapter(args: dict[str, Any], context: dict[str, Any]) -> A
 def report_list_latest_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
     return system_auxiliary_service.list_latest_reports(
         output_dir=args.get("output_dir") or _output_dir(context),
-    )
-
-
-def mcp_readonly_invoke_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
-    tool_name = str(args.get("mcp_tool_name") or args.get("tool_name") or "")
-    arguments = args.get("arguments") if isinstance(args.get("arguments"), dict) else {}
-    return mcp_readonly_client.invoke(
-        tool_name,
-        arguments,
-        context=context,
     )

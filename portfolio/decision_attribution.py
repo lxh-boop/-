@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import json
 from pathlib import Path
 from typing import Any
@@ -16,10 +15,6 @@ FORMULA_TOLERANCE = 1e-6
 def _stock_code(value: Any) -> str:
     text = str(value or "").strip().split(".")[0]
     return text.zfill(6) if text else ""
-
-
-def _date_token(value: str | None) -> str:
-    return "".join(ch for ch in str(value or "") if ch.isdigit())[:8]
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -55,97 +50,6 @@ def _jsonish(value: Any) -> Any:
     return value
 
 
-def _read_json_rows(path: Path) -> list[dict[str, Any]]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    if isinstance(payload, list):
-        return [dict(item) for item in payload if isinstance(item, dict)]
-    if isinstance(payload, dict):
-        rows = payload.get("records") or payload.get("rows") or payload.get("decisions")
-        if isinstance(rows, list):
-            return [dict(item) for item in rows if isinstance(item, dict)]
-        return [payload]
-    return []
-
-
-def _read_csv_rows(path: Path) -> list[dict[str, Any]]:
-    try:
-        with path.open("r", encoding="utf-8-sig", newline="") as file:
-            return [dict(row) for row in csv.DictReader(file)]
-    except Exception:
-        return []
-
-
-def _read_rows(path: Path) -> list[dict[str, Any]]:
-    if not path.exists() or path.stat().st_size <= 0:
-        return []
-    if path.suffix.lower() == ".json":
-        return _read_json_rows(path)
-    if path.suffix.lower() == ".csv":
-        return _read_csv_rows(path)
-    return []
-
-
-def _read_json_dict(path: Path) -> dict[str, Any]:
-    if not path.exists() or path.stat().st_size <= 0:
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _dedupe_paths(paths: list[Path]) -> list[Path]:
-    seen: set[str] = set()
-    result: list[Path] = []
-    for path in paths:
-        key = str(path)
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(path)
-    return result
-
-
-def _recommendation_candidates(user_id: str, output_dir: str | Path, trade_date: str | None) -> list[Path]:
-    root = Path(output_dir)
-    token = _date_token(trade_date)
-    user_dir = root / "users" / str(user_id) / "recommendations"
-    global_dir = root / "recommendations"
-    dated_names: list[str] = []
-    if token:
-        dated_names.extend(
-            [
-                f"final_recommendations_{token}.json",
-                f"final_recommendations_{token}.csv",
-            ]
-        )
-    if trade_date:
-        dated_names.extend(
-            [
-                f"final_recommendations_{trade_date}.json",
-                f"final_recommendations_{trade_date}.csv",
-            ]
-        )
-    names = dated_names + ["final_recommendations_latest.json", "final_recommendations_latest.csv"]
-    return _dedupe_paths([directory / name for directory in [user_dir, global_dir] for name in names])
-
-
-def _decision_candidates(user_id: str, output_dir: str | Path, trade_date: str | None) -> list[Path]:
-    root = Path(output_dir) / "portfolio" / str(user_id)
-    token = _date_token(trade_date)
-    candidates: list[Path] = []
-    if token:
-        history = root / "history" / "decisions"
-        candidates.append(history / f"ai_paper_decisions_{token}.json")
-        candidates.extend(sorted(history.glob(f"ai_paper_decisions_{token}_*.json"), key=lambda path: path.stat().st_mtime, reverse=True))
-    candidates.append(root / "ai_paper_decisions_latest.json")
-    return _dedupe_paths(candidates)
-
-
 def _find_row(rows: list[dict[str, Any]], stock_code: str, trade_date: str | None = None) -> dict[str, Any] | None:
     normalized = _stock_code(stock_code)
     date_text = str(trade_date or "")
@@ -166,17 +70,24 @@ def _load_recommendation(
     stock_code: str,
     output_dir: str | Path,
     trade_date: str | None,
+    db_path: str | Path | None,
 ) -> tuple[dict[str, Any] | None, str, list[str]]:
-    searched: list[str] = []
-    for path in _recommendation_candidates(user_id, output_dir, trade_date):
-        searched.append(str(path))
-        row = _find_row(_read_rows(path), stock_code, trade_date)
-        if row:
-            for key in ["evidence_news_ids", "evidence_chunk_ids", "triggered_rules", "score_breakdown"]:
-                if key in row:
-                    row[key] = _jsonish(row.get(key))
-            return row, str(path), searched
-    return None, "", searched
+    del output_dir
+    from database.repositories import RecommendationRepository
+
+    repo = RecommendationRepository(db_path)
+    rows = (
+        repo.list_for_date(user_id, trade_date)
+        if trade_date
+        else repo.list_latest(user_id)
+    )
+    row = _find_row(rows, stock_code, trade_date)
+    if row:
+        for key in ["evidence_news_ids", "evidence_chunk_ids", "triggered_rules", "score_breakdown"]:
+            if key in row:
+                row[key] = _jsonish(row.get(key))
+    source = "database/portfolio_recommendation_result"
+    return row, source if row else "", [source]
 
 
 def _load_decision_from_database(
@@ -185,16 +96,11 @@ def _load_decision_from_database(
     trade_date: str | None,
     db_path: str | Path | None,
 ) -> tuple[dict[str, Any] | None, str]:
-    if not db_path:
-        return None, ""
-    try:
-        from database.repositories import PortfolioRepository
+    from database.repositories import PortfolioRepository
 
-        rows = PortfolioRepository(db_path).list_paper_decisions(user_id=user_id, trade_date=trade_date)
-    except Exception:
-        return None, ""
+    rows = PortfolioRepository(db_path).list_paper_decisions(user_id=user_id, trade_date=trade_date)
     row = _find_row(rows, stock_code, trade_date)
-    return row, f"database:{db_path}:paper_decision_log" if row else ""
+    return row, "database/paper_decision_log" if row else ""
 
 
 def _load_paper_decision(
@@ -204,22 +110,25 @@ def _load_paper_decision(
     trade_date: str | None,
     db_path: str | Path | None,
 ) -> tuple[dict[str, Any] | None, str, list[str]]:
-    searched: list[str] = []
-    for path in _decision_candidates(user_id, output_dir, trade_date):
-        searched.append(str(path))
-        row = _find_row(_read_rows(path), stock_code, trade_date)
-        if row:
-            return row, str(path), searched
+    del output_dir
     row, source = _load_decision_from_database(user_id, stock_code, trade_date, db_path)
-    if row:
-        searched.append(source)
-        return row, source, searched
-    return None, "", searched
+    searched = ["database/paper_decision_log"]
+    return row, source, searched
 
 
-def _load_diagnostics(user_id: str, output_dir: str | Path) -> tuple[dict[str, Any], str]:
-    path = Path(output_dir) / "portfolio" / str(user_id) / "paper_execution_diagnostics_latest.json"
-    return _read_json_dict(path), str(path) if path.exists() else ""
+def _load_diagnostics(
+    user_id: str,
+    db_path: str | Path | None,
+) -> tuple[dict[str, Any], str]:
+    from database.repositories import RuntimeStateRepository
+
+    payload = RuntimeStateRepository(db_path).get(
+        "paper_execution_diagnostics",
+        user_id=user_id,
+        scope_id=None,
+    )
+    diagnostics = dict(payload or {})
+    return diagnostics, "database/runtime_state_snapshot" if diagnostics else ""
 
 
 def _matching_allocation_items(stock_code: str, diagnostics: dict[str, Any]) -> list[dict[str, Any]]:
@@ -379,7 +288,13 @@ def explain_stock_decision_attribution(
 
     normalized = _stock_code(stock_code)
     warnings: list[str] = []
-    recommendation, rec_source, rec_searched = _load_recommendation(user_id, normalized, output_dir, trade_date)
+    recommendation, rec_source, rec_searched = _load_recommendation(
+        user_id,
+        normalized,
+        output_dir,
+        trade_date,
+        db_path,
+    )
     paper_decision, decision_source, decision_searched = _load_paper_decision(
         user_id,
         normalized,
@@ -387,7 +302,7 @@ def explain_stock_decision_attribution(
         trade_date,
         db_path,
     )
-    diagnostics, diagnostics_source = _load_diagnostics(user_id, output_dir)
+    diagnostics, diagnostics_source = _load_diagnostics(user_id, db_path)
     allocation_items = _matching_allocation_items(normalized, diagnostics)
     lot_rounds = _lot_rounds_for_stock(normalized, diagnostics)
 

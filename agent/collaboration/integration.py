@@ -209,8 +209,7 @@ def execute_control_action(
     action: str,
     query: str = "",
     proposal_id: str = "",
-    plan_id: str = "",
-    confirmation_token: str = "",
+    idempotency_key: str = "",
     user_id: str = "default",
     session_id: str = "",
     run_id: str = "",
@@ -226,7 +225,7 @@ def execute_control_action(
     not own proposal resolution, approval, mutation, or commit logic.
     """
 
-    del confirmation_token, language
+    del language
     normalized = str(action or "").strip().lower()
     action_type = {
         "confirm": "confirm_execute",
@@ -238,11 +237,8 @@ def execute_control_action(
         raise ValueError(f"unsupported_write_action:{normalized}")
 
     merged_context = dict(context or {})
-    resolved_proposal_id = str(proposal_id or plan_id or "").strip()
+    resolved_proposal_id = str(proposal_id or "").strip()
     if resolved_proposal_id:
-        # ``plan_id`` is accepted only at this UI boundary because current pages
-        # still use that argument name.  It is immediately normalized to the one
-        # canonical proposal identity; no legacy plan runtime is invoked.
         merged_context["proposal_id"] = resolved_proposal_id
 
     result = WriteRequestExecutor(output_dir=output_dir, db_path=db_path).execute(
@@ -252,6 +248,7 @@ def execute_control_action(
         session_id=str(session_id or ""),
         run_id=str(run_id or ""),
         context=merged_context,
+        idempotency_key=str(idempotency_key or ""),
     )
     # Existing page code reads ``answer``.  This is presentation-only and does
     # not reintroduce a second control/business execution path.

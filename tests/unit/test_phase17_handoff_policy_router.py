@@ -39,7 +39,7 @@ def test_phase17_handoff_policy_validates_tools_and_sensitive_payloads() -> None
         tool_names=["stock_rag", "approval.confirm_plan", "mcp.local.read"],
         input_summary={"query": "news"},
     )
-    assert request.allowed_tools == ["stock_rag", "mcp.local.read"]
+    assert request.allowed_tools == ["stock_rag"]
     assert "approval.confirm_plan" in request.blocked_tools
     assert router.policy.validate_request(request) == []
 
@@ -64,7 +64,7 @@ def test_phase17_handoff_router_routes_common_goals() -> None:
 
     assert router.route_by_missing_context("missing rag evidence") == [AgentRole.EVIDENCE_RETRIEVER]
     assert router.route_by_tool_need("portfolio.preview_manual_change") == AgentRole.STRATEGY_GUARD
-    assert router.route_by_tool_need("mcp.local.read") == AgentRole.EVIDENCE_RETRIEVER
+    assert router.route_by_tool_need("mcp.local.read") == AgentRole.COORDINATOR
     assert router.route_by_risk_level("high") == [AgentRole.RISK_ANALYST, AgentRole.STRATEGY_GUARD]
 
 

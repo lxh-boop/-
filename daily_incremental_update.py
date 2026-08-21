@@ -26,6 +26,7 @@ from config import (
 )
 from data_tushare import fetch_stock_pool_recent_daily_fast
 from data_tushare import build_market_data_window, init_tushare_pro
+from database.repositories import PredictionRepository
 from kronos_runtime import (
     KRONOS_BACKEND,
     KRONOS_MODEL_NAME,
@@ -48,6 +49,21 @@ from pipelines.daily_update_pipeline import run_daily_update_pipeline
 from pipelines.schemas import PipelineContext
 from ranking_probability_calibration import calibrate_ranking_probabilities
 from universe import get_stock_pool
+
+
+def _persist_runtime_ranking(ranking: pd.DataFrame) -> int:
+    records = ranking.where(pd.notna(ranking), None).to_dict(orient="records")
+    db_path = os.environ.get("STOCK_AGENT_DB_PATH") or AGENT_QUANT_DB_PATH
+    persisted = PredictionRepository(db_path).replace_snapshot(
+        records,
+        source_kind="ranking",
+    )
+    if len(persisted) != len(records):
+        raise RuntimeError(
+            f"runtime_ranking_persistence_count_mismatch:"
+            f"source={len(records)}:persisted={len(persisted)}"
+        )
+    return len(persisted)
 
 # ============================================================
 # 1. 参数
@@ -308,6 +324,7 @@ def kronos_daily_update(
         history_dir=OUTPUT_DIR,
     )
     calibration_report = ranking.attrs.get("probability_calibration", {})
+    persisted_count = _persist_runtime_ranking(ranking)
     ranking.to_csv(RANKING_LATEST_PATH, index=False, encoding="utf-8-sig")
     date_text = str(ranking["date"].iloc[0]).replace("-", "")[:8]
     dated_path = os.path.join(OUTPUT_DIR, f"ranking_{date_text}_{KRONOS_MODEL_NAME}.csv")
@@ -323,6 +340,8 @@ def kronos_daily_update(
         "prediction_signal_date": signal_date,
         "prediction_date": str(market_window["prediction_target_date"]),
         "ranking_rows": int(len(ranking)),
+        "database_ranking_rows": persisted_count,
+        "runtime_data_authority": "database/model_prediction",
         "model_feature_source": "adjusted_ohlcva_256_observations",
         "model_native_output": "next_trading_day_ohlcva",
         "ranking_basis": "predicted_up_then_causal_stock_hit_rate_then_predicted_return",

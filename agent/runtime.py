@@ -547,20 +547,24 @@ class AgentRuntimeRecorder:
             artifact_ref = {"artifact_error": f"{type(exc).__name__}: {exc}"}
         reliability = sanitize_payload(dict(reliability or {}), max_chars=1200)
         mcp_metadata: dict[str, Any] = {}
-        if str(tool_name or "").startswith("mcp."):
-            try:
-                from agent.mcp.registry_bridge import mcp_call_metadata
-
-                mcp_metadata = sanitize_payload(
-                    mcp_call_metadata(
-                        tool_name=str(tool_name or ""),
-                        result=result or {},
-                        runtime_reliability=reliability,
-                    ),
-                    max_chars=1200,
-                )
-            except Exception:
-                mcp_metadata = {"provider_type": "mcp"}
+        result_metadata = (
+            (result or {}).get("metadata")
+            if isinstance((result or {}).get("metadata"), dict)
+            else {}
+        )
+        provider = (
+            result_metadata.get("provider")
+            if isinstance(result_metadata.get("provider"), dict)
+            else {}
+        )
+        if str(provider.get("provider_type") or "") == "mcp":
+            mcp_metadata = sanitize_payload(
+                {
+                    **provider,
+                    "runtime_reliability": reliability,
+                },
+                max_chars=1200,
+            )
         self.repo.upsert_agent_tool_call(
             {
                 "tool_call_id": tool_call_id,

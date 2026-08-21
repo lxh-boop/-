@@ -329,18 +329,25 @@ class WebReadApplicationService:
         return {"stock_code": code, "records": data, "total": int(len(data))}
 
     def stock_evidence(self, stock_code: str, *, query: str = "", top_k: int = 10) -> dict[str, Any]:
-        from application.dashboard_service import dashboard_service
+        from agent.services.evidence_service import evidence_service
 
         code = str(stock_code).zfill(6)
         search_query = self._text(query) or f"{code} 最新新闻 公告 风险"
         try:
-            frame = dashboard_service.retrieve_stock_context(
-                code,
+            result = evidence_service.search_documents(
                 search_query,
+                stock_code=code,
                 top_k=min(max(int(top_k), 1), 50),
-                force_rebuild=False,
             )
-            return {"stock_code": code, "query": search_query, "records": frame, "total": int(len(frame))}
+            data = dict(result.get("data") or {})
+            records = list(data.get("records") or [])
+            return {
+                "stock_code": code,
+                "query": search_query,
+                "records": records,
+                "total": len(records),
+                "warning": ";".join(result.get("warnings") or []),
+            }
         except Exception as exc:
             return {
                 "stock_code": code,

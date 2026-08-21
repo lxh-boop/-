@@ -69,18 +69,7 @@ def evidence_get_market_evidence_adapter(args: dict[str, Any], context: dict[str
     )
 
 
-def evidence_mcp_readonly_adapter(args: dict[str, Any], context: dict[str, Any]) -> Any:
-    tool_name = str(args.get("mcp_tool_name") or args.get("tool_name") or "")
-    arguments = args.get("arguments") if isinstance(args.get("arguments"), dict) else {}
-    return evidence_service.get_mcp_readonly_evidence(
-        tool_name,
-        arguments,
-        context=context,
-    )
-
-
 EvidenceSearchNewsAdapter = evidence_search_news_adapter
 EvidenceSearchRagAdapter = evidence_search_rag_adapter
 EvidenceGetStockEvidenceAdapter = evidence_get_stock_evidence_adapter
 EvidenceGetMarketEvidenceAdapter = evidence_get_market_evidence_adapter
-EvidenceMcpReadonlyAdapter = evidence_mcp_readonly_adapter

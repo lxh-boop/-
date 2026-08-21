@@ -11,8 +11,12 @@ from agent.tools.stock_lookup_tool import load_latest_recommendations
 from agent.tools.tool_schemas import ReplacementCandidate, ReplacementRecommendation, ToolPermission, ToolResult
 
 
-def _recommendation_by_code(user_id: str, output_dir: str | Path) -> dict[str, dict[str, Any]]:
-    rows = load_latest_recommendations(user_id, output_dir)
+def _recommendation_by_code(
+    user_id: str,
+    output_dir: str | Path,
+    db_path: str | Path | None,
+) -> dict[str, dict[str, Any]]:
+    rows = load_latest_recommendations(user_id, output_dir, db_path=db_path)
     return {
         normalize_stock_code(first_present(row, ["stock_code", "code"], "")): row
         for row in rows
@@ -30,7 +34,7 @@ def recommend_replacements(
 ) -> ToolResult:
     state = query_portfolio_state(user_id, output_dir=output_dir, db_path=db_path)
     total_assets = safe_float((state.get("account") or {}).get("total_assets"), 0.0)
-    recommendations = _recommendation_by_code(user_id, output_dir)
+    recommendations = _recommendation_by_code(user_id, output_dir, db_path)
     candidate_code = normalize_stock_code(candidate_stock_code)
     rows: list[ReplacementCandidate] = []
     for position in state.get("positions") or []:

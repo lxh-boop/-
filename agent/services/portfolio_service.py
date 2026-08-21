@@ -22,8 +22,13 @@ def _to_dict(value: Any) -> dict[str, Any]:
     return {}
 
 
-def _source(label: str, path: Path) -> dict[str, Any]:
-    return {"label": label, "path": str(path), "exists": path.exists()}
+def _source(label: str, table: str) -> dict[str, Any]:
+    return {
+        "label": label,
+        "source_type": "database",
+        "table": table,
+        "exists": True,
+    }
 
 
 def _active_positions(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -105,11 +110,11 @@ class PortfolioService:
         return PortfolioStorage(db_path, output_dir=portfolio_user_dir(output_dir, user_id))
 
     def _sources(self, user_id: str, output_dir: str | Path, db_path: str | Path | None) -> list[dict[str, Any]]:
-        storage = self._storage(user_id, output_dir, db_path)
+        del user_id, output_dir, db_path
         return [
-            _source("paper_account_latest", storage.account_latest_path),
-            _source("paper_positions_latest", storage.positions_latest_path),
-            _source("paper_orders_latest", storage.orders_latest_path),
+            _source("paper_account", "paper_account"),
+            _source("portfolio_positions", "portfolio_position"),
+            _source("paper_orders", "paper_order"),
         ]
 
     def _snapshot(

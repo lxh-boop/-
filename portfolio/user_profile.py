@@ -128,25 +128,10 @@ def load_user_context(
     default_profile_type: str = "稳健型",
     output_dir: str | Path = "outputs",
 ) -> tuple[UserProfile, RiskAssessment, InvestmentGoal, dict[str, Any]]:
-    try:
-        repo = UserRepository(db_path)
-        profile_row = repo.get_user_profile(user_id)
-        risk_rows = repo.list_risk_assessments(user_id)
-        goal_rows = repo.list_investment_goals(user_id)
-    except Exception:
-        profile = default_user_profile(user_id, default_profile_type)
-        risk = default_risk_assessment(user_id, profile.profile_type)
-        goal = default_investment_goal(user_id, profile.profile_type)
-        permissions = load_user_trading_permissions(
-            user_id,
-            output_dir,
-        )
-        return profile, risk, goal, build_user_constraints(
-            profile,
-            risk,
-            goal,
-            trading_permissions=permissions,
-        )
+    repo = UserRepository(db_path)
+    profile_row = repo.get_user_profile(user_id)
+    risk_rows = repo.list_risk_assessments(user_id)
+    goal_rows = repo.list_investment_goals(user_id)
 
     risk_row = risk_rows[-1] if risk_rows else None
     inferred_profile_type = _profile_type_from_risk_level(risk_row.get("risk_level") if risk_row else None)
@@ -201,6 +186,7 @@ def load_user_context(
     permissions = load_user_trading_permissions(
         user_id,
         output_dir,
+        db_path,
     )
     return profile, risk, goal, build_user_constraints(
         profile,

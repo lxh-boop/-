@@ -3,6 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from database.repositories import (
+    PortfolioRepository,
+    RecommendationRepository,
+    RuntimeStateRepository,
+)
 from portfolio.decision_attribution import (
     explain_stock_decision_attribution,
     render_decision_attribution_markdown,
@@ -14,7 +19,7 @@ def _write_json(path: Path, payload) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _make_outputs(root: Path) -> None:
+def _make_outputs(root: Path) -> Path:
     recommendation = {
         "user_id": "u1",
         "trade_date": "2026-07-01",
@@ -102,20 +107,32 @@ def _make_outputs(root: Path) -> None:
         ],
     }
     _write_json(root / "portfolio" / "u1" / "paper_execution_diagnostics_latest.json", diagnostics)
+    db_path = root / "runtime.sqlite"
+    RecommendationRepository(db_path).replace_snapshot("u1", [recommendation])
+    PortfolioRepository(db_path).insert_paper_decision(decision)
+    RuntimeStateRepository(db_path).put(
+        "paper_execution_diagnostics",
+        diagnostics,
+        user_id="u1",
+        scope_id="paper_u1",
+        as_of_date="2026-07-01",
+    )
+    return db_path
 
 
 def test_decision_attribution_uses_user_results_and_preserves_formula_trace(tmp_path: Path) -> None:
-    _make_outputs(tmp_path)
+    db_path = _make_outputs(tmp_path)
 
     payload = explain_stock_decision_attribution(
         user_id="u1",
         stock_code="000001",
         trade_date="2026-07-01",
         output_dir=tmp_path,
+        db_path=db_path,
     )
 
     assert payload["mode"] == "read_only_attribution"
-    assert "\\users\\u1\\" in payload["sources"]["recommendation"] or "/users/u1/" in payload["sources"]["recommendation"]
+    assert payload["sources"]["recommendation"] == "database/portfolio_recommendation_result"
     assert payload["formal_recommendation"]["news_adjustment"] == 0.2
     assert payload["paper_decision"]["paper_action"] == "paper_buy"
     assert payload["allocation_trace"]["diagnostic_items"][0]["base_allocation_score"] == 12
@@ -127,17 +144,27 @@ def test_decision_attribution_uses_user_results_and_preserves_formula_trace(tmp_
 
 
 def test_decision_attribution_is_read_only(tmp_path: Path) -> None:
-    _make_outputs(tmp_path)
+    db_path = _make_outputs(tmp_path)
     before = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*") if path.is_file())
 
-    explain_stock_decision_attribution("u1", "000001", output_dir=tmp_path)
+    explain_stock_decision_attribution(
+        "u1",
+        "000001",
+        output_dir=tmp_path,
+        db_path=db_path,
+    )
 
     after = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*") if path.is_file())
     assert after == before
 
 
 def test_decision_attribution_reports_missing_sources_without_recomputing(tmp_path: Path) -> None:
-    payload = explain_stock_decision_attribution("u1", "000001", output_dir=tmp_path)
+    payload = explain_stock_decision_attribution(
+        "u1",
+        "000001",
+        output_dir=tmp_path,
+        db_path=tmp_path / "runtime.sqlite",
+    )
 
     assert payload["formal_recommendation"] == {}
     assert payload["paper_decision"] == {}
@@ -146,8 +173,13 @@ def test_decision_attribution_reports_missing_sources_without_recomputing(tmp_pa
 
 
 def test_decision_attribution_markdown_contains_trace_and_disclaimer(tmp_path: Path) -> None:
-    _make_outputs(tmp_path)
-    payload = explain_stock_decision_attribution("u1", "000001", output_dir=tmp_path)
+    db_path = _make_outputs(tmp_path)
+    payload = explain_stock_decision_attribution(
+        "u1",
+        "000001",
+        output_dir=tmp_path,
+        db_path=db_path,
+    )
 
     markdown = render_decision_attribution_markdown(payload)
 

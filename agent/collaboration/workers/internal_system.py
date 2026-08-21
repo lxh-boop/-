@@ -40,22 +40,36 @@ def _available_context(
     return context
 
 
-def _publish_business_data(task: GraphAgentTask, dag_result: Any) -> tuple[dict[str, Any], list[str], list[str]]:
+def _publish_business_data(
+    task: GraphAgentTask,
+    dag_result: Any,
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]], list[str], list[str]]:
     wanted = set(contract_output_data_names(task))
     business_data: dict[str, Any] = {}
+    business_data_contracts: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
     for tool_result in list(getattr(dag_result, "final_results", []) or []):
         data = execution_safe_value(dict(getattr(tool_result, "data", {}) or {}))
         tool_data = data.get("business_data") if isinstance(data.get("business_data"), dict) else data.get("slots") if isinstance(data.get("slots"), dict) else {}
+        slot_contracts = data.get("slot_contracts") if isinstance(data.get("slot_contracts"), dict) else {}
         for raw_name, value in tool_data.items():
             name = LEGACY_OUTPUT_NAME_MAP.get(str(raw_name), str(raw_name))
             if name in wanted:
                 business_data[name] = execution_safe_value(value)
+                if isinstance(slot_contracts.get(raw_name), dict):
+                    business_data_contracts[name] = execution_safe_value(
+                        slot_contracts[raw_name]
+                    )
         warnings.extend(str(item) for item in getattr(tool_result, "warnings", []) or [] if str(item))
         warnings.extend(str(item) for item in getattr(tool_result, "errors", []) or [] if str(item))
     produced = [name for name in contract_output_data_names(task) if name in business_data]
     missing = [name for name in contract_output_data_names(task) if name not in business_data]
-    return business_data, produced, list(dict.fromkeys([*warnings, *missing]))
+    return (
+        business_data,
+        business_data_contracts,
+        produced,
+        list(dict.fromkeys([*warnings, *missing])),
+    )
 
 
 def run_internal_system(
@@ -95,12 +109,13 @@ def run_internal_system(
         read_only=True,
         max_replans=1,
     )
-    business_data, produced, warnings = _publish_business_data(task, dag_result)
+    business_data, business_data_contracts, produced, warnings = _publish_business_data(task, dag_result)
     success = bool(dag_result.success and not [name for name in required_outputs if name not in produced])
     status = ResultStatus.COMPLETED if success else ResultStatus.PARTIAL if produced else ResultStatus.FAILED
     payload = {
         "boundary_id": task.boundary_id,
         "business_data": business_data,
+        "business_data_contracts": business_data_contracts,
         "produced_data_names": produced,
         "missing_data_names": [name for name in required_outputs if name not in produced],
         "business_empty": bool(produced and all(value in ({}, [], None, "") for value in business_data.values())),

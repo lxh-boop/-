@@ -10,6 +10,7 @@ from agent.tools import market_analysis_adapters
 from agent.tools.position_recommendation_tool import recommend_position_weight
 from agent_control_center_utils import write_agent_fixture
 from application.paper_profile_service import format_classic_ranking_for_display, load_classic_ranking_with_ai_adjustment
+from database.repositories import PredictionRepository, RecommendationRepository
 
 
 def test_p2a_market_tools_registered_with_legacy_aliases() -> None:
@@ -120,7 +121,21 @@ def test_p2a_classic_services_wrapper_keeps_dataframe_shape(tmp_path: Path) -> N
         ]
     ).to_csv(rec_dir / "final_recommendations_latest.csv", index=False, encoding="utf-8-sig")
 
-    merged = load_classic_ranking_with_ai_adjustment(output_dir=output_dir)
+    db_path = tmp_path / "agent.db"
+    PredictionRepository(db_path).replace_snapshot(
+        pd.read_csv(output_dir / "ranking_latest.csv", dtype={"code": str}).to_dict("records")
+    )
+    rec_rows = pd.read_csv(
+        rec_dir / "final_recommendations_latest.csv",
+        dtype={"stock_code": str},
+    ).to_dict("records")
+    for row in rec_rows:
+        row["trade_date"] = "2026-06-12"
+    RecommendationRepository(db_path).replace_snapshot("default", rec_rows)
+    merged = load_classic_ranking_with_ai_adjustment(
+        output_dir=output_dir,
+        db_path=db_path,
+    )
     display = format_classic_ranking_for_display(merged)
 
     assert merged.loc[0, "stock_code"] == "000001"

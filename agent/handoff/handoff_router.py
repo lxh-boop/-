@@ -76,8 +76,6 @@ class HandoffRouter:
 
     def route_by_tool_need(self, tool_name: str) -> AgentRole:
         name = str(tool_name or "")
-        if name.startswith("mcp."):
-            return AgentRole.EVIDENCE_RETRIEVER
         if name in PROPOSAL_TOOL_NAMES:
             return AgentRole.STRATEGY_GUARD
         for role in AgentRole:
@@ -119,7 +117,7 @@ class HandoffRouter:
         allowed = self.policy.allowed_tools_for_role(target)
         requested = [str(item) for item in (tool_names or []) if str(item or "").strip()]
         if requested:
-            allowed = [tool for tool in requested if tool in allowed or (target == AgentRole.EVIDENCE_RETRIEVER and tool.startswith("mcp."))]
+            allowed = [tool for tool in requested if tool in allowed]
         return HandoffRequest(
             conversation_id=conversation_id,
             run_id=run_id,

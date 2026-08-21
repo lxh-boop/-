@@ -26,15 +26,12 @@ def _safe_trade_date(value: Any) -> str:
 
 
 def _load_user_constraints(context: PipelineContext) -> UserConstraintSignal:
-    try:
-        repo = UserRepository(context.db_path)
-        profile = repo.get_user_profile(context.user_id) or {"user_id": context.user_id}
-        risk = _latest(repo.list_risk_assessments(context.user_id)) or {}
-        goal = _latest(repo.list_investment_goals(context.user_id)) or {}
-        data = {**profile, **risk, **goal, "user_id": context.user_id}
-        return UserConstraintSignal.from_mapping(data)
-    except Exception:
-        return UserConstraintSignal(user_id=context.user_id)
+    repo = UserRepository(context.db_path)
+    profile = repo.get_user_profile(context.user_id) or {"user_id": context.user_id}
+    risk = _latest(repo.list_risk_assessments(context.user_id)) or {}
+    goal = _latest(repo.list_investment_goals(context.user_id)) or {}
+    data = {**profile, **risk, **goal, "user_id": context.user_id}
+    return UserConstraintSignal.from_mapping(data)
 
 
 def _load_agent_rules(context: PipelineContext) -> list[AgentRuleSignal]:
@@ -71,10 +68,7 @@ def _load_news_mappings(context: PipelineContext, predictions: list[ModelPredict
 
 def _portfolio_constraints(context: PipelineContext, predictions: list[ModelPredictionSignal]) -> dict[str, Any]:
     by_stock: dict[str, dict[str, Any]] = {}
-    try:
-        positions = PortfolioRepository(context.db_path).list_positions(context.user_id)
-    except Exception:
-        positions = []
+    positions = PortfolioRepository(context.db_path).list_positions(context.user_id)
     industry_ratio: dict[str, float] = {}
     for row in positions:
         industry = str(row.get("industry") or "")
@@ -113,7 +107,11 @@ def run_signal_fusion_pipeline(
     news = list(rag_evidence or []) + _load_news_mappings(context, predictions)
     rules = _load_agent_rules(context)
     portfolio = _portfolio_constraints(context, predictions)
-    reliability_state = load_ai_reliability_state(context.user_id, context.resolved_output_dir())
+    reliability_state = load_ai_reliability_state(
+        context.user_id,
+        context.resolved_output_dir(),
+        context.db_path,
+    )
     ai_reliability_weight = float(reliability_state.get("ai_reliability_weight") or DEFAULT_AI_RELIABILITY_WEIGHT)
     if ENABLE_COLD_START_NEWS_ADJUSTMENT and str(reliability_state.get("status") or "") == "cold_start" and ai_reliability_weight <= 0:
         ai_reliability_weight = float(COLD_START_NEWS_RELIABILITY_WEIGHT)
@@ -126,7 +124,17 @@ def run_signal_fusion_pipeline(
         ai_reliability_weight=ai_reliability_weight,
     )
 
-    paths = {} if context.dry_run else save_final_recommendations(records, output_dir=output_dir)
+    paths = (
+        {}
+        if context.dry_run
+        else save_final_recommendations(
+            records,
+            output_dir=output_dir,
+            user_id=context.user_id,
+            db_path=context.db_path,
+            persist_database=True,
+        )
+    )
     decision_log_count = 0
     warnings: list[str] = []
     if not context.dry_run:

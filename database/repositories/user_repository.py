@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from database.schemas import json_dumps, json_loads
 from database.sqlite_store import SQLiteStore
 
 
@@ -11,10 +12,26 @@ class UserRepository:
         self.store = SQLiteStore(db_path)
 
     def insert_user_profile(self, record: dict[str, Any]) -> dict[str, Any]:
-        return self.store.upsert("user_profile", record)
+        payload = dict(record)
+        if "trading_permissions" in payload:
+            payload["trading_permissions_json"] = json_dumps(
+                payload.pop("trading_permissions")
+            )
+        saved = self.store.upsert("user_profile", payload)
+        saved["trading_permissions"] = json_loads(
+            saved.pop("trading_permissions_json", "{}"),
+            default={},
+        )
+        return saved
 
     def get_user_profile(self, user_id: str) -> dict[str, Any] | None:
-        return self.store.get("user_profile", {"user_id": user_id})
+        row = self.store.get("user_profile", {"user_id": user_id})
+        if row:
+            row["trading_permissions"] = json_loads(
+                row.pop("trading_permissions_json", "{}"),
+                default={},
+            )
+        return row
 
     def list_user_profiles(self, limit: int | None = None) -> list[dict[str, Any]]:
         return self.store.list("user_profile", order_by="user_id", limit=limit)

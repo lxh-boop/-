@@ -17,6 +17,7 @@ from agent.llm_audit import activate_llm_audit_context
 from agent.runtime_state import RuntimeResourceBudget
 from agent.tool_dag import ToolDagExecutor, ToolDagValidator, WorkerToolDagPlanner, WorkerToolDagRuntime
 from agent.tool_runtime import ToolExecutor
+from agent.tool_runtime import ToolOutputContract
 from agent.worker_tools import WorkerToolDirectory, build_worker_tool_registry
 
 from .completion import canonicalize_completion_report, flow_decision, non_success_completion_report, runtime_completion_report
@@ -81,8 +82,14 @@ class SpecialistRuntime:
 
     def _working_context(self, task: GraphAgentTask) -> dict[str, Any]:
         if self.context_bundle is None:
-            return {"schema_version": "context_bundle_business_data.v1", "run_id": task.run_id,
-                    "entities": [], "global_data": {}, "available_names": []}
+            return {
+                "schema_version": "context_bundle_business_data.v2",
+                "run_id": task.run_id,
+                "entities": [],
+                "global_data": {},
+                "global_contracts": {},
+                "available_names": [],
+            }
         return self.context_bundle.business_data_context(entity_refs=[self._ref_dict(ref) for ref in task.focus_refs])
 
     def _provider_reuse(self, task: GraphAgentTask) -> GraphWorkerResult | None:
@@ -178,11 +185,41 @@ class SpecialistRuntime:
                 refs.extend(self._candidate_refs_from_value(value))
         unique_refs: dict[str, dict[str, Any]] = {str(ref.get("node_id")): ref for ref in refs if str(ref.get("node_id") or "")}
         target_refs = list(unique_refs.values()) or [None]
+        payload = dict(result.data or {}) if isinstance(result.data, dict) else {}
+        declared_contracts = (
+            dict(payload.get("business_data_contracts") or {})
+            if isinstance(payload.get("business_data_contracts"), dict)
+            else {}
+        )
         records: list[dict[str, Any]] = []
         for ref in target_refs:
             for name in names:
-                records.append(self.context_bundle.put_business_data(entity_ref=ref, name=name, value=values.get(name),
-                    data_time=str(task.as_of_time or "")))
+                descriptor = (
+                    dict(declared_contracts.get(name) or {})
+                    if isinstance(declared_contracts.get(name), dict)
+                    else ToolOutputContract(
+                        slot_id=name,
+                        source_path="business_data",
+                    ).contract_descriptor()
+                )
+                records.append(
+                    self.context_bundle.put_business_data(
+                        entity_ref=ref,
+                        name=name,
+                        value=values.get(name),
+                        data_time=str(task.as_of_time or ""),
+                        contract=str(descriptor.get("contract") or name),
+                        version=str(descriptor.get("version") or "1.0"),
+                        schema_id=str(descriptor.get("schema_id") or ""),
+                        provenance={
+                            "producer_type": "worker",
+                            "producer_id": str(task.worker_id or task.assigned_agent),
+                            "task_id": str(task.task_id or ""),
+                            "run_id": str(task.run_id or ""),
+                            **dict(descriptor.get("provenance") or {}),
+                        },
+                    )
+                )
         return records
 
     def _parameter_gate(self, task: GraphAgentTask, context: dict[str, Any], language: str) -> GraphWorkerResult | None:

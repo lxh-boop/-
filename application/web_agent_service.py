@@ -16,6 +16,7 @@ from agent.react.react_context_bridge import (
     list_safe_observation_summaries,
 )
 from agent.runtime import load_run_snapshot
+from agent.proposals import ProposalStore
 from agent.services.strategy_proposal_service import StrategyProposalService
 
 
@@ -700,39 +701,44 @@ class WebAgentApplicationService:
         user_id = self._user_id(user_id)
         if conversation_id:
             self._require_session(user_id, conversation_id)
-        actions = self.agent.list_pending_actions(user_id, self.output_dir)
-        candidates = [
-            dict(plan or {})
-            for plan in actions.values()
-            if str((plan or {}).get("execution_status") or "") not in {"executed", "cancelled"}
-        ]
-        run_ids = sorted({str(plan.get("run_id") or "") for plan in candidates if str(plan.get("run_id") or "")})
-        run_map = {
-            str(row.get("run_id") or ""): str(row.get("conversation_id") or "")
-            for row in self.agent.list_agent_runs_by_ids(run_ids)
-        } if run_ids else {}
+        store = ProposalStore(output_dir=self.output_dir, db_path=self.db_path)
+        candidates = (
+            store.list_pending(user_id=user_id, session_id=conversation_id, limit=100)
+            if conversation_id
+            else store.list_pending_for_user(user_id=user_id, limit=100)
+        )
         records: list[dict[str, Any]] = []
-        for plan in candidates:
-            run_id = str(plan.get("run_id") or "")
-            if conversation_id and run_id and run_map.get(run_id) not in {"", conversation_id}:
-                continue
-            plan_id = str(plan.get("plan_id") or "")
+        for proposal in candidates:
+            payload = dict(proposal.payload or {})
+            proposal_id = proposal.proposal_id
             records.append(
                 {
-                    "plan_id": plan_id,
-                    "run_id": run_id,
-                    "intent": str(plan.get("intent") or plan.get("operation_type") or ""),
-                    "operation_type": str(plan.get("operation_type") or plan.get("intent") or ""),
-                    "confirmation_status": str(plan.get("confirmation_status") or ""),
-                    "execution_status": str(plan.get("execution_status") or ""),
-                    "created_at": str(plan.get("created_at") or ""),
-                    "expires_at": str(plan.get("expires_at") or ""),
-                    "before_state_summary": _safe_value(plan.get("before_state_summary") or {}, max_chars=350),
-                    "proposed_changes": _safe_value(plan.get("proposed_changes") or [], max_chars=350),
-                    "after_state_preview": _safe_value(plan.get("after_state_preview") or {}, max_chars=350),
-                    "warnings": _safe_value(plan.get("warnings") or [], max_chars=300),
-                    "validation_results": _safe_value(plan.get("validation_results") or {}, max_chars=300),
-                    "confirmation_phrase": self._confirmation_phrase(plan_id),
+                    "proposal_id": proposal_id,
+                    # Frozen Stage 6 route/type compatibility only. Both values
+                    # identify the same canonical Proposal; no legacy plan store
+                    # is queried or executed.
+                    "plan_id": proposal_id,
+                    "proposal_version": proposal.current_version,
+                    "payload_hash": proposal.current_payload_hash,
+                    "run_id": proposal.source_run_id,
+                    "intent": str(payload.get("operation_type") or proposal.proposal_type),
+                    "operation_type": str(payload.get("operation_type") or proposal.proposal_type),
+                    "confirmation_status": "pending",
+                    "execution_status": proposal.status.value,
+                    "created_at": proposal.created_at,
+                    "expires_at": proposal.expires_at,
+                    "before_state_summary": _safe_value(payload.get("target") or {}, max_chars=350),
+                    "proposed_changes": _safe_value(
+                        payload.get("changes") or payload.get("execution_parameters") or {},
+                        max_chars=350,
+                    ),
+                    "after_state_preview": _safe_value(payload.get("constraint_response") or {}, max_chars=350),
+                    "warnings": _safe_value(payload.get("limitations") or [], max_chars=300),
+                    "validation_results": {
+                        "proposal_type": proposal.proposal_type,
+                        "payload_hash_bound": bool(proposal.current_payload_hash),
+                    },
+                    "confirmation_phrase": self._confirmation_phrase(proposal_id),
                 }
             )
         records.sort(key=lambda item: item.get("created_at") or "", reverse=True)
@@ -753,27 +759,28 @@ class WebAgentApplicationService:
         self._require_session(user_id, conversation_id)
         if not request_id or not idempotency_key:
             raise ValueError("request_id_and_idempotency_key_required")
-        plans = self.agent.list_pending_actions(user_id, self.output_dir)
-        plan = dict(plans.get(str(plan_id)) or {})
-        if not plan:
+        store = ProposalStore(output_dir=self.output_dir, db_path=self.db_path)
+        proposal = store.get(str(plan_id))
+        if proposal is None:
             raise ValueError("pending_action_not_found")
+        if proposal.user_id != user_id:
+            raise PermissionError("pending_action_owner_mismatch")
+        if proposal.session_id and proposal.session_id != conversation_id:
+            raise PermissionError("pending_action_session_mismatch")
         action = str(action or "").lower()
         kwargs = {
-            "plan_id": str(plan_id),
+            "proposal_id": proposal.proposal_id,
             "user_id": user_id,
             "session_id": conversation_id,
-            "run_id": str(plan.get("run_id") or ""),
+            "run_id": proposal.source_run_id,
             "language": "zh",
             "output_dir": self.output_dir,
             "db_path": self.db_path,
+            "idempotency_key": str(idempotency_key),
         }
         if action == "confirm":
             if str(confirmation_text or "").strip().upper() != self._confirmation_phrase(plan_id):
                 raise ValueError("confirmation_text_mismatch")
-            token = str(plan.get("confirmation_token") or "")
-            if not token:
-                raise ValueError("confirmation_token_missing_on_server")
-            kwargs["confirmation_token"] = token
         elif action != "reject":
             raise ValueError("invalid_control_action")
         result = self.agent.control_action(action=action, **kwargs)

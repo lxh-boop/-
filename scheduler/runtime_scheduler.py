@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import json
 import os
 import threading
@@ -9,6 +8,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from config import AGENT_QUANT_DB_PATH
+from database.repositories import PredictionRepository
 from local_config import load_local_config
 from scheduler.job_state import load_latest_job_status
 from scheduler.trading_calendar import get_latest_trading_day
@@ -54,18 +55,16 @@ def _save_runtime_file(payload: dict[str, Any], root: str | Path = ".") -> None:
 
 
 def read_ranking_signal_date(output_dir: str | Path = "outputs") -> str:
-    """读取当前排名文件的信号日期，不跨日期猜测。"""
+    """从运行数据库读取当前排名信号日期。"""
 
-    path = Path(output_dir) / "ranking_latest.csv"
-    if not path.exists():
+    del output_dir
+    rows = PredictionRepository(AGENT_QUANT_DB_PATH).list_latest_predictions(
+        limit=1
+    )
+    if not rows:
         return ""
-    try:
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            reader = csv.DictReader(handle)
-            first = next(reader, None) or {}
-        return str(first.get("date") or first.get("signal_date") or "")[:10]
-    except Exception:
-        return ""
+    first = rows[0]
+    return str(first.get("trade_date") or first.get("date") or "")[:10]
 
 
 def expected_signal_date(now: datetime | None = None) -> str:

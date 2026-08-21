@@ -36,7 +36,9 @@ def _analyze_stock_impl(
     top_k: int = 50,
     include_rag: bool = True,
 ) -> ToolResult:
-    lookup = lookup_stock(stock_code, user_id=user_id, output_dir=output_dir)
+    lookup = lookup_stock(
+        stock_code, user_id=user_id, output_dir=output_dir, db_path=db_path
+    )
     code = lookup.get("stock_code") or normalize_stock_code(stock_code)
     ranking_row = dict(lookup.get("ranking_row") or {})
     rec_row = dict(lookup.get("recommendation_row") or {})
@@ -50,8 +52,10 @@ def _analyze_stock_impl(
             tool_name="stock_analysis",
         )
 
-    ranking_records = load_latest_ranking(output_dir)
-    recommendation_records = load_latest_recommendations(user_id, output_dir)
+    ranking_records = load_latest_ranking(output_dir, db_path=db_path)
+    recommendation_records = load_latest_recommendations(
+        user_id, output_dir, db_path=db_path
+    )
     trade_date = (
         str(first_present(rec_row, ["trade_date", "date", "signal_date"], "")).strip()[:10]
         or str(first_present(ranking_row, ["trade_date", "date", "signal_date"], "")).strip()[:10]

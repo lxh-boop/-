@@ -46,9 +46,32 @@ DEFAULT_LOCAL_CONFIG = {
     "scheduler_market_update_timeout_seconds": 997200,
     "model_version": "latest",
     "page_zoom_percent": 100,
-    "mcp_example_enabled": False,
-    "mcp_example_allowed_tools": ["market_risk_summary"],
-    "mcp_example_timeout_seconds": 995.0,
+    "mcp_data_enabled": True,
+    "mcp_data_allowed_tools": [
+        "get_user_profile",
+        "get_portfolio_state",
+        "get_positions",
+        "get_orders",
+        "get_stock_info",
+        "get_latest_ranking",
+        "get_latest_recommendations",
+    ],
+    "mcp_data_timeout_seconds": 30.0,
+    "mcp_rag_enabled": True,
+    "mcp_rag_allowed_tools": [
+        "search_documents",
+        "search_news",
+        "retrieve_evidence",
+    ],
+    "mcp_rag_timeout_seconds": 90.0,
+    "mcp_model_enabled": True,
+    "mcp_model_allowed_tools": [
+        "predict_stock_score",
+        "predict_rank",
+        "predict_risk",
+    ],
+    "mcp_model_timeout_seconds": 30.0,
+    "mcp_external_servers": [],
     "mcp_discovery_ttl_seconds": 300,
     "neo4j_uri": "bolt://127.0.0.1:7687",
     "neo4j_username": "neo4j",
@@ -81,6 +104,12 @@ def load_local_config() -> Dict[str, Any]:
 
         cfg = DEFAULT_LOCAL_CONFIG.copy()
         cfg.update(data)
+        for obsolete_key in (
+            "mcp_example_enabled",
+            "mcp_example_allowed_tools",
+            "mcp_example_timeout_seconds",
+        ):
+            cfg.pop(obsolete_key, None)
         # Legacy aliases are read only at this migration boundary.
         if not str(cfg.get("llm_api_base_url") or "").strip() and str(cfg.get("llm_base_url") or "").strip():
             cfg["llm_api_base_url"] = str(cfg["llm_base_url"]).strip()
@@ -105,6 +134,12 @@ def save_local_config(config: Dict[str, Any]) -> None:
 
     cfg = DEFAULT_LOCAL_CONFIG.copy()
     cfg.update(config)
+    for obsolete_key in (
+        "mcp_example_enabled",
+        "mcp_example_allowed_tools",
+        "mcp_example_timeout_seconds",
+    ):
+        cfg.pop(obsolete_key, None)
     if not str(cfg.get("llm_api_base_url") or "").strip() and str(cfg.get("llm_base_url") or "").strip():
         cfg["llm_api_base_url"] = str(cfg["llm_base_url"]).strip()
     if not str(cfg.get("llm_api_model") or "").strip() and str(cfg.get("llm_model") or "").strip():

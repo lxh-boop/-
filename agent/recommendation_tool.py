@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import csv
 import json
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from database.repositories import RecommendationRepository
 from scoring.schemas import COMPLIANCE_DISCLAIMER
 
 
@@ -28,38 +28,31 @@ def _parse_jsonish(value: Any) -> Any:
         return value
 
 
-def _recommendation_paths(output_dir: str | Path = "outputs") -> tuple[Path, Path]:
-    root = Path(output_dir) / "recommendations"
-    return root / "final_recommendations_latest.json", root / "final_recommendations_latest.csv"
-
-
-def _load_records(output_dir: str | Path = "outputs") -> tuple[list[dict[str, Any]], str, str]:
-    json_path, csv_path = _recommendation_paths(output_dir)
-    if json_path.exists():
-        try:
-            data = json.loads(json_path.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                return [dict(row) for row in data if isinstance(row, dict)], str(json_path), "read json"
-        except Exception as exc:
-            return [], str(json_path), f"failed to read json: {exc}"
-    if csv_path.exists():
-        try:
-            with csv_path.open("r", encoding="utf-8-sig", newline="") as file:
-                rows = []
-                for row in csv.DictReader(file):
-                    rows.append({key: _parse_jsonish(value) for key, value in row.items()})
-            return rows, str(csv_path), "read csv"
-        except Exception as exc:
-            return [], str(csv_path), f"failed to read csv: {exc}"
-    return [], str(json_path), "final recommendation file not found"
+def _load_records(
+    user_id: str = "default",
+    db_path: str | Path | None = None,
+) -> tuple[list[dict[str, Any]], str, str]:
+    rows = RecommendationRepository(db_path).list_latest(user_id)
+    records = [
+        {key: _parse_jsonish(value) for key, value in row.items()}
+        for row in rows
+    ]
+    return (
+        records,
+        "database/portfolio_recommendation_result",
+        "read database" if records else "latest recommendation rows not found",
+    )
 
 
 def get_latest_recommendations(
     output_dir: str | Path = "outputs",
     top_k: int | None = None,
     risk_level: str | None = None,
+    user_id: str = "default",
+    db_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    records, path, message = _load_records(output_dir)
+    del output_dir
+    records, path, message = _load_records(user_id, db_path)
     filtered = list(records)
     if risk_level and risk_level != "all":
         filtered = [
@@ -98,9 +91,15 @@ def get_latest_recommendations(
 def get_recommendation_by_stock(
     stock_code: str,
     output_dir: str | Path = "outputs",
+    user_id: str = "default",
+    db_path: str | Path | None = None,
 ) -> dict[str, Any]:
     target = _stock_code(stock_code)
-    latest = get_latest_recommendations(output_dir=output_dir)
+    latest = get_latest_recommendations(
+        output_dir=output_dir,
+        user_id=user_id,
+        db_path=db_path,
+    )
     for row in latest.get("records", []):
         code = _stock_code(row.get("stock_code") or row.get("code"))
         if code == target:

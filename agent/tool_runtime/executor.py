@@ -38,6 +38,7 @@ from .contracts import (
     AGENT_READ,
     OP_READ,
     OP_WRITE,
+    TOOL_IO_CONTRACT_VERSION,
     ToolDefinition,
     ToolError,
     UnifiedToolResult,
@@ -350,6 +351,18 @@ class ToolExecutor:
             artifact_ref: dict[str, Any] = {}
             if context.get("db_path") or context.get("output_dir"):
                 try:
+                    provider_metadata = {
+                        key: value
+                        for key, value in dict(definition.runtime_policy or {}).items()
+                        if key
+                        in {
+                            "provider_type",
+                            "server_id",
+                            "transport_tool_name",
+                            "transport",
+                            "projection_kind",
+                        }
+                    }
                     artifact_ref = save_tool_result_artifact(
                         db_path=context.get("db_path"),
                         output_dir=context.get("output_dir"),
@@ -363,6 +376,12 @@ class ToolExecutor:
                         task_id=str(context.get("task_id") or ""),
                         tool_name=requested_name,
                         result=result,
+                        output_contracts=definition.output_contracts,
+                        provenance={
+                            "canonical_tool_name": canonical_name,
+                            "agent_type": str(agent_type or ""),
+                            **provider_metadata,
+                        },
                     )
                     artifact_id = str(artifact_ref.get("artifact_id") or "")
                 except Exception as exc:
@@ -378,8 +397,27 @@ class ToolExecutor:
                 "argument_keys": argument_keys,
                 "failure_kind": str(result.get("failure_kind") or ""),
                 "retryable": bool(result.get("retryable", False)),
-                "tool_io_contract_version": "tool-io-contract.v1" if definition.output_contracts or definition.input_contracts else "uncontracted",
+                "tool_io_contract_version": TOOL_IO_CONTRACT_VERSION if definition.output_contracts or definition.input_contracts else "uncontracted",
                 "semantic_output_slots": list(semantic_slots),
+                "artifact_contracts": [
+                    {
+                        "slot_id": contract.slot_id,
+                        **contract.contract_descriptor(),
+                    }
+                    for contract in definition.output_contracts
+                ],
+                "provider": {
+                    key: value
+                    for key, value in dict(definition.runtime_policy or {}).items()
+                    if key
+                    in {
+                        "provider_type",
+                        "server_id",
+                        "transport_tool_name",
+                        "transport",
+                        "projection_kind",
+                    }
+                },
             }
             reported_success = bool(result.get("success"))
             reported_error_type = str(result.get("error_type") or "")

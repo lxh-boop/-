@@ -196,81 +196,65 @@ def _records_to_frame(records: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame([dict(record) for record in records])
 
 
-def _database_snapshot_fallback(user_id: str, output_dir='.', db_path=None) -> dict[str, Any]:
-    if not db_path:
-        return {}
-
-    try:
-        from portfolio.storage import PortfolioStorage
-    except Exception:
-        return {}
+def _database_snapshot(user_id: str, output_dir='.', db_path=None) -> dict[str, Any]:
+    from database.repositories import RuntimeStateRepository
+    from portfolio.storage import PortfolioStorage
 
     storage = PortfolioStorage(
         db_path=db_path,
         output_dir=_portfolio_output_dir(user_id, output_dir),
         use_database=True,
     )
-    fallback: dict[str, Any] = {}
-
-    try:
-        account = storage.load_account(f"paper_{user_id}")
-        if account is not None:
-            fallback["account"] = account.to_dict()
-    except Exception:
-        pass
-
-    try:
-        rows = storage.repo.list_positions(user_id)
-        positions = [
-            storage._position_from_record(row).to_dict()
-            for row in rows
-            if float(row.get("quantity") or 0.0) > 0
-        ]
-        fallback["positions"] = _records_to_frame(positions)
-    except Exception:
-        pass
-
-    try:
-        rows = storage.repo.list_paper_orders(user_id=user_id)
-        orders = [
-            storage._order_from_record(row).to_dict()
-            for row in rows
-            if float(row.get("quantity") or 0.0) > 0
-        ]
-        fallback["orders"] = _records_to_frame(orders)
-    except Exception:
-        pass
-
-    try:
-        nav_rows = storage.repo.list_nav_history(user_id)
-        for row in nav_rows:
-            row.setdefault("composite_nav", row.get("nav", 1.0))
-            row.setdefault("nav", row.get("composite_nav", 1.0))
-        fallback["nav_history"] = _records_to_frame(nav_rows)
-    except Exception:
-        pass
-
-    try:
-        decision_rows = storage.repo.list_paper_decisions(user_id=user_id)
-        if decision_rows:
-            latest_date = max(str(row.get("trade_date") or "") for row in decision_rows)
-            latest_decisions = [
-                dict(row)
-                for row in decision_rows
-                if str(row.get("trade_date") or "") == latest_date
-            ]
-            fallback["decisions"] = latest_decisions
-    except Exception:
-        pass
-
-    try:
-        settings = storage.repo.get_trading_settings(user_id)
-        if settings:
-            fallback["trading_settings"] = dict(settings)
-    except Exception:
-        pass
-
-    return fallback
+    account = storage.load_account(f"paper_{user_id}")
+    positions = [
+        item.to_dict()
+        for item in storage.load_positions(user_id)
+        if float(item.quantity or 0.0) > 0
+    ]
+    orders = [
+        item.to_dict()
+        for item in storage.load_orders(user_id=user_id)
+        if float(item.quantity or 0.0) > 0
+    ]
+    nav_rows = storage.load_nav_history(user_id)
+    decision_rows = storage.repo.list_paper_decisions(user_id=user_id)
+    latest_decision_date = max(
+        (str(row.get("trade_date") or "") for row in decision_rows),
+        default="",
+    )
+    decisions = [
+        dict(row)
+        for row in decision_rows
+        if str(row.get("trade_date") or "") == latest_decision_date
+    ]
+    risk_row = storage.repo.get_latest_risk_snapshot(user_id) or {}
+    diagnostics = RuntimeStateRepository(db_path).get(
+        "paper_execution_diagnostics",
+        user_id=user_id,
+        scope_id=str((account.account_id if account else f"paper_{user_id}")),
+    )
+    settings = storage.repo.get_trading_settings(user_id) or {}
+    order_dates = sorted(
+        {str(row.get("trade_date") or "") for row in orders}
+        - {""}
+    )
+    position_dates = sorted(
+        {str(row.get("trade_date") or "") for row in nav_rows}
+        - {""}
+    )
+    return {
+        "is_available": bool(account or positions or orders or nav_rows),
+        "account": account.to_dict() if account else {},
+        "positions": _records_to_frame(positions),
+        "orders": _records_to_frame(orders),
+        "decisions": decisions,
+        "risk_report": dict(risk_row.get("report") or {}),
+        "execution_diagnostics": dict(diagnostics or {}),
+        "trading_settings": dict(settings),
+        "nav_history": _records_to_frame(nav_rows),
+        "order_snapshot_dates": order_dates,
+        "position_snapshot_dates": position_dates,
+    }
 
 
 def _dates_from_frame(df: pd.DataFrame, column: str = "trade_date") -> list[str]:
@@ -301,7 +285,7 @@ def add_paper_cash_flow(
         reason=reason,
         db_path=db_path,
         output_dir=output_dir,
-        use_database=bool(db_path),
+        use_database=True,
         **kwargs,
     )
     return flow.to_dict() if hasattr(flow, "to_dict") else flow
@@ -315,7 +299,7 @@ def cancel_pending_paper_cash_flow(flow_id, user_id=None, output_dir=".", db_pat
         user_id=user_id,
         db_path=db_path,
         output_dir=output_dir,
-        use_database=bool(db_path),
+        use_database=True,
     )
     return flow.to_dict() if hasattr(flow, "to_dict") else flow
 
@@ -375,19 +359,24 @@ def load_paper_cash_flows(user_id, output_dir='.', db_path=None):
         user_id,
         db_path=db_path,
         output_dir=output_dir,
-        use_database=bool(db_path),
+        use_database=True,
     )
     return [flow.to_dict() if hasattr(flow, "to_dict") else dict(flow) for flow in flows]
 
 def load_paper_trading_snapshot(user_id, output_dir='.', db_path=None):
+    if db_path is not None:
+        return _database_snapshot(
+            user_id,
+            output_dir=output_dir,
+            db_path=db_path,
+        )
+
+    # Explicit offline mode for archived snapshots and tests.
     root = _portfolio_output_dir(user_id, output_dir)
-    db_fallback = _database_snapshot_fallback(user_id, output_dir=output_dir, db_path=db_path)
 
     account = _read_json(root / "paper_account_latest.json", None)
     if account is None:
         account = _read_json(root / "paper_account.json", {})
-    if not account and db_fallback.get("account"):
-        account = db_fallback["account"]
 
     risk_report = _read_json(root / "portfolio_risk_report_latest.json", None)
     if risk_report is None:
@@ -396,18 +385,12 @@ def load_paper_trading_snapshot(user_id, output_dir='.', db_path=None):
     positions = _read_csv(root / "paper_positions_latest.csv")
     if positions.empty:
         positions = _read_csv(root / "paper_positions.csv")
-    if positions.empty and _has_rows(db_fallback.get("positions")):
-        positions = db_fallback["positions"]
 
     orders = _read_csv(root / "paper_orders_latest.csv")
     if orders.empty:
         orders = _read_csv(root / "paper_orders.csv")
-    if orders.empty and _has_rows(db_fallback.get("orders")):
-        orders = db_fallback["orders"]
 
     nav_history = _read_csv(root / "paper_nav_latest.csv")
-    if nav_history.empty and _has_rows(db_fallback.get("nav_history")):
-        nav_history = db_fallback["nav_history"]
 
     paths = [
         root / "paper_account_latest.json",
@@ -421,12 +404,8 @@ def load_paper_trading_snapshot(user_id, output_dir='.', db_path=None):
         root / "ai_paper_decisions_latest.json",
     ]
     decisions = _read_json(root / "ai_paper_decisions_latest.json", [])
-    if not decisions and db_fallback.get("decisions"):
-        decisions = db_fallback["decisions"]
     diagnostics = _read_json(root / "paper_execution_diagnostics_latest.json", {})
     settings = _read_json(root / "paper_trading_settings.json", {})
-    if not settings and db_fallback.get("trading_settings"):
-        settings = db_fallback["trading_settings"]
 
     order_dates = list_daily_order_snapshot_dates(user_id, output_dir)
     if not order_dates:
@@ -436,7 +415,7 @@ def load_paper_trading_snapshot(user_id, output_dir='.', db_path=None):
         position_dates = _dates_from_frame(nav_history)
 
     return {
-        "is_available": any(path.exists() for path in paths) or bool(db_fallback),
+        "is_available": any(path.exists() for path in paths),
         "account": account or {},
         "positions": positions,
         "orders": orders,

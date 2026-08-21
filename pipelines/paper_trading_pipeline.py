@@ -7,7 +7,12 @@ from pathlib import Path
 from typing import Any
 
 from pipelines.schemas import PaperTradingPipelineResult, PipelineContext, PipelineStatus, now_text
-from database.repositories import UserRepository
+from database.repositories import (
+    PredictionRepository,
+    RecommendationRepository,
+    RuntimeStateRepository,
+    UserRepository,
+)
 from evaluation.reliability_updater import DEFAULT_AI_RELIABILITY_WEIGHT
 from pipelines.replay_normalization import normalize_stock_code, normalize_trade_date_text
 from portfolio.cash_flow import apply_cash_flows_to_account
@@ -565,6 +570,13 @@ def run_paper_trading_pipeline(
             }
         )
         diagnostics_path = Path(output_dir) / "paper_execution_diagnostics_latest.json"
+        RuntimeStateRepository(context.db_path).put(
+            "paper_execution_diagnostics",
+            plan.execution_diagnostics,
+            user_id=context.user_id,
+            scope_id=account.account_id,
+            as_of_date=trade_date,
+        )
         diagnostics_path.write_text(json.dumps(plan.execution_diagnostics, ensure_ascii=False, indent=2), encoding="utf-8")
         output_paths = {
             "paper_account": str(storage.account_path),
@@ -654,29 +666,29 @@ def run_paper_trading_from_latest(
     paper_trading_enabled: bool = True,
 ) -> PaperTradingPipelineResult:
     output_root = Path(output_dir)
-    recommendations_path = output_root / "recommendations" / "final_recommendations_latest.csv"
-    ranking_path = output_root / "ranking_latest.csv"
-
-    recommendations_error = ""
     using_ranking_only = False
     fixed_top15_enforced = False
     top15_stock_codes: set[str] = set()
-    ranking_is_newer = (
-        ranking_path.exists()
-        and recommendations_path.exists()
-        and ranking_path.stat().st_mtime > recommendations_path.stat().st_mtime
-    )
     try:
         import pandas as pd
 
-        if ranking_path.exists() and ranking_path.stat().st_size > 0:
-            ranking = pd.read_csv(
-                ranking_path,
-                dtype={"code": str, "stock_code": str},
-                encoding="utf-8-sig",
-            )
-        else:
-            ranking = pd.DataFrame()
+        ranking_rows = PredictionRepository(db_path).list_latest_predictions()
+        recommendation_rows = RecommendationRepository(db_path).list_latest(user_id)
+        ranking = pd.DataFrame(ranking_rows)
+        recommendations = pd.DataFrame(recommendation_rows)
+
+        ranking_date = (
+            str(ranking.iloc[0].get("trade_date") or "")
+            if not ranking.empty
+            else ""
+        )
+        recommendation_date = (
+            str(recommendations.iloc[0].get("trade_date") or "")
+            if not recommendations.empty
+            else ""
+        )
+        if ranking_date and recommendation_date and ranking_date > recommendation_date:
+            recommendations = pd.DataFrame()
 
         if not ranking.empty and "model_name" in ranking.columns:
             ranking_models = set(ranking["model_name"].dropna().astype(str).str.strip()) - {""}
@@ -709,22 +721,6 @@ def run_paper_trading_from_latest(
                     f"actual={len(top15_stock_codes)}"
                 )
 
-        if (
-            recommendations_path.exists()
-            and recommendations_path.stat().st_size > 0
-            and not ranking_is_newer
-        ):
-            try:
-                recommendations = pd.read_csv(
-                    recommendations_path,
-                    dtype={"code": str, "stock_code": str},
-                    encoding="utf-8-sig",
-                )
-            except Exception as exc:
-                recommendations = pd.DataFrame()
-                recommendations_error = str(exc)
-        else:
-            recommendations = pd.DataFrame()
     except Exception as exc:
         return PaperTradingPipelineResult(
             status=PipelineStatus.FAILED,
@@ -748,14 +744,9 @@ def run_paper_trading_from_latest(
 
     if recommendations.empty:
         if ranking.empty:
-            message = (
-                f"No latest daily result found: {recommendations_path} or {ranking_path}"
-            )
-            if recommendations_error:
-                message = f"{message}; recommendation read error: {recommendations_error}"
             return PaperTradingPipelineResult(
                 status=PipelineStatus.SKIPPED,
-                message=message,
+                message="No latest daily result found in runtime database.",
                 input_count=0,
                 output_count=0,
             )

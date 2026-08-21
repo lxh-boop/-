@@ -105,6 +105,24 @@ def _schema_compatible(producer: Any | None, consumer: Any | None) -> bool:
     right = str(getattr(consumer, "schema_id", "") or "").strip()
     return not left or not right or left == right
 
+
+def _artifact_contract_compatible(producer: Any | None, consumer: Any | None) -> bool:
+    if producer is None or consumer is None:
+        return True
+    producer_contract = str(getattr(producer, "contract", "") or "").strip()
+    consumer_contract = str(getattr(consumer, "contract", "") or "").strip()
+    if producer_contract and consumer_contract and producer_contract != consumer_contract:
+        return False
+    producer_version = str(getattr(producer, "version", "") or "1.0").strip()
+    accepted_versions = tuple(
+        str(item).strip()
+        for item in (getattr(consumer, "accepted_versions", ()) or ())
+        if str(item).strip()
+    )
+    consumer_version = str(getattr(consumer, "version", "") or "1.0").strip()
+    accepted = accepted_versions or (consumer_version,)
+    return producer_version in set(accepted)
+
 class ToolDagValidator:
     """Validate private Tool selection, schemas, dependencies and goal coverage.
 
@@ -310,6 +328,18 @@ class ToolDagValidator:
                                 "tool_slot_schema_mismatch",
                                 f"$.tasks[{index}].inputs.{input_name}",
                                 f"{producer_contract.schema_id}->{consumer_contract.schema_id}",
+                            )
+                        if not _artifact_contract_compatible(producer_contract, consumer_contract):
+                            producer_descriptor = producer_contract.contract_descriptor()
+                            consumer_descriptor = consumer_contract.contract_descriptor()
+                            raise ToolDagContractViolation(
+                                "tool_slot_artifact_contract_mismatch",
+                                f"$.tasks[{index}].inputs.{input_name}",
+                                (
+                                    f"{producer_descriptor['contract']}@{producer_descriptor['version']}"
+                                    "->"
+                                    f"{consumer_descriptor['contract']}@{consumer_descriptor['version']}"
+                                ),
                             )
                     else:
                         raise ToolDagContractViolation(

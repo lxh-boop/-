@@ -128,7 +128,12 @@ class WebPaperTradingApplicationService:
             )
             or [],
             "backfill_status": load_paper_backfill_status(user_id, output_dir=self.output_dir) or {},
-            "ai_reliability": load_current_ai_reliability_state(user_id, output_dir=self.output_dir) or {},
+            "ai_reliability": load_current_ai_reliability_state(
+                user_id,
+                output_dir=self.output_dir,
+                db_path=self.db_path,
+            )
+            or {},
             "scheduler": load_scheduler_status_summary(self.output_dir) or {},
         }
 
@@ -478,34 +483,43 @@ class WebPaperTradingApplicationService:
         }
         available_dates = sorted(position_dates | order_dates, reverse=True)
 
-        positions = load_daily_position_snapshot(
-            user_id,
-            selected_date,
-            output_dir=self.output_dir,
-            fallback=False,
-        )
-        orders = load_daily_order_snapshot(
-            user_id,
-            selected_date,
-            output_dir=self.output_dir,
-        )
-        if orders.empty and self.db_path and selected_date in order_dates:
-            try:
-                from portfolio.storage import PortfolioStorage
+        if self.db_path is not None:
+            from portfolio.storage import PortfolioStorage
 
-                storage = PortfolioStorage(
-                    db_path=self.db_path,
-                    output_dir=self.output_dir / "portfolio" / user_id,
-                    use_database=True,
-                )
-                database_orders = [
-                    row
-                    for row in storage.repo.list_paper_orders(user_id=user_id)
-                    if str(row.get("trade_date") or "") == selected_date
-                ]
-                orders = pd.DataFrame(database_orders)
-            except Exception:
-                orders = pd.DataFrame()
+            storage = PortfolioStorage(
+                db_path=self.db_path,
+                output_dir=self.output_dir / "portfolio" / user_id,
+                use_database=True,
+            )
+            database_orders = [
+                row
+                for row in storage.repo.list_paper_orders(user_id=user_id)
+                if str(row.get("trade_date") or "") == selected_date
+            ]
+            executions = [
+                row
+                for row in storage.repo.list_strategy_execution_history(user_id)
+                if str(row.get("trade_date") or "") == selected_date
+            ]
+            positions_after = (
+                list(executions[-1].get("positions_after") or [])
+                if executions
+                else []
+            )
+            positions = pd.DataFrame(positions_after)
+            orders = pd.DataFrame(database_orders)
+        else:
+            positions = load_daily_position_snapshot(
+                user_id,
+                selected_date,
+                output_dir=self.output_dir,
+                fallback=False,
+            )
+            orders = load_daily_order_snapshot(
+                user_id,
+                selected_date,
+                output_dir=self.output_dir,
+            )
 
         if not orders.empty:
             action = orders.get("action", pd.Series("", index=orders.index)).astype(str).str.lower()

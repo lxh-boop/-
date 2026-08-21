@@ -296,8 +296,6 @@ def _allowed_agents_for_tool(tool_name: str, spec: ToolSpec) -> list[str]:
         allowed.add(RISK_OPERATION)
     if spec.permission == ToolPermission.WRITE:
         allowed.add(RISK_OPERATION)
-    if tool_name.startswith("mcp."):
-        allowed.add(MARKET_INTELLIGENCE)
     return sorted(allowed)
 
 
@@ -362,8 +360,6 @@ def _allowed_agents_for_unified_tool(definition: ToolDefinition) -> list[str]:
         allowed.update({PORTFOLIO_ANALYSIS, RISK_OPERATION, REPORTING})
     elif name.startswith("sandbox."):
         allowed.add(SUPERVISOR)
-    elif name.startswith("mcp."):
-        allowed.update({MARKET_INTELLIGENCE, REPORTING})
     elif definition.operation_type not in {OP_READ, OP_SYSTEM}:
         allowed.add(RISK_OPERATION)
     return sorted(allowed)
@@ -485,8 +481,6 @@ def task_plan_produced_outputs(plan_payload: dict[str, Any] | Any) -> set[str]:
     for task in tasks or []:
         intent = str(task.get("intent") if isinstance(task, dict) else getattr(task, "intent", "") or "")
         outputs.update(OUTPUTS_BY_TOOL.get(intent) or set())
-        if intent.startswith("mcp."):
-            outputs.update({"market_evidence", "evidence", "reasons", "limitations"})
     intents = {
         str(task.get("intent") if isinstance(task, dict) else getattr(task, "intent", "") or "")
         for task in tasks or []

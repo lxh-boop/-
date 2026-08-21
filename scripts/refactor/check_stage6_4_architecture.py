@@ -134,7 +134,7 @@ def main() -> int:
         "task_conversation_mismatch",
         "agent_task_not_terminal",
         "confirmation_text_mismatch",
-        "confirmation_token_missing_on_server",
+        "request_id_and_idempotency_key_required",
         "control_action",
         "build_message_trace_summary",
         "build_handoff_safe_summary",

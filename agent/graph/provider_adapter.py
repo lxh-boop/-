@@ -83,63 +83,6 @@ class GraphProviderAdapter:
             "identity_locked": bool(ref.locked),
         }
 
-    def analyze_entities(
-        self,
-        refs: list[GraphRef],
-        *,
-        user_id: str,
-        output_dir: str | Path,
-        db_path: str | Path | None,
-    ) -> dict[str, Any]:
-        return self._evidence_provider.analyze_entities(
-            refs,
-            user_id=user_id,
-            output_dir=output_dir,
-            db_path=db_path,
-        )
-
-    def collect_external_evidence(
-        self,
-        refs: list[GraphRef],
-        *,
-        query: str,
-        top_k: int,
-        output_dir: str | Path,
-        db_path: str | Path | None,
-        as_of_time: str = "",
-    ) -> dict[str, Any]:
-        return self._evidence_provider.collect_external_evidence(
-            refs,
-            query=query,
-            top_k=top_k,
-            output_dir=output_dir,
-            db_path=db_path,
-            as_of_time=as_of_time,
-        )
-
-    def retrieve_evidence(
-        self,
-        refs: list[GraphRef],
-        *,
-        query: str,
-        top_k: int,
-        output_dir: str | Path,
-        db_path: str | Path | None,
-        source_task_id: str,
-        source_agent_id: str,
-        as_of_time: str = "",
-    ) -> dict[str, Any]:
-        return self._evidence_provider.retrieve_evidence(
-            refs,
-            query=query,
-            top_k=top_k,
-            output_dir=output_dir,
-            db_path=db_path,
-            source_task_id=source_task_id,
-            source_agent_id=source_agent_id,
-            as_of_time=as_of_time,
-        )
-
     def materialize_evidence_graph(
         self,
         *,

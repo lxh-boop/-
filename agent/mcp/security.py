@@ -57,6 +57,19 @@ def safe_external_payload(value: Any, *, max_chars: int = 4000) -> Any:
 
 
 def is_write_like_tool(tool_name: str, description: str = "", annotations: dict[str, Any] | None = None) -> bool:
+    annotations = dict(annotations or {})
+    read_only = annotations.get(
+        "readOnlyHint",
+        annotations.get("read_only_hint"),
+    )
+    destructive = annotations.get(
+        "destructiveHint",
+        annotations.get("destructive_hint"),
+    )
+    if read_only is False or destructive is True:
+        return True
+    if read_only is True and destructive is False:
+        return False
     text = f"{tool_name} {description}".lower()
     markers = [
         "write",
@@ -72,8 +85,5 @@ def is_write_like_tool(tool_name: str, description: str = "", annotations: dict[
         "modify",
     ]
     if any(marker in text for marker in markers):
-        return True
-    annotations = dict(annotations or {})
-    if annotations.get("readOnlyHint") is False or annotations.get("destructiveHint") is True:
         return True
     return False
