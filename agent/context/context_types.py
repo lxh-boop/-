@@ -230,6 +230,10 @@ class ContextBundle:
         name: str,
         value: Any,
         data_time: str = "",
+        contract: str = "",
+        version: str = "1.0",
+        schema_id: str = "",
+        provenance: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Append one successfully queried/generated business-data item.
 
@@ -241,12 +245,18 @@ class ContextBundle:
         if not data_name:
             raise ValueError("business_data_name_required")
         ref = dict(entity_ref or {})
+        contract_id = str(contract or data_name).strip()
+        contract_version = str(version or "1.0").strip()
         item = {
             "entity_ref": ref,
             "entity_id": self._business_entity_id(ref),
             "name": data_name,
             "value": _plain(value),
             "data_time": str(data_time or ""),
+            "contract": contract_id,
+            "version": contract_version,
+            "schema_id": str(schema_id or f"{contract_id}@{contract_version}"),
+            "provenance": _plain(dict(provenance or {})),
             "created_at": _now_text(),
         }
         self.business_data.append(item)
@@ -291,21 +301,54 @@ class ContextBundle:
                 for (row_entity, name), row in latest.items()
                 if row_entity == entity_id
             }
+            contracts = {
+                name: {
+                    "contract": str(row.get("contract") or name),
+                    "version": str(row.get("version") or "1.0"),
+                    "schema_id": str(
+                        row.get("schema_id")
+                        or f"{row.get('contract') or name}@{row.get('version') or '1.0'}"
+                    ),
+                    "provenance": _plain(dict(row.get("provenance") or {})),
+                }
+                for (row_entity, name), row in latest.items()
+                if row_entity == entity_id
+            }
             # An entity with only empty values is still included: the labels
             # prove those queries completed.
             if data:
-                entities.append({"entity_ref": dict(ref), "data": data})
+                entities.append(
+                    {
+                        "entity_ref": dict(ref),
+                        "data": data,
+                        "contracts": contracts,
+                    }
+                )
 
         global_data = {
             name: row.get("value")
             for (row_entity, name), row in latest.items()
             if row_entity == "__run__"
         }
+        global_contracts = {
+            name: {
+                "contract": str(row.get("contract") or name),
+                "version": str(row.get("version") or "1.0"),
+                "schema_id": str(
+                    row.get("schema_id")
+                    or f"{row.get('contract') or name}@{row.get('version') or '1.0'}"
+                ),
+                "provenance": _plain(dict(row.get("provenance") or {})),
+            }
+            for (row_entity, name), row in latest.items()
+            if row_entity == "__run__"
+        }
         return {
-            "schema_version": "context_bundle_business_data.v1",
+            "schema_version": "context_bundle_business_data.v2",
             "run_id": str(self.run_id or ""),
             "entities": entities,
             "global_data": global_data,
+            "global_contracts": global_contracts,
             "available_names": sorted({name for (_, name) in latest}),
         }
 

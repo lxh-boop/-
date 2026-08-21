@@ -47,7 +47,11 @@ class Artifact:
     visibility_scope: str = "same_user_conversation_or_run"
     created_at: str = ""
     expires_at: str = ""
-    version: str = "1"
+    contract: str = "tool.result"
+    version: str = "1.0"
+    schema_id: str = "ToolResult.v1"
+    provenance: dict[str, Any] = field(default_factory=dict)
+    contracts: list[dict[str, Any]] = field(default_factory=list)
     content_hash: str = ""
     status: str = "active"
 
@@ -108,12 +112,20 @@ def artifact_cache_key(intent: str, arguments: dict[str, Any] | None) -> str:
     return _hash(payload)
 
 
-def infer_artifact_outputs(intent: str, result: dict[str, Any] | None = None) -> list[str]:
+def infer_artifact_outputs(
+    intent: str,
+    result: dict[str, Any] | None = None,
+    *,
+    output_contracts: list[Any] | tuple[Any, ...] | None = None,
+) -> list[str]:
     from agent.capability_index import OUTPUTS_BY_TOOL
 
     outputs = set(OUTPUTS_BY_TOOL.get(str(intent or ""), set()))
-    if str(intent or "").startswith("mcp."):
-        outputs.update({"market_evidence", "evidence", "reasons", "limitations"})
+    outputs.update(
+        str(getattr(item, "slot_id", "") or "")
+        for item in (output_contracts or [])
+        if str(getattr(item, "slot_id", "") or "")
+    )
     data = dict((result or {}).get("data") or {})
     if data.get("positions"):
         outputs.update({"portfolio_state", "position_count"})
@@ -138,23 +150,60 @@ def build_artifact_from_result(
     result: dict[str, Any] | None = None,
     sources: list[dict[str, Any]] | None = None,
     ttl_minutes: int = 180,
+    output_contracts: list[Any] | tuple[Any, ...] | None = None,
+    provenance: dict[str, Any] | None = None,
 ) -> Artifact:
     result = _redact(dict(result or {}))
     created_at = _now_text()
     expires_at = (datetime.now() + timedelta(minutes=max(1, int(ttl_minutes or 180)))).strftime("%Y-%m-%d %H:%M:%S")
+    contract_rows: list[dict[str, Any]] = []
+    for item in output_contracts or []:
+        descriptor = item.contract_descriptor() if hasattr(item, "contract_descriptor") else {}
+        if not isinstance(descriptor, dict) or not descriptor:
+            continue
+        contract_rows.append(
+            {
+                "slot_id": str(getattr(item, "slot_id", "") or ""),
+                "contract": str(descriptor.get("contract") or ""),
+                "version": str(descriptor.get("version") or "1.0"),
+                "schema_id": str(descriptor.get("schema_id") or ""),
+            }
+        )
+    primary = contract_rows[0] if contract_rows else {
+        "slot_id": "tool_result",
+        "contract": "tool.result",
+        "version": "1.0",
+        "schema_id": "ToolResult.v1",
+    }
+    artifact_provenance = {
+        "producer_type": str(producer_type or "tool"),
+        "producer_id": str(producer_id or ""),
+        "run_id": str(run_id or ""),
+        "task_id": str(task_id or ""),
+        **dict(provenance or {}),
+    }
     summary = _sanitize(
         {
             "success": bool(result.get("success")),
             "message": str(result.get("message") or "")[:300],
             "errors": result.get("errors") or [],
             "warnings": result.get("warnings") or [],
-            "produced_outputs": infer_artifact_outputs(producer_id, result),
+            "produced_outputs": infer_artifact_outputs(
+                producer_id,
+                result,
+                output_contracts=output_contracts,
+            ),
+            "contract": primary["contract"],
+            "version": primary["version"],
+            "schema_id": primary["schema_id"],
         },
         max_chars=1200,
     )
     content = {
         "result": result,
         "produced_outputs": summary.get("produced_outputs") or [],
+        "contracts": contract_rows,
+        "provenance": artifact_provenance,
     }
     content_hash = _hash(content)
     return Artifact(
@@ -174,7 +223,11 @@ def build_artifact_from_result(
         visibility_scope="same_user_conversation_or_run",
         created_at=created_at,
         expires_at=expires_at,
-        version="1",
+        contract=str(primary["contract"]),
+        version=str(primary["version"]),
+        schema_id=str(primary["schema_id"]),
+        provenance=artifact_provenance,
+        contracts=contract_rows,
         content_hash=content_hash,
         status="active",
     )
@@ -223,7 +276,11 @@ class ArtifactStore:
                     "sources": artifact.sources,
                     "sensitivity": artifact.sensitivity,
                     "visibility_scope": artifact.visibility_scope,
+                    "contract": artifact.contract,
                     "version": artifact.version,
+                    "schema_id": artifact.schema_id,
+                    "provenance": artifact.provenance,
+                    "contracts": artifact.contracts,
                     "status": artifact.status,
                     "produced_outputs": artifact.content.get("produced_outputs") or [],
                 },
@@ -234,6 +291,11 @@ class ArtifactStore:
             "artifact_type": artifact.artifact_type,
             "path": str(path),
             "content_hash": artifact.content_hash,
+            "contract": artifact.contract,
+            "version": artifact.version,
+            "schema_id": artifact.schema_id,
+            "provenance": artifact.provenance,
+            "contracts": artifact.contracts,
             "produced_outputs": artifact.content.get("produced_outputs") or [],
         }
 
@@ -348,6 +410,8 @@ def save_tool_result_artifact(
     tool_name: str,
     result: dict[str, Any] | None,
     sources: list[dict[str, Any]] | None = None,
+    output_contracts: list[Any] | tuple[Any, ...] | None = None,
+    provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     artifact = build_artifact_from_result(
         user_id=user_id,
@@ -359,5 +423,7 @@ def save_tool_result_artifact(
         artifact_type="tool_result",
         result=result,
         sources=sources,
+        output_contracts=output_contracts,
+        provenance=provenance,
     )
     return ArtifactStore(db_path=db_path, output_dir=output_dir).save(artifact)

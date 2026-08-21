@@ -62,6 +62,11 @@ def materialise_semantic_output_slots(
         return []
     data = result.get("data") if isinstance(result.get("data"), dict) else {}
     slots = dict(data.get("slots") or {}) if isinstance(data.get("slots"), dict) else {}
+    slot_contracts = (
+        dict(data.get("slot_contracts") or {})
+        if isinstance(data.get("slot_contracts"), dict)
+        else {}
+    )
     published: list[str] = []
     envelope = {**dict(result), "data": data}
     for contract in contracts:
@@ -69,11 +74,13 @@ def materialise_semantic_output_slots(
         if not found:
             continue
         slots[str(contract.slot_id)] = deepcopy(value)
+        slot_contracts[str(contract.slot_id)] = contract.contract_descriptor()
         published.append(str(contract.slot_id))
     if slots:
         data["slots"] = slots
         existing = [str(item) for item in data.get("produced_information_slots") or [] if str(item)]
         data["produced_information_slots"] = list(dict.fromkeys([*existing, *published]))
+        data["slot_contracts"] = slot_contracts
         result["data"] = data
     return published
 
@@ -86,11 +93,22 @@ def validate_semantic_output_contracts(
         return []
     data = result.get("data") if isinstance(result.get("data"), dict) else {}
     slots = data.get("slots") if isinstance(data.get("slots"), dict) else {}
-    return [
+    slot_contracts = (
+        data.get("slot_contracts")
+        if isinstance(data.get("slot_contracts"), dict)
+        else {}
+    )
+    errors = [
         f"missing_output_slot:{contract.slot_id}"
         for contract in definition.output_contracts
         if str(contract.slot_id) not in slots
     ]
+    errors.extend(
+        f"missing_output_contract:{contract.slot_id}"
+        for contract in definition.output_contracts
+        if str(contract.slot_id) not in slot_contracts
+    )
+    return errors
 
 
 def schema(
