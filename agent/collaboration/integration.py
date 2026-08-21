@@ -10,9 +10,8 @@ from core.llm import LLMService
 from agent.console_trace import flow_event, trace_exception
 from agent.runtime import AgentRuntimeRecorder
 
-from .control_gateway import ControlGateway
+from .write_runtime import WriteRequestExecutor
 from .coordinator import AgentCollaborationCoordinator
-from .entry_decision import EntryDecision, RequestMode
 from .llm_runtime import require_run_llm_service
 from .runtime_services import CollaborationRuntimeServices
 from .session_state import SessionStateStore
@@ -20,8 +19,8 @@ from .session_state import SessionStateStore
 
 RUNTIME_BUILD = RUNTIME_VERSION
 ACCESS_MODEL_VERSION = "read-write.v1"
-COMPLETION_CONTRACT_VERSION = "capability-contract-list.v1"
-COMPLETION_REPORT_VERSION = "capability-contract-report.v1"
+COMPLETION_CONTRACT_VERSION = "capability-contract-list.v2"
+COMPLETION_REPORT_VERSION = "capability-contract-report.v2"
 EVIDENCE_ANALYSIS_REPORT_VERSION = "evidence-analysis-report.v1"
 
 
@@ -157,7 +156,10 @@ def execute_unified_agent_request(
         {
             "graph_id": str(getattr(getattr(coordinator, "store", None), "graph_id", "")),
             "worker_count": len(getattr(getattr(coordinator, "directory", None), "list", lambda: [])()),
-            "worker_visibility": "all_public_descriptions_upfront",
+            "request_entry": "request_bundle.v2",
+            "request_categories": ["business", "presentation"],
+            "business_request_types": ["read", "write"],
+            "worker_visibility": "all_public_descriptions_upfront_per_business_request",
             "tool_visibility": "worker_private_tool_dag_planned_before_execution",
             "runtime_build": RUNTIME_BUILD,
             "access_model_version": ACCESS_MODEL_VERSION,
@@ -206,6 +208,7 @@ def execute_control_action(
     *,
     action: str,
     query: str = "",
+    proposal_id: str = "",
     plan_id: str = "",
     confirmation_token: str = "",
     user_id: str = "default",
@@ -216,35 +219,44 @@ def execute_control_action(
     db_path: str | Path | None = None,
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Thin UI compatibility entry that delegates to the canonical WRITE runtime.
+
+    V23.0.17 has no third control runtime. The public function is retained only
+    because the existing application UI calls it directly; it does
+    not own proposal resolution, approval, mutation, or commit logic.
+    """
+
+    del confirmation_token, language
     normalized = str(action or "").strip().lower()
-    mode = {
-        "confirm": RequestMode.CONFIRM,
-        "reject": RequestMode.REJECT,
-        "language": RequestMode.LANGUAGE,
+    action_type = {
+        "confirm": "confirm_execute",
+        "confirm_execute": "confirm_execute",
+        "reject": "reject",
+        "cancel": "cancel",
     }.get(normalized)
-    if mode is None:
-        raise ValueError(f"unsupported_control_action:{normalized}")
+    if action_type is None:
+        raise ValueError(f"unsupported_write_action:{normalized}")
+
     merged_context = dict(context or {})
-    if plan_id:
-        merged_context["plan_id"] = plan_id
-    if confirmation_token:
-        merged_context["confirmation_token"] = confirmation_token
-    decision = EntryDecision(
-        mode=mode,
-        reply_language=language if mode == RequestMode.LANGUAGE else "",
-        reason="explicit_ui_control_action",
-        source="hard_control_gateway",
-        confidence=1.0,
+    resolved_proposal_id = str(proposal_id or plan_id or "").strip()
+    if resolved_proposal_id:
+        # ``plan_id`` is accepted only at this UI boundary because current pages
+        # still use that argument name.  It is immediately normalized to the one
+        # canonical proposal identity; no legacy plan runtime is invoked.
+        merged_context["proposal_id"] = resolved_proposal_id
+
+    result = WriteRequestExecutor(output_dir=output_dir, db_path=db_path).execute(
+        action_type=action_type,
+        query=str(query or ""),
+        user_id=str(user_id or "default"),
+        session_id=str(session_id or ""),
+        run_id=str(run_id or ""),
+        context=merged_context,
     )
-    return ControlGateway(output_dir=output_dir, db_path=db_path).execute(
-        decision=decision,
-        query=query,
-        user_id=user_id,
-        session_id=session_id,
-        run_id=run_id,
-        language=language,
-        execution_context=merged_context,
-    )
+    # Existing page code reads ``answer``.  This is presentation-only and does
+    # not reintroduce a second control/business execution path.
+    result.setdefault("answer", str(result.get("outcome") or ""))
+    return result
 
 
 def should_use_financial_graph_agent(intent: str, decomposition: dict[str, Any] | None = None) -> bool:

@@ -10,7 +10,7 @@ from typing import Any, Literal
 class ContextSufficiencyResult:
     sufficient: bool
     missing_parameters: list[str] = field(default_factory=list)
-    missing_context_slots: list[str] = field(default_factory=list)
+    missing_context: list[str] = field(default_factory=list)
     ambiguous_entities: list[dict[str, Any]] = field(default_factory=list)
     unresolved_entities: list[str] = field(default_factory=list)
     permission_issues: list[str] = field(default_factory=list)
@@ -61,7 +61,7 @@ class ContextAndEntitySufficiencyGate:
         return ContextSufficiencyResult(
             sufficient=action == "continue",
             missing_parameters=missing_parameters,
-            missing_context_slots=missing_context,
+            missing_context=missing_context,
             ambiguous_entities=ambiguous,
             unresolved_entities=unresolved,
             permission_issues=denied,

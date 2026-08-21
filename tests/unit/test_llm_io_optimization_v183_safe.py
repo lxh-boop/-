@@ -6,7 +6,7 @@ import json
 
 from agent.collaboration.agent_directory import AgentDirectory
 from agent.collaboration.coordinator import AgentCollaborationCoordinator
-from agent.collaboration.entry_decision import MainEntryDecisionPlanner
+from agent.collaboration.request_bundle import RequestDecomposer
 from agent.collaboration.planner import PLAN_SCHEMA, CoordinatorPlanner
 from agent.collaboration.workers import entity_analysis, report_writer
 from agent.tool_dag.planner import WorkerToolDagPlanner
@@ -209,7 +209,7 @@ def test_report_prompt_view_preserves_all_positions_and_account_metrics() -> Non
 
 def test_all_llm_decision_stages_are_still_present() -> None:
     sources = {
-        "entry": inspect.getsource(MainEntryDecisionPlanner.decide),
+        "entry": inspect.getsource(RequestDecomposer.decompose),
         "entity_extraction": inspect.getsource(AgentCollaborationCoordinator._extract_mentions),
         "worker_planning": inspect.getsource(CoordinatorPlanner.plan),
         "forward_replan": inspect.getsource(CoordinatorPlanner.replan_forward),

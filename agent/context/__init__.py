@@ -20,7 +20,6 @@ from agent.context.context_window import ContextWindow
 from agent.context.context_hydrator import ContextHydrator, ContextRequirement, HydratedContext
 from agent.context.context_sufficiency_gate import ContextAndEntitySufficiencyGate, ContextSufficiencyResult
 from agent.context.context_projector import ContextProjectionRequest, ContextProjector
-from agent.context.context_broker import ContextBroker, ContextRequest, ContextResponse
 from agent.context.observer_context_factory import build_observer_context
 from agent.context.planner_context_factory import build_planner_context
 from agent.context.reporter_context_factory import build_reporter_context
@@ -29,13 +28,10 @@ from agent.context.tool_context_factory import build_tool_execution_context
 
 __all__ = [
     "ContextAndEntitySufficiencyGate",
-    "ContextBroker",
     "ContextHydrator",
     "ContextProjectionRequest",
     "ContextProjector",
-    "ContextRequest",
     "ContextRequirement",
-    "ContextResponse",
     "ContextSufficiencyResult",
     "HydratedContext",
     "ApprovalContext",

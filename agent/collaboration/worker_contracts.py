@@ -1,8 +1,7 @@
 """Generic contracts and schema validation for coordinator-visible Workers.
 
 This module deliberately knows nothing about user-query business semantics.  It
-validates only declared Worker contracts: JSON shape, required inputs, declared
-outputs, dependency bindings, and side-effect metadata.
+validates only declared Worker contracts: JSON shape, declared business-data outputs, execution-state dependencies, and permission metadata.
 """
 
 from __future__ import annotations
@@ -102,7 +101,7 @@ def completion_report_schema() -> dict[str, Any]:
     )
     return object_schema(
         {
-            "schema_version": {"type": "string", "enum": ["capability-contract-report.v1"]},
+            "schema_version": {"type": "string", "enum": ["capability-contract-report.v2"]},
             "report_source": {"type": "string", "enum": ["llm", "runtime", "system"]},
             "execution_status": {
                 "type": "string",
@@ -122,8 +121,8 @@ def completion_report_schema() -> dict[str, Any]:
             },
             "expected_task_completed": {"type": "boolean"},
             "output_type": string_schema(min_length=1),
-            "produced_information_slots": array_schema({"type": "string"}),
-            "missing_information_slots": array_schema({"type": "string"}),
+            "produced_data_names": array_schema({"type": "string"}),
+            "missing_data_names": array_schema({"type": "string"}),
             "criteria": array_schema(criterion_schema),
             "limitations": array_schema({"type": "string"}),
             "failure_kind": {"type": "string"},
@@ -137,8 +136,8 @@ def completion_report_schema() -> dict[str, Any]:
             "completion_status",
             "expected_task_completed",
             "output_type",
-            "produced_information_slots",
-            "missing_information_slots",
+            "produced_data_names",
+            "missing_data_names",
             "criteria",
             "limitations",
             "failure_kind",

@@ -37,11 +37,13 @@ class CapabilityWorkerCard:
     escalation_policy: str = ""
     execution_mode: str = "pure_llm"
     output_publication_mode: str = "worker_synthesized"
-    max_effect_level: str = "read"
+    can_mutate: bool = False
+    execution_stage: str = "analysis"  # provider | analysis | decision | report | diagnostic | mutation
     private_worker_prompt: str = ""
     private_tool_ids: list[str] = field(default_factory=list)
     model_profile: str = ""
     availability: str = "available"
+    working_memory_mode: str = "none"  # provider | consumer | none
 
 
 _CARDS = {
@@ -58,9 +60,11 @@ _CARDS = {
         capability_tags=["news", "announcement", "rag", "evidence"],
         supported_scenarios=["实体新闻检索", "公告与研报证据收集", "证据去重与覆盖检查"],
         unsupported_scenarios=["最终实体分析", "风险评级", "状态变更"],
-        limitations=["依赖已解析的权威实体槽位", "不补造不存在的证据"],
+        limitations=["依赖已解析的权威实体上下文", "不补造不存在的证据"],
         escalation_policy="私有Tool重试或替换仍无法形成证据槽位时上报MainAgent。",
         execution_mode="hybrid",
+        working_memory_mode="provider",
+        execution_stage="provider",
         private_worker_prompt="根据合同列表选择最小私有Tool DAG，收集可追溯外部证据；不得分析或写入。",
         private_tool_ids=["evidence.search_news", "evidence.search_rag", "evidence.finalize_collection"],
     ),
@@ -68,23 +72,23 @@ _CARDS = {
         worker_id="W02",
         agent_id=PORTFOLIO_ANALYST,
         role="system_internal_fact_provider",
-        short_description="读取本系统内部产生或保存的权威数据，并发布为结构化信息Slot。",
+        short_description="读取本系统内部产生或保存的权威数据，并写入本轮Working Memory的结构化数据标签。",
         full_description=(
             "W02是系统内部权威数据提供者。它从本应用自己的只读数据源读取模型预测、评分/排名、"
-            "模型质量、回测摘要、当前选定策略、账户、组合、持仓、用户画像和约束，并发布标准信息Slot。"
+            "模型质量、回测摘要、当前选定策略、账户、组合、持仓、用户画像和约束，并写入标准Working Memory数据标签。"
             "它可根据MainAgent下发的业务目标，自主规划私有Tool DAG：既可直接读取已知实体的内部信号，也可先读取全市场排名、"
-            "再通过权威实体解析确定目标后继续读取相关内部事实。它不负责最终实体分析或自然语言报告；下游Worker可消费这些Slot继续分析。"
+            "再通过权威实体解析确定目标后继续读取相关内部事实。它不负责最终实体分析或自然语言报告；下游Worker可消费这些工作记忆数据继续分析。"
         ),
         supported_boundary_ids=["internal_fact.retrieval", "portfolio.analysis", "user_context.retrieval"],
         delegation_description=(
             "当用户问题需要引用本系统内部已有或本系统自己生成的权威数据时，考虑委派W02。"
             "这包括但不限于模型预测/评分、市场排名、模型指标、回测、选定策略、账户、组合、持仓、"
-            "用户画像或约束；W02只读取并发布结构化事实Slot，可作为其他分析Worker的上游数据源。"
+            "用户画像或约束；W02只读取并发布结构化事实数据；Runtime负责写入Working Memory供后续分析复用。"
         ),
         delegate_when=[
             "回答需要本系统自己的模型、评分、排名、回测或策略状态",
             "回答需要本系统保存的账户、组合、持仓、画像或约束",
-            "其他Worker的分析目标可以直接消费系统内部权威事实Slot",
+            "其他Worker的分析目标需要复用系统内部已查询事实",
         ],
         capability_tags=[
             "system_data", "internal_fact", "prediction", "ranking", "model_metrics",
@@ -96,11 +100,13 @@ _CARDS = {
         ],
         unsupported_scenarios=["外部新闻研究", "最终报告写作", "业务写入"],
         limitations=["只读取内部权威数据", "不把读取结果自行扩展成最终业务结论"],
-        escalation_policy="私有Tool均无法产出合同槽位时上报MainAgent。",
+        escalation_policy="私有Tool均无法完成合同结果时上报MainAgent。",
         execution_mode="hybrid",
+        working_memory_mode="provider",
+        execution_stage="provider",
         output_publication_mode="private_tool_passthrough",
         private_worker_prompt=(
-            "根据MainAgent给出的业务目标和合同承诺Slot，自主规划最小私有Tool DAG。"
+            "根据MainAgent给出的业务目标和合同承诺结果，自主规划最小私有Tool DAG。"
             "只有当业务目标本身是全市场排名、筛选或发现候选证券时，才允许先读取排名并通过"
             "internal.entity.resolve_ranked_security把排名结果解析成GraphRef后继续调用实体Tool。"
             "如果业务目标明确指向某个命名证券/公司，而available_context没有该目标的权威security_node_id/GraphRef，"
@@ -119,9 +125,9 @@ _CARDS = {
         worker_id="W03",
         agent_id=GRAPH_RELATION_RETRIEVER,
         role="graph_relation_retrieval",
-        short_description="根据已绑定GraphRef槽位读取邻域关系、关联事实和可追溯路径。",
+        short_description="根据已绑定GraphRef上下文读取邻域关系、关联事实和可追溯路径。",
         full_description=(
-            "负责在锁定GraphRef范围内读取金融图关系。Tool可用性只由required_input_slots决定，"
+            "负责在锁定GraphRef范围内读取金融图关系。Tool可用性由任务目标、GraphRef上下文和Worker私有Tool合同决定，"
             "不得根据实体数量猜测邻域或路径查询。"
         ),
         supported_boundary_ids=["graph_relation.retrieval"],
@@ -131,10 +137,12 @@ _CARDS = {
         limitations=["关系端点必须来自权威GraphRef", "不推断未绑定的来源或目标角色"],
         escalation_policy="无兼容私有Tool或局部处理耗尽后上报MainAgent。",
         execution_mode="hybrid",
+        working_memory_mode="provider",
+        execution_stage="provider",
         output_publication_mode="private_tool_passthrough",
         private_worker_prompt=(
             "只在锁定GraphRef范围内读取关系，不创造实体。不得按实体数量决定工具；"
-            "先按required_input_slots过滤，再结合合同目标、Tool摘要和produced_outputs规划。"
+            "结合合同目标、GraphRef上下文、Tool摘要和produced_outputs规划。"
         ),
         private_tool_ids=["graph.relations.read_neighborhood", "graph.relations.find_paths"],
     ),
@@ -142,39 +150,42 @@ _CARDS = {
         worker_id="W04",
         agent_id=RISK_ANALYST,
         role="portfolio_risk_assessment",
-        short_description="消费本任务已绑定的组合、账户、用户约束等风险相关Slot，计算风险事实并形成风险评估。",
+        short_description="读取当前ContextBundle中的组合、账户、用户约束及相关业务数据，计算风险事实并形成风险评估。",
         full_description=(
-            "负责基于CapabilityContract实际绑定的权威业务Slot完成集中度、暴露、账户风险事实和约束审查，不修改持仓。"
-            "W04依赖的是本轮所需的信息Slot，而不是固定依赖某个Worker。普通组合风险分析可消费组合、持仓、账户和用户约束Slot；"
-            "若任务要求评估外部目标标的/事件对组合的影响，应消费CapabilityContract已经绑定的目标分析或impact facts Slot；"
+            "负责基于当前Run的ContextBundle工作记忆完成集中度、暴露、账户风险事实和约束审查，不修改持仓。"
+            "W04只面向当前任务对象读取工作记忆中的组合、持仓、账户和用户约束等业务数据，不固定依赖任何Worker；"
+            "若任务要求评估外部目标标的/事件对组合的影响，应从当前工作记忆读取已经存在的目标分析或影响事实；"
             "目标配置比例或投入金额等用户决策参数必须由CapabilityContract声明，W04不能自行假设仓位。"
-            "W04不自行判定用户还缺什么参数；Capability Requirement Resolver会在W04执行前统一检查必需Slot和用户业务参数，"
+            "W04自行判断当前业务数据质量是否足够支持风险分析；Runtime只校验明确由用户拥有的业务参数，"
             "并以结构化Escalation向MainAgent上报缺失信息。"
-            "只有通过Runtime输入充分性检查后的合同才进入W04私有Tool DAG。"
+            "业务数据不足时W04返回结构化不足说明，由Runtime决定后续调度。"
         ),
         supported_boundary_ids=["portfolio.risk_assessment", "context.resolution"],
         delegation_description=(
             "当用户目标需要对已经取得的组合、账户、持仓、用户约束或其他风险相关事实做集中度、暴露和风险边界分析时委派W04。"
-            "W04不负责假设或补造未绑定的业务事实；输入充分性由Runtime根据CapabilityContract统一检查。"
+            "W04不负责假设或补造业务事实；业务数据充分性由W04根据任务目标和当前ContextBundle自行判断。"
         ),
         delegate_when=[
             "需要基于已绑定组合或账户事实计算集中度、暴露或风险边界",
             "需要审查已绑定用户约束与当前组合之间的风险关系",
             "需要评估已验证目标标的加入当前组合后的风险/集中度影响",
-            "下游调仓或方案Worker需要结构化风险分析Slot作为依据",
+            "下游调仓或方案Worker需要结构化风险分析数据作为依据",
         ],
         capability_tags=["risk", "concentration", "exposure", "constraint", "portfolio_scenario"],
-        supported_scenarios=["组合集中度分析", "账户风险事实分析", "风险约束审查", "目标标的纳入组合的风险情景分析", "为下游方案提供结构化风险Slot"],
+        supported_scenarios=["组合集中度分析", "账户风险事实分析", "风险约束审查", "目标标的纳入组合的风险情景分析", "为下游方案提供结构化风险数据"],
         unsupported_scenarios=["读取未绑定的原始业务事实", "订单执行", "持仓写入", "最终调仓Proposal生成"],
         limitations=[
-            "只消费本轮CapabilityContract绑定的业务Slot",
-            "外部目标/事件影响分析需要合同绑定已验证的分析或impact facts Slot",
+            "只读取本轮ContextBundle中与任务对象相关的业务数据",
+            "外部目标/事件影响分析需要合同绑定已验证的分析或impact facts工作记忆数据",
             "用户决策参数必须由CapabilityContract声明并由Runtime校验，W04不得自行假设",
             "不与任何特定上游Worker ID硬绑定",
         ],
-        escalation_policy="Runtime输入充分性检查通过后才执行W04；若私有Tool仍无法完成，则按能力级错误合同上报MainAgent。",
+        escalation_policy="W04判断当前业务信息不足或私有Tool无法完成时，按结构化错误合同上报MainAgent。",
         execution_mode="hybrid",
-        private_worker_prompt="根据已经通过Runtime充分性检查的风险合同和已绑定Slot选择最小只读Tool DAG，区分风险事实和建议；不得补造未绑定输入或用户参数。",
+        working_memory_mode="consumer",
+        execution_stage="analysis",
+        can_mutate=False,
+        private_worker_prompt="基于目标对象当前ContextBundle工作记忆选择最小只读Tool DAG，区分风险事实和建议；自行判断现有数据是否足以支持风险分析，不指定上游Worker或Tool。",
         private_tool_ids=[
             "risk.calculate_concentration", "risk.read_account_risk_facts",
             "risk.summarize_exposure", "risk.finalize_facts",
@@ -184,40 +195,47 @@ _CARDS = {
         worker_id="W05",
         agent_id=STRATEGY_GUARD,
         role="state_change_proposal",
-        short_description="消费本轮已绑定的状态、约束、风险分析等Slot，生成或审查需要用户审批的状态变更Proposal。",
+        short_description="读取当前ContextBundle中的状态、约束、风险分析等业务数据，生成或审查需要用户审批的状态变更Proposal。",
         full_description=(
-            "只基于CapabilityContract实际绑定的上游事实与分析Slot生成和审查待审批方案，不执行Commit，不绕过审批。"
-            "调仓场景可以消费W04等上游能力产生的风险Slot，但W05不与W04或任何特定Worker ID硬绑定；是否需要风险分析由本轮合同决定。"
+            "只基于当前Run工作记忆中的业务事实与分析结果生成和审查待审批方案，不执行Commit，不绕过审批。"
+            "调仓场景可以使用工作记忆中已经存在的风险数据，但W05不感知任何数据生产Worker；数据质量由W05结合任务目标自行判断。"
         ),
         supported_boundary_ids=["state_change.proposal"],
         delegation_description=(
             "当用户明确要求形成调仓、配置调整或其他状态变更方案时委派W05。"
-            "W05根据本轮已绑定的组合状态、用户约束、风险分析或其他必要Slot形成待审批Proposal。"
+            "W05根据本轮ContextBundle中的组合状态、用户约束、风险分析或其他必要业务数据形成待审批Proposal。"
         ),
-        delegate_when=["存在明确的调仓或状态变更意图", "需要把已验证的上游事实/风险结论转成待审批Proposal"],
+        delegate_when=["存在明确的调仓或状态变更意图", "需要把当前工作记忆中的已验证事实/风险结论转成待审批Proposal"],
         capability_tags=["proposal", "approval", "strategy_guard"],
         supported_scenarios=["调仓方案生成", "状态变更约束审查", "消费上游风险分析形成Proposal"],
         unsupported_scenarios=["直接Commit", "绕过审批", "替代上游专业风险分析"],
-        limitations=["必须存在显式变更意图", "只消费本轮合同绑定的Slot，不固定依赖某个Worker"],
-        escalation_policy="缺少形成合规Proposal所需的已验证Slot时上报MainAgent；只有MainAgent确认属于用户参数后才询问用户。",
+        limitations=["必须存在显式变更意图", "只读取本轮ContextBundle，不固定依赖某个Worker"],
+        escalation_policy="缺少形成合规Proposal所需的业务信息时上报MainAgent；只有MainAgent确认属于用户参数后才询问用户。",
         execution_mode="pure_llm",
-        max_effect_level="proposal",
-        private_worker_prompt="只生成或审查待审批Proposal，不得Commit。",
+        working_memory_mode="consumer",
+        can_mutate=False,
+        execution_stage="decision",
+        private_worker_prompt="只读取当前ContextBundle生成或审查待审批Proposal，不得Commit。",
     ),
     "W06": CapabilityWorkerCard(
         worker_id="W06",
         agent_id=REPORT_WRITER,
         role="result_composition",
-        short_description="把已验证的上游槽位组织为用户可读报告。",
-        full_description="负责把已绑定的结构化结果转换为用户自然语言，只保留输入中已经存在的不确定性，不重新查询、不补充专业事实，也不评价未提供的信息域。",
+        short_description="把当前RequestBundle中的已验证Request结果组织为用户可读报告。",
+        full_description="负责把Runtime提供的Request结果集合转换为用户自然语言，只保留结果中已经存在的不确定性，不重新查询、不补充专业事实。",
         supported_boundary_ids=["result.composition"],
         capability_tags=["report", "composition", "response"],
         supported_scenarios=["分析报告汇总", "诊断报告汇总", "Proposal说明"],
         unsupported_scenarios=["重新检索数据", "新增金融判断"],
-        limitations=["只能使用已验证上游槽位"],
-        escalation_policy="缺少必需上游槽位时上报MainAgent。",
+        limitations=["只能使用Runtime提供的已验证Request结果"],
+        escalation_policy="Request结果集合不完整时按现有Request状态组织回答，不自行补查。",
         execution_mode="pure_llm",
-        private_worker_prompt="只把已验证上游槽位转换为自然语言，不重新查询、不新增专业事实、不评价未提供的信息域。",
+        execution_stage="report",
+        private_worker_prompt=(
+            "只把已验证Request结果转换为自然语言，不重新查询、不新增专业事实、不评价未提供的信息域。"
+            "如果输入包含presentation_policy，必须把它视为最终呈现的唯一权威来源，严格遵守language/style/length/format；"
+            "如果输入包含request_bundle_results，应按Request顺序和Request完成状态组织回答，明确completed、waiting_context、waiting_approval、unsupported、tool_failed等差异。"
+        ),
     ),
     "W07": CapabilityWorkerCard(
         worker_id="W07",
@@ -232,14 +250,15 @@ _CARDS = {
         limitations=["不替代专业业务Worker"],
         escalation_policy="诊断无法确认时明确返回未知，不猜测。",
         execution_mode="pure_llm",
+        execution_stage="diagnostic",
         private_worker_prompt="严格区分调用参数缺失、上下文缺失、工具失败、业务为空和业务不足。",
     ),
     "W08": CapabilityWorkerCard(
         worker_id="W08",
         agent_id=DATABASE_WRITER,
         role="graph_context_write",
-        short_description="将已验证的非交易结果幂等写入金融图上下文。",
-        full_description="只执行已验证的非交易图上下文写入，保持权限、幂等和审计。",
+        short_description="将当前工作记忆中已验证的非交易结果幂等写入金融图上下文。",
+        full_description="只读取当前ContextBundle中的已验证业务数据并执行非交易图上下文写入，保持权限、幂等和审计。",
         supported_boundary_ids=["graph_context.write"],
         capability_tags=["graph_write", "idempotent", "audit"],
         supported_scenarios=["组合图上下文写入", "证据图上下文写入"],
@@ -247,7 +266,9 @@ _CARDS = {
         limitations=["需要显式写合同和权限"],
         escalation_policy="权限或输入不满足时拒绝并上报MainAgent。",
         execution_mode="workflow_backed",
-        max_effect_level="write",
+        working_memory_mode="consumer",
+        can_mutate=True,
+        execution_stage="mutation",
         private_worker_prompt="只执行已验证的非交易图上下文写入，保持幂等和审计。",
         private_tool_ids=["database.write_portfolio_graph_context", "database.write_evidence_graph_context"],
     ),
@@ -255,20 +276,22 @@ _CARDS = {
         worker_id="W09",
         agent_id=ENTITY_ANALYST,
         role="entity_analysis",
-        short_description="基于本任务实际绑定的信息Slot形成结构化实体分析。",
+        short_description="分析已确定身份的金融实体，并基于当前工作记忆形成结构化判断。",
         full_description=(
-            "以Slot为唯一上游接口，只处理当前CapabilityContract实际绑定并由SlotBinder提供的信息。"
-            "Worker不得比较本次输入与未分配的能力或信息域，也不得自行扩大输入要求。"
-            "不重新查询数据。"
+            "W09只负责实体分析与比较。Runtime会按目标GraphRef从本轮Working Memory组装该实体已经查询完成的数据标签；"
+            "W09不负责实体定位、数据检索、选择其他Worker或理解数据来自哪个Tool。"
+            "空值标签表示对应查询已经完成但结果为空；数据是否足以支撑当前分析目标由W09自行判断。"
         ),
         supported_boundary_ids=["entity.analysis"],
-        capability_tags=["entity_analysis", "synthesis", "uncertainty"],
-        supported_scenarios=["个股综合分析", "多实体结构化分析"],
-        unsupported_scenarios=["自行检索证据", "状态变更"],
-        limitations=["必需输入由合同决定", "结论必须回溯上游槽位"],
-        escalation_policy="必需Slot缺失时上报MainAgent，不向用户索取内部类型对象。",
+        capability_tags=["entity_analysis", "synthesis", "comparison", "uncertainty"],
+        supported_scenarios=["个股综合分析", "多实体结构化分析", "实体对比分析"],
+        unsupported_scenarios=["自行检索证据", "实体发现", "状态变更"],
+        limitations=["只分析Runtime提供的目标实体工作记忆", "不指定数据来源Worker或Tool"],
+        escalation_policy="当前实体工作记忆不足以支持可靠分析时，仅反馈缺失的信息内容与原因，由Runtime决定是否补查。",
         execution_mode="pure_llm",
-        private_worker_prompt="只融合已绑定Slot，输出通用facts、analysis、uncertainties和conclusion，不感知未绑定信息域。",
+        working_memory_mode="consumer",
+        execution_stage="analysis",
+        private_worker_prompt="只分析目标实体当前Working Memory中的已查询数据；自行判断数据质量与充分性，不关心数据来源，不调用任何检索或业务Tool。",
     ),
 }
 

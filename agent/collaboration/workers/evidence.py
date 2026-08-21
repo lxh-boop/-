@@ -10,10 +10,10 @@ from agent.tool_dag import WorkerToolDagRuntime
 
 from ..completion import build_completion_report
 from ..models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus
-from .common import contract_acceptance_rules, contract_output_slots, execution_safe_value, safe_public_value
+from .common import contract_acceptance_rules, contract_output_data_names, execution_safe_value, safe_public_value
 
-_CANONICAL_EVIDENCE_SLOT = "entity_external_evidence"
-_SOURCE_RECORDS_SLOT = "evidence_source_records"
+_CANONICAL_EVIDENCE_DATA = "evidence"
+_SOURCE_RECORDS_DATA = "evidence_sources"
 _EVIDENCE_VIEW_PREFIX = "evidence."
 _EVIDENCE_VIEW_SOURCE_ALIASES: dict[str, set[str]] = {
     "news": {"news_and_announcements"},
@@ -41,10 +41,10 @@ _SOURCE_INDEX_FIELDS = (
     "merged_record_count",
 )
 
-# Worker-to-Worker canonical evidence is an analysis transport contract, not a
-# dump of the private Tool result.  Preserve stable identity/provenance and
-# business-relevant metadata, but normalize all body variants to one bounded
-# text field.  The complete Tool result remains private to W01's Tool DAG.
+# Canonical evidence is the ContextBundle working-memory representation, not a
+# dump of the private Tool result. Preserve stable business metadata and normalize
+# all body variants to one bounded text field. The complete Tool result remains
+# private to W01's Tool DAG.
 _CANONICAL_RECORD_FIELDS = (
     "canonical_id",
     "source_ids",
@@ -337,9 +337,9 @@ def _evidence_view_payload(
     })
 
 
-def _semantic_evidence_slots(
+def _semantic_evidence_data(
     *,
-    requested_slots: list[str],
+    requested_names: list[str],
     selected_refs: list[Any],
     entity_catalog: list[dict[str, Any]],
     collection_goal: str,
@@ -361,12 +361,12 @@ def _semantic_evidence_slots(
         coverage=coverage,
         business_empty=business_empty,
     )
-    slots: dict[str, Any] = {}
-    for slot_id in requested_slots:
-        if slot_id == _CANONICAL_EVIDENCE_SLOT:
-            slots[slot_id] = canonical
-        elif slot_id == _SOURCE_RECORDS_SLOT:
-            slots[slot_id] = _source_records_payload(
+    business_data: dict[str, Any] = {}
+    for data_name in requested_names:
+        if data_name == _CANONICAL_EVIDENCE_DATA:
+            business_data[data_name] = canonical
+        elif data_name == _SOURCE_RECORDS_DATA:
+            business_data[data_name] = _source_records_payload(
                 selected_refs=selected_refs,
                 entity_catalog=entity_catalog,
                 collection_goal=collection_goal,
@@ -374,15 +374,15 @@ def _semantic_evidence_slots(
                 coverage=coverage,
                 business_empty=business_empty,
             )
-        elif slot_id.startswith(_EVIDENCE_VIEW_PREFIX):
-            slots[slot_id] = _evidence_view_payload(
-                slot_id=slot_id,
+        elif data_name.startswith(_EVIDENCE_VIEW_PREFIX):
+            business_data[data_name] = _evidence_view_payload(
+                slot_id=data_name,
                 selected_refs=selected_refs,
                 entity_catalog=entity_catalog,
                 collection_goal=collection_goal,
                 results=results,
             )
-    return slots
+    return business_data
 
 
 def _final_data(tool_dag_result: Any) -> dict[str, Any]:
@@ -546,12 +546,12 @@ def run_evidence(
     deduplication = safe_public_value(raw.get("deduplication") or {})
     business_empty = bool(raw.get("business_empty", record_count == 0))
     coverage_satisfied = bool(coverage.get("coverage_satisfied", True))
-    requested_slots = contract_output_slots(task)
+    requested_names = contract_output_data_names(task)
     entity_catalog = execution_safe_value(
         task.metadata.get("authoritative_entity_catalog") or []
     )
-    semantic_slots = _semantic_evidence_slots(
-        requested_slots=requested_slots,
+    semantic_data = _semantic_evidence_data(
+        requested_names=requested_names,
         selected_refs=selected_refs,
         entity_catalog=entity_catalog,
         collection_goal=collection_goal,
@@ -573,8 +573,8 @@ def run_evidence(
         "coverage": coverage,
         "business_empty": business_empty,
         "write_performed": False,
-        "slots": semantic_slots,
-        "produced_information_slots": list(semantic_slots),
+        "business_data": semantic_data,
+        "produced_data_names": list(semantic_data),
     }
     warnings = [
         str(item)
@@ -582,7 +582,7 @@ def run_evidence(
         if str(item).strip()
     ]
     requested_slot_payloads = [
-        value for value in semantic_slots.values() if isinstance(value, dict)
+        value for value in semantic_data.values() if isinstance(value, dict)
     ]
     all_requested_business_empty = bool(requested_slot_payloads) and all(
         bool(value.get("business_empty", False)) for value in requested_slot_payloads
@@ -605,15 +605,15 @@ def run_evidence(
         for item in dag_result.node_records
         if not item.success
     ]
-    required_slots = requested_slots
-    produced_slots = list(semantic_slots)
-    all_required_slots_materialized = set(required_slots).issubset(produced_slots)
+    required_names = requested_names
+    produced_names = list(semantic_data)
+    all_required_data_materialized = set(required_names).issubset(produced_names)
     if success:
-        if all_requested_business_empty and all_required_slots_materialized:
+        if all_requested_business_empty and all_required_data_materialized:
             expected_completed = True
             completion_status = "completed"
             business_status = "empty"
-        elif requested_coverage_satisfied and all_required_slots_materialized:
+        elif requested_coverage_satisfied and all_required_data_materialized:
             expected_completed = True
             completion_status = "completed"
             business_status = "sufficient"
@@ -628,7 +628,7 @@ def run_evidence(
             business_status=business_status,
             completion_status=completion_status,
             expected_task_completed=expected_completed,
-            produced_information_slots=produced_slots,
+            produced_data_names=produced_names,
             criterion_results=_criterion_rows(
                 task,
                 results_structured=True,
@@ -647,7 +647,7 @@ def run_evidence(
             business_status="unknown",
             completion_status="not_completed",
             expected_task_completed=False,
-            produced_information_slots=[],
+            produced_data_names=[],
             criterion_results=_criterion_rows(
                 task,
                 results_structured=False,

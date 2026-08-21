@@ -4,33 +4,19 @@ from typing import Any
 
 from agent.collaboration.worker_contracts import WorkerContractViolation
 
+from .data_names import data_name_matches_patterns, validate_data_name
 from .models import CapabilityTask
-from .semantic_slots import slot_matches_patterns, validate_slot_id
 
-
-_EFFECT_ORDER = {"read": 0, "proposal": 1, "write": 2}
 _RUNTIME_OWNED_PARAMETER_NAMES = {
-    "user_id", "session_id", "conversation_id", "run_id", "language",
-    "reply_language", "as_of_time", "focus_ref_ids", "context_ref_ids",
-    "graph_ref_ids", "approval_token", "confirmation_token", "worker_id",
-    "agent_id", "tool_id", "tool_name", "model", "timeout", "retry",
+    "user_id", "session_id", "conversation_id", "run_id", "language", "reply_language",
+    "as_of_time", "focus_ref_ids", "context_ref_ids", "graph_ref_ids", "approval_token",
+    "confirmation_token", "worker_id", "agent_id", "tool_id", "tool_name", "model",
+    "timeout", "retry",
 }
-
-# These values help Agents understand the conversation/runtime, but they are
-# not verified business facts and must not become ordinary Worker-to-Worker
-# business Slot dependencies.  W07 is the dedicated diagnosis/context Worker
-# and may consume them when diagnosing the runtime itself.
-_PLANNER_CONTEXT_ONLY_SLOTS = {
-    "current_user_request",
-    "reply_language",
-    "runtime_context",
-    "session_summary",
-}
-_PLANNER_CONTEXT_CONSUMER_WORKERS = {"W07"}
 
 
 class CapabilityPlanValidator:
-    """Rule-only validator for MainAgent Worker-scope contract plans."""
+    """Rule-only validator for Worker-scope business-data contracts."""
 
     def __init__(self, registry: Any, worker_directory: Any) -> None:
         self.registry = registry
@@ -39,32 +25,17 @@ class CapabilityPlanValidator:
     def validate(
         self,
         payload: dict[str, Any],
-        *,
-        request_mode: str,
-        initial_information_slots: set[str],
     ) -> list[CapabilityTask]:
         if not isinstance(payload, dict):
             raise WorkerContractViolation("capability_plan_not_object", "$")
-        goal = payload.get("goal_contract")
-        if not isinstance(goal, dict):
+        if not isinstance(payload.get("goal_contract"), dict):
             raise WorkerContractViolation("capability_goal_contract_missing", "$.goal_contract")
         raw_tasks = payload.get("tasks")
         if not isinstance(raw_tasks, list) or not raw_tasks:
             raise WorkerContractViolation("capability_plan_empty", "$.tasks")
 
-        mode = str(request_mode or "analysis").lower()
-        request_max = "proposal" if mode == "proposal" else "read"
-        goal_effect = str(goal.get("effect_limit") or "read").lower()
-        if _EFFECT_ORDER.get(goal_effect, 99) > _EFFECT_ORDER[request_max]:
-            raise WorkerContractViolation(
-                "capability_goal_effect_exceeds_request_mode",
-                "$.goal_contract.effect_limit",
-                f"mode={mode},effect={goal_effect}",
-            )
-
         tasks: list[CapabilityTask] = []
         task_ids: set[str] = set()
-        produced_slots: set[str] = set(initial_information_slots)
         for index, raw in enumerate(raw_tasks, start=1):
             if not isinstance(raw, dict):
                 raise WorkerContractViolation("capability_task_not_object", f"$.tasks[{index-1}]")
@@ -83,212 +54,46 @@ class CapabilityPlanValidator:
             try:
                 card = self.worker_directory.get(task.worker_id)
             except KeyError as exc:
-                raise WorkerContractViolation(
-                    "unknown_main_agent_selected_worker",
-                    f"$.tasks[{index-1}].worker_id",
-                    task.worker_id,
-                ) from exc
-            worker_scope = self.registry.aggregate_scope(card.supported_boundary_ids)
-            compatible_scope_ids = {str(card.role), *[str(item) for item in card.supported_boundary_ids]}
-            if task.boundary_id not in compatible_scope_ids:
-                raise WorkerContractViolation(
-                    "worker_scope_id_mismatch",
-                    f"$.tasks[{index-1}].boundary_id",
-                    f"expected_worker_scope={card.role},actual={task.boundary_id}",
-                )
+                raise WorkerContractViolation("unknown_main_agent_selected_worker", f"$.tasks[{index-1}].worker_id", task.worker_id) from exc
+            scope = self.registry.aggregate_scope(card.supported_boundary_ids)
+            if task.boundary_id not in {str(card.role), *[str(x) for x in card.supported_boundary_ids]}:
+                raise WorkerContractViolation("worker_scope_id_mismatch", f"$.tasks[{index-1}].boundary_id", task.boundary_id)
 
-            if _EFFECT_ORDER.get(task.effect_limit, 99) > _EFFECT_ORDER.get(goal_effect, 99):
-                raise WorkerContractViolation(
-                    "capability_task_effect_exceeds_goal",
-                    f"$.tasks[{index-1}].effect_limit",
-                    task.effect_limit,
-                )
-            if _EFFECT_ORDER.get(task.effect_limit, 99) > _EFFECT_ORDER.get(card.max_effect_level, 99):
-                raise WorkerContractViolation(
-                    "capability_task_effect_exceeds_worker_scope",
-                    f"$.tasks[{index-1}].effect_limit",
-                    task.worker_id,
-                )
-
-            forbidden_params = sorted(
-                key
-                for key in task.business_parameters
-                if str(key).lower() in _RUNTIME_OWNED_PARAMETER_NAMES
-                or str(key).lower().endswith("_ref_ids")
-            )
-            if forbidden_params:
-                raise WorkerContractViolation(
-                    "runtime_owned_parameter_in_capability_plan",
-                    f"$.tasks[{index-1}].business_parameters",
-                    ",".join(forbidden_params),
-                )
-
-            contract_ids: set[str] = set()
-            for cindex, contract in enumerate(task.contracts, start=1):
-                if not contract.contract_id:
-                    raise WorkerContractViolation(
-                        "capability_contract_id_missing",
-                        f"$.tasks[{index-1}].contracts[{cindex-1}]",
-                    )
-                if contract.contract_id in contract_ids:
-                    raise WorkerContractViolation(
-                        "duplicate_capability_contract_id",
-                        f"$.tasks[{index-1}].contracts",
-                        contract.contract_id,
-                    )
-                contract_ids.add(contract.contract_id)
-                if not contract.promised_outputs:
-                    raise WorkerContractViolation(
-                        "capability_contract_outputs_empty",
-                        f"$.tasks[{index-1}].contracts[{cindex-1}].promised_outputs",
-                    )
-                if _EFFECT_ORDER.get(contract.effect_limit, 99) > _EFFECT_ORDER.get(task.effect_limit, 99):
-                    raise WorkerContractViolation(
-                        "capability_contract_effect_exceeds_task",
-                        f"$.tasks[{index-1}].contracts[{cindex-1}].effect_limit",
-                    )
-
-                input_slots = set(contract.input_slots())
-                output_slots = set(contract.output_slots())
-                for rindex, requirement in enumerate(contract.required_inputs):
-                    if requirement.source_policy not in {"system", "user", "either"}:
-                        raise WorkerContractViolation(
-                            "invalid_requirement_source_policy",
-                            f"$.tasks[{index-1}].contracts[{cindex-1}].required_inputs[{rindex}].source_policy",
-                            requirement.source_policy,
-                        )
-                    if requirement.satisfaction_rule not in {"exists", "non_empty"}:
-                        raise WorkerContractViolation(
-                            "invalid_input_requirement_satisfaction_rule",
-                            f"$.tasks[{index-1}].contracts[{cindex-1}].required_inputs[{rindex}].satisfaction_rule",
-                            requirement.satisfaction_rule,
-                        )
-                for pindex, requirement in enumerate(contract.required_parameters):
-                    if not requirement.parameter_id:
-                        raise WorkerContractViolation(
-                            "capability_parameter_requirement_id_missing",
-                            f"$.tasks[{index-1}].contracts[{cindex-1}].required_parameters[{pindex}]",
-                        )
-                    if requirement.source_policy not in {"system", "user", "either"}:
-                        raise WorkerContractViolation(
-                            "invalid_requirement_source_policy",
-                            f"$.tasks[{index-1}].contracts[{cindex-1}].required_parameters[{pindex}].source_policy",
-                            requirement.source_policy,
-                        )
-                    if requirement.satisfaction_rule not in {"exists", "non_empty", "one_of"}:
-                        raise WorkerContractViolation(
-                            "invalid_requirement_satisfaction_rule",
-                            f"$.tasks[{index-1}].contracts[{cindex-1}].required_parameters[{pindex}].satisfaction_rule",
-                            requirement.satisfaction_rule,
-                        )
-                    parameter_keys = [requirement.parameter_id, *requirement.satisfy_by]
-                    allowed_parameter_patterns = worker_scope.get("accepted_business_parameter_patterns") or []
-                    unsupported_parameter_keys = sorted({
-                        str(parameter_key)
-                        for parameter_key in parameter_keys
-                        if not slot_matches_patterns(str(parameter_key), allowed_parameter_patterns)
-                    })
-                    if unsupported_parameter_keys:
-                        raise WorkerContractViolation(
-                            "capability_business_parameter_outside_worker_scope",
-                            f"$.tasks[{index-1}].contracts[{cindex-1}].required_parameters[{pindex}]",
-                            ",".join(unsupported_parameter_keys),
-                        )
-                    for parameter_key in parameter_keys:
-                        try:
-                            validate_slot_id(parameter_key)
-                        except Exception as exc:
-                            raise WorkerContractViolation(
-                                "invalid_capability_business_parameter",
-                                f"$.tasks[{index-1}].contracts[{cindex-1}].required_parameters[{pindex}]",
-                                str(parameter_key),
-                            ) from exc
-                        lowered = str(parameter_key).lower()
-                        if lowered in _RUNTIME_OWNED_PARAMETER_NAMES or lowered.endswith("_ref_ids"):
-                            raise WorkerContractViolation(
-                                "runtime_owned_parameter_in_requirement_contract",
-                                f"$.tasks[{index-1}].contracts[{cindex-1}].required_parameters[{pindex}]",
-                                str(parameter_key),
-                            )
-                for slot_id in sorted(input_slots | output_slots):
-                    try:
-                        validate_slot_id(slot_id)
-                    except Exception as exc:
-                        raise WorkerContractViolation(
-                            "invalid_capability_semantic_slot",
-                            f"$.tasks[{index-1}].contracts[{cindex-1}]",
-                            str(slot_id),
-                        ) from exc
-                planner_context_inputs = sorted(
-                    slot for slot in input_slots
-                    if slot in _PLANNER_CONTEXT_ONLY_SLOTS
-                    and task.worker_id not in _PLANNER_CONTEXT_CONSUMER_WORKERS
-                )
-                if planner_context_inputs:
-                    raise WorkerContractViolation(
-                        "planner_context_used_as_business_input",
-                        f"$.tasks[{index-1}].contracts[{cindex-1}].required_inputs",
-                        ",".join(planner_context_inputs),
-                    )
+            for contract in task.contracts:
+                for item in contract.required_data:
+                    validate_data_name(item.name)
+                for item in contract.promised_data:
+                    validate_data_name(item.name)
                 unsupported_inputs = sorted(
-                    slot for slot in input_slots
-                    if not slot_matches_patterns(slot, worker_scope["accepted_input_patterns"])
+                    name for name in contract.input_data_names()
+                    if not data_name_matches_patterns(name, scope.get("accepted_data_patterns") or [])
                 )
                 unsupported_outputs = sorted(
-                    slot for slot in output_slots
-                    if not slot_matches_patterns(slot, worker_scope["produced_output_patterns"])
+                    name for name in contract.output_data_names()
+                    if not data_name_matches_patterns(name, scope.get("produced_data_patterns") or [])
                 )
-                if unsupported_inputs:
+                if unsupported_inputs or unsupported_outputs:
                     raise WorkerContractViolation(
-                        "capability_input_semantic_outside_worker_scope",
-                        f"$.tasks[{index-1}].contracts[{cindex-1}].required_inputs",
-                        ",".join(unsupported_inputs),
+                        "capability_contract_outside_worker_scope", f"$.tasks[{index-1}]",
+                        f"inputs={unsupported_inputs},outputs={unsupported_outputs}",
                     )
-                if unsupported_outputs:
+                allowed_rules = set(scope.get("allowed_acceptance_rule_ids") or [])
+                invalid_rules = sorted(set(contract.acceptance_rule_ids) - allowed_rules)
+                if invalid_rules:
                     raise WorkerContractViolation(
-                        "capability_output_semantic_outside_worker_scope",
-                        f"$.tasks[{index-1}].contracts[{cindex-1}].promised_outputs",
-                        ",".join(unsupported_outputs),
+                        "capability_acceptance_rule_outside_scope", f"$.tasks[{index-1}]", ",".join(invalid_rules)
                     )
-                overlap = sorted(output_slots.intersection(contract.forbidden_output_slots))
-                if overlap:
-                    raise WorkerContractViolation(
-                        "capability_forbidden_output_requested",
-                        f"$.tasks[{index-1}].contracts[{cindex-1}].forbidden_output_slots",
-                        ",".join(overlap),
-                    )
-                unknown_rules = sorted(
-                    rule
-                    for rule in contract.acceptance_rule_ids
-                    if rule not in worker_scope["allowed_acceptance_rule_ids"]
-                    or not self.registry.acceptance_rule_exists(rule)
-                )
-                if unknown_rules:
-                    raise WorkerContractViolation(
-                        "capability_acceptance_rule_outside_worker_scope",
-                        f"$.tasks[{index-1}].contracts[{cindex-1}].acceptance_rule_ids",
-                        ",".join(unknown_rules),
-                    )
-                produced_slots.update(output_slots)
+                if contract.mutation_allowed and not bool(card.can_mutate):
+                    raise WorkerContractViolation("capability_mutation_not_allowed_for_worker", f"$.tasks[{index-1}]", card.worker_id)
+                if contract.mutation_allowed and not bool(scope.get("mutation_allowed", False)):
+                    raise WorkerContractViolation("capability_mutation_not_allowed_for_boundary", f"$.tasks[{index-1}]", task.boundary_id)
+                for requirement in contract.required_parameters:
+                    if requirement.parameter_id in _RUNTIME_OWNED_PARAMETER_NAMES:
+                        raise WorkerContractViolation(
+                            "runtime_parameter_cannot_be_business_parameter", f"$.tasks[{index-1}]", requirement.parameter_id
+                        )
             tasks.append(task)
-
-        desired = {str(item) for item in goal.get("desired_outputs") or [] if str(item)}
-        required = {
-            str(item) for item in goal.get("required_information_slots") or [] if str(item)
-        }
-        missing = sorted((desired | required) - produced_slots)
-        if missing:
-            raise WorkerContractViolation(
-                "capability_goal_slots_uncovered",
-                "$.goal_contract",
-                ",".join(missing),
-            )
-        # 保留原来的终端报告约束：如果目标要求 user_facing_report，
-        # 必须由负责结果汇总的 Worker 承担。这里只把识别依据从旧的
-        # result.composition 细能力改成 Worker 自身的权威 role。
-        if "user_facing_report" in desired | required and not any(
-            self.worker_directory.get(task.worker_id).role == "result_composition"
-            for task in tasks
-        ):
-            raise WorkerContractViolation("capability_plan_missing_result_composition", "$.tasks")
         return tasks
+
+
+__all__ = ["CapabilityPlanValidator"]

@@ -1,7 +1,6 @@
 """Execute W03 graph-relation retrieval through its private Tool DAG.
 
-The Worker sees only SlotBinder-materialized inputs. Tool compatibility is
-resolved from required input slots; entity count is never used as a task type.
+The Worker receives authoritative entity context from Runtime. Private Tool compatibility remains internal to W03; entity count is never used as a task type.
 """
 
 from __future__ import annotations
@@ -13,31 +12,33 @@ from agent.tool_dag import WorkerToolDagRuntime
 
 from ..completion import runtime_completion_report
 from ..models import GraphAgentTask, GraphWorkerResult, ResultStatus
-from .common import contract_acceptance_rules, contract_output_slots, execution_safe_value
+from agent.capabilities.data_names import LEGACY_OUTPUT_NAME_MAP
+from .common import contract_acceptance_rules, contract_output_data_names, execution_safe_value
 
 
-def _publish_slots(task: GraphAgentTask, dag_result: Any) -> tuple[dict[str, Any], list[str], list[str]]:
-    wanted = set(contract_output_slots(task))
-    slots: dict[str, Any] = {}
+def _publish_business_data(task: GraphAgentTask, dag_result: Any) -> tuple[dict[str, Any], list[str], list[str]]:
+    wanted = set(contract_output_data_names(task))
+    business_data: dict[str, Any] = {}
     warnings: list[str] = []
     for tool_result in list(getattr(dag_result, "final_results", []) or []):
         data = dict(getattr(tool_result, "data", {}) or {})
-        tool_slots = data.get("slots") if isinstance(data.get("slots"), dict) else {}
-        for slot_id, value in tool_slots.items():
-            if slot_id in wanted:
-                slots[str(slot_id)] = execution_safe_value(value)
+        tool_data = data.get("business_data") if isinstance(data.get("business_data"), dict) else data.get("slots") if isinstance(data.get("slots"), dict) else {}
+        for raw_name, value in tool_data.items():
+            name = LEGACY_OUTPUT_NAME_MAP.get(str(raw_name), str(raw_name))
+            if name in wanted:
+                business_data[name] = execution_safe_value(value)
         warnings.extend(str(item) for item in getattr(tool_result, "warnings", []) or [] if str(item))
         warnings.extend(str(item) for item in getattr(tool_result, "errors", []) or [] if str(item))
-    produced = [slot for slot in contract_output_slots(task) if slot in slots]
-    missing = [slot for slot in contract_output_slots(task) if slot not in slots]
-    return slots, produced, list(dict.fromkeys([*warnings, *missing]))
+    produced = [name for name in contract_output_data_names(task) if name in business_data]
+    missing = [name for name in contract_output_data_names(task) if name not in business_data]
+    return business_data, produced, list(dict.fromkeys([*warnings, *missing]))
 
 
 def run_graph_impact(
     tool_dag_runtime: WorkerToolDagRuntime,
     task: GraphAgentTask,
     *,
-    resolved_inputs: dict[str, Any] | None,
+    working_memory_context: dict[str, Any] | None = None,
     worker_prompt: str,
     allowed_tool_names: list[str],
     output_dir: str | Path,
@@ -45,10 +46,10 @@ def run_graph_impact(
 ) -> GraphWorkerResult:
     available_context = {
         str(key): execution_safe_value(value)
-        for key, value in dict(resolved_inputs or {}).items()
+        for key, value in dict(working_memory_context or {}).items()
         if value is not None
     }
-    required_outputs = contract_output_slots(task)
+    required_outputs = contract_output_data_names(task)
     dag_result = tool_dag_runtime.run(
         worker_task_id=task.task_id,
         worker_role=task.assigned_agent,
@@ -72,16 +73,16 @@ def run_graph_impact(
         read_only=True,
         max_replans=1,
     )
-    slots, produced, warnings = _publish_slots(task, dag_result)
+    business_data, produced, warnings = _publish_business_data(task, dag_result)
     success = bool(dag_result.success and len(produced) == len(required_outputs))
     status = ResultStatus.COMPLETED if success else ResultStatus.PARTIAL if produced else ResultStatus.FAILED
     data = {
-        "slots": slots,
-        "produced_information_slots": produced,
-        "missing_information_slots": [slot for slot in required_outputs if slot not in produced],
+        "business_data": business_data,
+        "produced_data_names": produced,
+        "missing_data_names": [name for name in required_outputs if name not in produced],
         "business_empty": bool(produced and all(
             isinstance(value, dict) and value.get("business_empty") is True
-            for value in slots.values()
+            for value in business_data.values()
         )),
     }
     result = GraphWorkerResult(
@@ -94,22 +95,22 @@ def run_graph_impact(
         data=data if produced else None,
         error=None if produced else {
             "code": "graph_relation_tool_dag_failed",
-            "message": "W03 private Tool DAG did not publish the promised relation slots.",
+            "message": "W03 private Tool DAG did not publish the promised relation data.",
             "component": task.assigned_agent,
             "retryable": True,
         },
         focus_refs=task.focus_refs,
         summary=(
             "已通过W03私有Tool DAG读取图关系信息。"
-            if produced else "图关系读取未产生合同承诺的Slot。"
+            if produced else "图关系读取未产生合同承诺的数据。"
         ),
-        findings=[{"kind": "capability_slots", "slots": produced}],
+        findings=[{"kind": "capability_business_data", "data_names": produced}],
         confidence=1.0 if success else 0.6 if produced else 0.0,
         warnings=warnings,
         metadata={
             "boundary_id": task.boundary_id,
             "tool_dag_task_count": len(getattr(getattr(dag_result, "plan", None), "tasks", []) or []),
-            "produced_information_slots": produced,
+            "produced_data_names": produced,
         },
     )
     result.completion = runtime_completion_report(

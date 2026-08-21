@@ -22,9 +22,9 @@ ContractTerminalState = Literal[
 class NeedRequirement:
     """One canonical semantic requirement compiled from a user Need.
 
-    This is planning IR, not a Worker contract. ``semantic_key`` must resolve
-    through CapabilityRegistry. Runtime-owned slot/parameter semantics are
-    expanded later; the LLM is not allowed to invent concrete contract policy.
+    This is planning IR.  Business data requirements resolve to simple
+    Working-Memory data names; user-owned values resolve to business parameters.
+    No Worker/Tool identity or transport binding appears here.
     """
 
     requirement_id: str
@@ -56,74 +56,47 @@ class NeedRequirement:
 
 
 @dataclass(frozen=True)
-class InputSlotRequirement:
-    """One information slot that a capability contract must consume.
+class DataRequirement:
+    """One business-data name that may be read from the run ContextBundle.
 
-    The slot name and schema are selected from the boundary catalog.  Entity
-    identity is never invented here; ``entity_scope`` refers to GraphRefs that
-    were already resolved by the runtime.
+    This is not a transport edge.  Analysis Workers receive the whole relevant
+    Working-Memory view and decide whether the available data is sufficient.
     """
 
-    slot_id: str
-    schema_id: str = ""
-    entity_scope: str = "focus_entities"
-    required: bool = True
-    cardinality: Literal["one", "many"] = "one"
-    authority_policy: str = "authoritative_or_verified_upstream"
-    freshness_policy: str = "request_default"
-    required_paths: list[str] = field(default_factory=list)
-    optional_paths: list[str] = field(default_factory=list)
+    name: str
     semantic_role: str = ""
+    required: bool = True
     source_policy: RequirementSourcePolicy = "system"
     satisfaction_rule: SatisfactionRule = "exists"
+    required_paths: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> "InputSlotRequirement":
+    def from_dict(cls, value: dict[str, Any]) -> "DataRequirement":
         row = dict(value or {})
+        source_policy = str(row.get("source_policy") or "system").strip().lower()
+        if source_policy not in {"system", "user", "either"}:
+            source_policy = "system"
+        satisfaction_rule = str(row.get("satisfaction_rule") or "exists").strip().lower()
+        if satisfaction_rule not in {"exists", "non_empty", "one_of"}:
+            satisfaction_rule = "exists"
+        name = str(row.get("name") or row.get("data_name") or "").strip()
         return cls(
-            slot_id=str(row.get("slot_id") or "").strip(),
-            schema_id=str(row.get("schema_id") or "").strip(),
-            entity_scope=str(row.get("entity_scope") or "focus_entities").strip(),
+            name=name,
+            semantic_role=str(row.get("semantic_role") or name).strip(),
             required=bool(row.get("required", True)),
-            cardinality=(
-                "many" if str(row.get("cardinality") or "one").lower() == "many" else "one"
-            ),
-            authority_policy=str(
-                row.get("authority_policy") or "authoritative_or_verified_upstream"
-            ).strip(),
-            freshness_policy=str(row.get("freshness_policy") or "request_default").strip(),
+            source_policy=source_policy,
+            satisfaction_rule=satisfaction_rule,
             required_paths=list(dict.fromkeys(
                 str(item).strip()
                 for item in row.get("required_paths") or []
                 if str(item).strip()
             )),
-            optional_paths=list(dict.fromkeys(
-                str(item).strip()
-                for item in row.get("optional_paths") or []
-                if str(item).strip()
-            )),
-            semantic_role=str(row.get("semantic_role") or row.get("slot_id") or "").strip(),
-            source_policy=(
-                str(row.get("source_policy") or "system").strip().lower()
-                if str(row.get("source_policy") or "system").strip().lower() in {"system", "user", "either"}
-                else "system"
-            ),
-            satisfaction_rule=(
-                str(row.get("satisfaction_rule") or "exists").strip().lower()
-                if str(row.get("satisfaction_rule") or "exists").strip().lower() in {"exists", "non_empty", "one_of"}
-                else "exists"
-            ),
         )
 
 
 @dataclass(frozen=True)
 class BusinessParameterRequirement:
-    """One business parameter required by a capability contract.
-
-    Business parameters are intentionally separate from Worker-to-Worker Slots.
-    They describe user/either-owned values such as target allocation, dates or
-    preferences that cannot be safely invented by a domain Worker.
-    """
+    """One user/either-owned business parameter that must not be invented."""
 
     parameter_id: str
     semantic_role: str = ""
@@ -164,27 +137,17 @@ class BusinessParameterRequirement:
 
 
 @dataclass(frozen=True)
-class OutputSlotGuarantee:
-    """One information slot that a capability contract promises to publish."""
+class DataGuarantee:
+    """One simple data name a Worker promises to materialize on success."""
 
-    slot_id: str
-    schema_id: str = ""
-    entity_scope: str = "same_as_input"
-    provenance_required: bool = True
-    authority_level: str = "worker_verified"
-    freshness_policy: str = "request_default"
+    name: str
     required_paths: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> "OutputSlotGuarantee":
+    def from_dict(cls, value: dict[str, Any]) -> "DataGuarantee":
         row = dict(value or {})
         return cls(
-            slot_id=str(row.get("slot_id") or "").strip(),
-            schema_id=str(row.get("schema_id") or "").strip(),
-            entity_scope=str(row.get("entity_scope") or "same_as_input").strip(),
-            provenance_required=bool(row.get("provenance_required", True)),
-            authority_level=str(row.get("authority_level") or "worker_verified").strip(),
-            freshness_policy=str(row.get("freshness_policy") or "request_default").strip(),
+            name=str(row.get("name") or row.get("data_name") or "").strip(),
             required_paths=list(dict.fromkeys(
                 str(item).strip()
                 for item in row.get("required_paths") or []
@@ -197,37 +160,33 @@ class OutputSlotGuarantee:
 class CapabilityContract:
     """A verifiable business obligation carried by one capability task.
 
-    The contract says *what must be consumed, produced and verified*.  It never
-    names a Worker, task type, Tool, prompt, retry policy or fixed Tool DAG.
+    Business data is shared through the run ContextBundle rather than through
+    point-to-point bindings.  The contract therefore describes only semantic
+    data expectations, user parameters, output names and mutation permission.
     """
 
     contract_id: str
     description: str
-    required_inputs: list[InputSlotRequirement] = field(default_factory=list)
+    required_data: list[DataRequirement] = field(default_factory=list)
     required_parameters: list[BusinessParameterRequirement] = field(default_factory=list)
-    promised_outputs: list[OutputSlotGuarantee] = field(default_factory=list)
+    promised_data: list[DataGuarantee] = field(default_factory=list)
     acceptance_rule_ids: list[str] = field(default_factory=list)
-    forbidden_output_slots: list[str] = field(default_factory=list)
+    forbidden_data_names: list[str] = field(default_factory=list)
     criticality: Criticality = "required"
-    effect_limit: EffectLevel = "read"
+    mutation_allowed: bool = False
     allowed_terminal_states: list[ContractTerminalState] = field(
         default_factory=lambda: ["completed", "business_empty", "business_insufficient"]
     )
 
     @classmethod
-    def from_dict(
-        cls,
-        value: dict[str, Any],
-        *,
-        contract_id: str = "",
-    ) -> "CapabilityContract":
+    def from_dict(cls, value: dict[str, Any], *, contract_id: str = "") -> "CapabilityContract":
         row = dict(value or {})
         return cls(
             contract_id=str(row.get("contract_id") or contract_id).strip(),
             description=str(row.get("description") or "").strip(),
-            required_inputs=[
-                InputSlotRequirement.from_dict(item)
-                for item in row.get("required_inputs") or []
+            required_data=[
+                DataRequirement.from_dict(item)
+                for item in row.get("required_data") or []
                 if isinstance(item, dict)
             ],
             required_parameters=[
@@ -235,49 +194,39 @@ class CapabilityContract:
                 for item in row.get("required_parameters") or []
                 if isinstance(item, dict)
             ],
-            promised_outputs=[
-                OutputSlotGuarantee.from_dict(item)
-                for item in row.get("promised_outputs") or []
+            promised_data=[
+                DataGuarantee.from_dict(item)
+                for item in row.get("promised_data") or []
                 if isinstance(item, dict)
             ],
-            acceptance_rule_ids=list(
-                dict.fromkeys(
-                    str(item).strip()
-                    for item in row.get("acceptance_rule_ids") or []
-                    if str(item).strip()
-                )
-            ),
-            forbidden_output_slots=list(
-                dict.fromkeys(
-                    str(item).strip()
-                    for item in row.get("forbidden_output_slots") or []
-                    if str(item).strip()
-                )
-            ),
+            acceptance_rule_ids=list(dict.fromkeys(
+                str(item).strip()
+                for item in row.get("acceptance_rule_ids") or []
+                if str(item).strip()
+            )),
+            forbidden_data_names=list(dict.fromkeys(
+                str(item).strip()
+                for item in row.get("forbidden_data_names") or []
+                if str(item).strip()
+            )),
             criticality=(
-                "optional"
-                if str(row.get("criticality") or "required").lower() == "optional"
+                "optional" if str(row.get("criticality") or "required").lower() == "optional"
                 else "required"
             ),
-            effect_limit=str(row.get("effect_limit") or "read").strip().lower(),
-            allowed_terminal_states=list(
-                dict.fromkeys(
-                    str(item).strip()
-                    for item in row.get("allowed_terminal_states")
-                    or ["completed", "business_empty", "business_insufficient"]
-                    if str(item).strip()
-                )
-            ),
+            mutation_allowed=bool(row.get("mutation_allowed", False)),
+            allowed_terminal_states=list(dict.fromkeys(
+                str(item).strip()
+                for item in row.get("allowed_terminal_states")
+                or ["completed", "business_empty", "business_insufficient"]
+                if str(item).strip()
+            )),
         )
 
-    def input_slots(self, *, required_only: bool = False) -> list[str]:
-        return list(
-            dict.fromkeys(
-                item.slot_id
-                for item in self.required_inputs
-                if item.slot_id and (item.required or not required_only)
-            )
-        )
+    def input_data_names(self, *, required_only: bool = False) -> list[str]:
+        return list(dict.fromkeys(
+            item.name for item in self.required_data
+            if item.name and (item.required or not required_only)
+        ))
 
     def parameter_requirements(self, *, required_only: bool = False) -> list[BusinessParameterRequirement]:
         return [
@@ -285,10 +234,8 @@ class CapabilityContract:
             if item.parameter_id and (item.required or not required_only)
         ]
 
-    def output_slots(self) -> list[str]:
-        return list(
-            dict.fromkeys(item.slot_id for item in self.promised_outputs if item.slot_id)
-        )
+    def output_data_names(self) -> list[str]:
+        return list(dict.fromkeys(item.name for item in self.promised_data if item.name))
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -303,15 +250,15 @@ class CapabilityBoundary:
     description: str
     responsibilities: list[str] = field(default_factory=list)
     non_responsibilities: list[str] = field(default_factory=list)
-    accepted_input_patterns: list[str] = field(default_factory=lambda: ["*"])
-    produced_output_patterns: list[str] = field(default_factory=lambda: ["*"])
+    accepted_data_patterns: list[str] = field(default_factory=lambda: ["*"])
+    produced_data_patterns: list[str] = field(default_factory=lambda: ["*"])
     accepted_business_parameter_patterns: list[str] = field(default_factory=list)
-    input_slot_examples: list[str] = field(default_factory=list)
-    output_slot_examples: list[str] = field(default_factory=list)
+    input_data_examples: list[str] = field(default_factory=list)
+    output_data_examples: list[str] = field(default_factory=list)
     allowed_acceptance_rule_ids: list[str] = field(default_factory=list)
-    required_context_slots: list[str] = field(default_factory=list)
+    required_runtime_context_names: list[str] = field(default_factory=list)
     allowed_information_sources: list[str] = field(default_factory=list)
-    max_effect_level: EffectLevel = "read"
+    mutation_allowed: bool = False
     completion_principles: list[str] = field(default_factory=list)
 
     def safe_for_main_agent(self) -> dict[str, Any]:
@@ -320,11 +267,7 @@ class CapabilityBoundary:
 
 @dataclass
 class CapabilityTask:
-    """One MainAgent-planned business capability node.
-
-    Every task uses a contract list.  A list of length one is not a special
-    execution mode.
-    """
+    """One MainAgent-selected Worker task with semantic data contracts."""
 
     task_id: str
     worker_id: str
@@ -332,16 +275,10 @@ class CapabilityTask:
     objective: str
     contracts: list[CapabilityContract]
     business_parameters: dict[str, Any] = field(default_factory=dict)
-    effect_limit: EffectLevel = "read"
     priority: int = 1
 
     @classmethod
-    def from_dict(
-        cls,
-        value: dict[str, Any],
-        *,
-        task_id: str = "",
-    ) -> "CapabilityTask":
+    def from_dict(cls, value: dict[str, Any], *, task_id: str = "") -> "CapabilityTask":
         row = dict(value or {})
         resolved_task_id = str(row.get("task_id") or task_id).strip()
         contracts = [
@@ -359,52 +296,28 @@ class CapabilityTask:
             objective=str(row.get("objective") or "").strip(),
             contracts=contracts,
             business_parameters=dict(row.get("business_parameters") or {}),
-            effect_limit=str(row.get("effect_limit") or "read").strip().lower(),
             priority=max(0, min(10, int(row.get("priority") or 1))),
         )
 
-    def input_slots(self, *, required_only: bool = False) -> list[str]:
-        return list(
-            dict.fromkeys(
-                slot
-                for contract in self.contracts
-                for slot in contract.input_slots(required_only=required_only)
-            )
-        )
+    def input_data_names(self, *, required_only: bool = False) -> list[str]:
+        return list(dict.fromkeys(
+            name
+            for contract in self.contracts
+            for name in contract.input_data_names(required_only=required_only)
+        ))
 
-    def output_slots(self) -> list[str]:
-        return list(
-            dict.fromkeys(
-                slot for contract in self.contracts for slot in contract.output_slots()
-            )
-        )
+    def output_data_names(self) -> list[str]:
+        return list(dict.fromkeys(
+            name for contract in self.contracts for name in contract.output_data_names()
+        ))
 
     def acceptance_rule_ids(self) -> list[str]:
-        return list(
-            dict.fromkeys(
-                rule
-                for contract in self.contracts
-                for rule in contract.acceptance_rule_ids
-            )
-        )
+        return list(dict.fromkeys(
+            rule for contract in self.contracts for rule in contract.acceptance_rule_ids
+        ))
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class InputOutputBinding:
-    source_type: Literal["runtime_context", "user_parameter", "upstream_task"]
-    output_slot_id: str
-    consumer_task_id: str
-    consumer_contract_id: str
-    input_slot_id: str
-    schema_id: str = ""
-    producer_task_id: str = ""
-    producer_contract_id: str = ""
-    entity_scope: str = ""
-    required_paths: list[str] = field(default_factory=list)
-    optional_paths: list[str] = field(default_factory=list)
+    def mutation_allowed(self) -> bool:
+        return any(contract.mutation_allowed for contract in self.contracts)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -417,7 +330,6 @@ class ResolvedCapabilityTask:
     assigned_agent_id: str
     allowed_tool_ids: list[str]
     execution_mode: str
-    input_bindings: list[InputOutputBinding]
     dependency_task_ids: list[str]
     resolution_reason: str
     score: float
@@ -430,7 +342,6 @@ class ResolvedCapabilityTask:
             "assigned_agent_id": self.assigned_agent_id,
             "execution_mode": self.execution_mode,
             "contract_ids": [item.contract_id for item in self.task.contracts],
-            "input_bindings": [item.to_dict() for item in self.input_bindings],
             "dependency_task_ids": list(self.dependency_task_ids),
             "resolution_reason": self.resolution_reason,
             "score": float(self.score),

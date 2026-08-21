@@ -1,5 +1,4 @@
 """Capability-contract completion reports and deterministic flow decisions."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,8 +7,8 @@ from typing import Any
 from .models import GraphAgentTask, ResultStatus
 from .worker_contracts import WorkerContractViolation
 
-COMPLETION_CONTRACT_VERSION = "capability-contract-list.v1"
-COMPLETION_REPORT_VERSION = "capability-contract-report.v1"
+COMPLETION_CONTRACT_VERSION = "capability-contract-list.v2"
+COMPLETION_REPORT_VERSION = "capability-contract-report.v2"
 
 
 @dataclass(frozen=True)
@@ -24,31 +23,27 @@ class CompletionFlowDecision:
 
 
 def _contracts(task_or_contract: GraphAgentTask | dict[str, Any]) -> list[dict[str, Any]]:
-    if isinstance(task_or_contract, dict):
-        rows = task_or_contract.get("contracts") or []
-    else:
-        rows = task_or_contract.contracts
+    rows = (task_or_contract.get("contracts") or []) if isinstance(task_or_contract, dict) else task_or_contract.contracts
     return [dict(item) for item in rows if isinstance(item, dict)]
 
 
-def _output_slots(task_or_contract: GraphAgentTask | dict[str, Any]) -> list[str]:
+def _output_data_names(task_or_contract: GraphAgentTask | dict[str, Any]) -> list[str]:
     result: list[str] = []
     for contract in _contracts(task_or_contract):
-        for row in contract.get("promised_outputs") or []:
+        for row in contract.get("promised_data") or []:
             if not isinstance(row, dict):
                 continue
-            slot = str(row.get("slot_id") or "").strip()
-            if slot and slot not in result:
-                result.append(slot)
+            name = str(row.get("name") or row.get("data_name") or "").strip()
+            if name and name not in result:
+                result.append(name)
     return result
 
 
 def compile_completion_contract(task: GraphAgentTask) -> dict[str, Any]:
-    """Return the canonical capability contract carried by the task."""
     return {
         "schema_version": COMPLETION_CONTRACT_VERSION,
         "contracts": [dict(item) for item in task.contracts],
-        "required_information_slots": _output_slots(task),
+        "required_business_data": _output_data_names(task),
         "output_type": "CapabilityResult",
     }
 
@@ -68,33 +63,24 @@ def _rule_rows(task_or_contract: GraphAgentTask | dict[str, Any]) -> list[dict[s
     return rows
 
 
-def validate_completion_report(
-    report: dict[str, Any],
-    contract: dict[str, Any] | GraphAgentTask,
-    *,
-    path: str = "$.completion",
-) -> None:
+def validate_completion_report(report: dict[str, Any], contract: dict[str, Any] | GraphAgentTask, *, path: str = "$.completion") -> None:
     if not isinstance(report, dict):
         raise WorkerContractViolation("completion_report_not_object", path, type(report).__name__)
     if str(report.get("schema_version") or "") != COMPLETION_REPORT_VERSION:
-        raise WorkerContractViolation(
-            "completion_report_version_mismatch", f"{path}.schema_version",
-            str(report.get("schema_version") or ""),
-        )
-    expected = set(_output_slots(contract))
-    produced = {str(item) for item in report.get("produced_information_slots") or [] if str(item)}
-    missing = {str(item) for item in report.get("missing_information_slots") or [] if str(item)}
+        raise WorkerContractViolation("completion_report_version_mismatch", f"{path}.schema_version", str(report.get("schema_version") or ""))
+    expected = set(_output_data_names(contract))
+    produced = {str(item) for item in report.get("produced_data_names") or [] if str(item)}
+    missing = {str(item) for item in report.get("missing_data_names") or [] if str(item)}
     if produced & missing:
-        raise WorkerContractViolation("completion_report_slot_overlap", path, ",".join(sorted(produced & missing)))
+        raise WorkerContractViolation("completion_report_data_overlap", path, ",".join(sorted(produced & missing)))
     unknown = (produced | missing) - expected
     if expected and unknown:
-        raise WorkerContractViolation("completion_report_unknown_information_slot", path, ",".join(sorted(unknown)))
+        raise WorkerContractViolation("completion_report_unknown_data_name", path, ",".join(sorted(unknown)))
     if expected and produced | missing != expected:
         absent = expected - produced - missing
-        raise WorkerContractViolation("completion_report_slot_partition_incomplete", path, ",".join(sorted(absent)))
-    completed = bool(report.get("expected_task_completed"))
-    if completed and missing:
-        raise WorkerContractViolation("completed_report_cannot_have_missing_slots", path, ",".join(sorted(missing)))
+        raise WorkerContractViolation("completion_report_data_partition_incomplete", path, ",".join(sorted(absent)))
+    if bool(report.get("expected_task_completed")) and missing:
+        raise WorkerContractViolation("completed_report_cannot_have_missing_data", path, ",".join(sorted(missing)))
 
 
 def build_completion_report(
@@ -105,15 +91,15 @@ def build_completion_report(
     business_status: str,
     completion_status: str,
     expected_task_completed: bool,
-    produced_information_slots: list[str],
+    produced_data_names: list[str],
     criterion_results: list[dict[str, Any]] | None = None,
     limitations: list[str] | None = None,
     failure_kind: str = "none",
     report_source: str = "runtime",
 ) -> dict[str, Any]:
-    expected = _output_slots(task)
-    produced = list(dict.fromkeys(str(item) for item in produced_information_slots if str(item)))
-    missing = [slot for slot in expected if slot not in set(produced)]
+    expected = _output_data_names(task)
+    produced = list(dict.fromkeys(str(item) for item in produced_data_names if str(item)))
+    missing = [name for name in expected if name not in set(produced)]
     report = {
         "schema_version": COMPLETION_REPORT_VERSION,
         "report_source": str(report_source or "runtime"),
@@ -123,8 +109,8 @@ def build_completion_report(
         "completion_status": str(completion_status),
         "expected_task_completed": bool(expected_task_completed),
         "output_type": "CapabilityResult",
-        "produced_information_slots": produced,
-        "missing_information_slots": missing,
+        "produced_data_names": produced,
+        "missing_data_names": missing,
         "criteria": [dict(item) for item in (criterion_results or _rule_rows(task))],
         "limitations": [str(item) for item in limitations or [] if str(item).strip()],
         "failure_kind": str(failure_kind or "none"),
@@ -134,14 +120,8 @@ def build_completion_report(
     return report
 
 
-def non_success_completion_report(
-    task: GraphAgentTask,
-    *,
-    execution_status: str,
-    reason: str,
-    failure_kind: str,
-) -> dict[str, Any]:
-    expected = _output_slots(task)
+def non_success_completion_report(task: GraphAgentTask, *, execution_status: str, reason: str, failure_kind: str) -> dict[str, Any]:
+    expected = _output_data_names(task)
     return {
         "schema_version": COMPLETION_REPORT_VERSION,
         "report_source": "runtime",
@@ -151,12 +131,9 @@ def non_success_completion_report(
         "completion_status": "not_completed",
         "expected_task_completed": False,
         "output_type": "CapabilityResult",
-        "produced_information_slots": [],
-        "missing_information_slots": expected,
-        "criteria": [
-            {**row, "satisfied": False, "reason": str(reason)[:1000]}
-            for row in _rule_rows(task)
-        ],
+        "produced_data_names": [],
+        "missing_data_names": expected,
+        "criteria": [{**row, "satisfied": False, "reason": str(reason)[:1000]} for row in _rule_rows(task)],
         "limitations": [str(reason)[:1000]],
         "failure_kind": str(failure_kind),
         "contract_reports": [],
@@ -173,14 +150,15 @@ def runtime_completion_report(
 ) -> dict[str, Any]:
     del output_type
     success = result_status in {ResultStatus.COMPLETED, ResultStatus.PROPOSAL_READY}
-    produced: list[str] = []
-    if isinstance(data, dict) and isinstance(data.get("slots"), dict):
-        produced = [
-            str(slot_id)
-            for slot_id, value in data["slots"].items()
-            if str(slot_id) and value is not None
-        ]
-    business_empty = bool(isinstance(data, dict) and (data.get("business_empty") is True or data.get("found") is False))
+    materialized = data.get("business_data") if isinstance(data, dict) and isinstance(data.get("business_data"), dict) else {}
+    # Key existence means the operation completed, even when the value is empty.
+    produced = [str(name) for name in materialized if str(name)]
+    business_empty = bool(
+        isinstance(data, dict) and (
+            data.get("business_empty") is True
+            or (produced and all(materialized.get(name) in (None, {}, [], "") for name in produced))
+        )
+    )
     return build_completion_report(
         task,
         execution_status=result_status.value,
@@ -188,31 +166,20 @@ def runtime_completion_report(
         business_status="empty" if business_empty else "available" if success else "unknown",
         completion_status="completed" if success else "not_completed",
         expected_task_completed=success,
-        produced_information_slots=produced,
+        produced_data_names=produced,
         limitations=[] if success else [str((error or {}).get("message") or "Worker did not complete.")],
         failure_kind="none" if success else str((error or {}).get("code") or "worker_execution_failure"),
     )
 
 
-def evaluate_need_completion(
-    intent_contract: dict[str, Any],
-    observations: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """Evaluate Canonical Need completion from verified semantic outputs.
-
-    Input/parameter Requirements are enforced before Worker execution by the
-    deterministic RequirementResolver. Need completion therefore checks the
-    required *output* semantics: a Need is complete only when its declared
-    business result was actually published by a semantically satisfied task.
-    Legacy Need contracts remain observable but are not retroactively guessed.
-    """
-
+def evaluate_need_completion(request_need_contract: dict[str, Any], observations: list[dict[str, Any]]) -> dict[str, Any]:
+    """Evaluate Need completion from validated business-data outputs."""
     produced = {
-        str(slot)
+        str(name)
         for observation in observations or []
         if bool(observation.get("semantic_satisfied"))
-        for slot in observation.get("produced_information_slots") or []
-        if str(slot)
+        for name in observation.get("produced_data_names") or []
+        if str(name)
     }
     insufficiency_seen = any(
         str(item.get("failure_kind") or "") in {"business_insufficient", "business_empty"}
@@ -221,49 +188,35 @@ def evaluate_need_completion(
     )
     rows: list[dict[str, Any]] = []
     required_statuses: list[str] = []
-    for need in intent_contract.get("needs") or []:
-        need_id = str(need.get("need_id") or "")
+    for need in request_need_contract.get("needs") or []:
         required_outputs = list(dict.fromkeys(
-            str(req.get("slot_id") or "")
+            str(req.get("data_name") or "")
             for req in need.get("requirements") or []
-            if req.get("direction") == "output"
-            and bool(req.get("required", True))
-            and str(req.get("slot_id") or "")
+            if req.get("direction") == "output" and bool(req.get("required", True)) and str(req.get("data_name") or "")
         ))
         if not required_outputs:
-            status = "legacy_untracked"
-            missing: list[str] = []
+            status, missing = "untracked", []
         else:
-            missing = [slot for slot in required_outputs if slot not in produced]
-            status = (
-                "completed" if not missing else
-                "business_insufficient" if insufficiency_seen else
-                "not_completed"
-            )
-        if bool(need.get("required", True)) and status != "legacy_untracked":
+            missing = [name for name in required_outputs if name not in produced]
+            status = "completed" if not missing else "business_insufficient" if insufficiency_seen else "not_completed"
+        if bool(need.get("required", True)) and status != "untracked":
             required_statuses.append(status)
         rows.append({
-            "need_id": need_id,
+            "need_id": str(need.get("need_id") or ""),
             "kind": str(need.get("kind") or "business"),
             "description": str(need.get("description") or ""),
             "required": bool(need.get("required", True)),
             "status": status,
-            "required_output_slots": required_outputs,
-            "missing_output_slots": missing,
+            "required_output_data_names": required_outputs,
+            "missing_output_data_names": missing,
         })
-    if not required_statuses:
-        goal_status = "legacy_untracked"
-    elif all(status == "completed" for status in required_statuses):
-        goal_status = "completed"
-    elif any(status == "completed" for status in required_statuses):
-        goal_status = "partially_completed"
-    else:
-        goal_status = "not_completed"
-    return {
-        "schema_version": "need-completion-report.v1",
-        "goal_status": goal_status,
-        "needs": rows,
-    }
+    goal_status = (
+        "untracked" if not required_statuses else
+        "completed" if all(status == "completed" for status in required_statuses) else
+        "partially_completed" if any(status == "completed" for status in required_statuses) else
+        "not_completed"
+    )
+    return {"schema_version": "need-completion-report.v2", "goal_status": goal_status, "needs": rows}
 
 
 def flow_decision(
@@ -281,18 +234,13 @@ def flow_decision(
         return CompletionFlowDecision(status, True, True, True, False, "none", "required_contracts_satisfied")
     if result_status == ResultStatus.NEED_CONTEXT:
         resolved_failure = failure_kind or "context_missing"
-        # User-owned parameter gaps are wait states, not replanning triggers.
-        # System/context gaps remain repairable by MainAgent orchestration.
         replan_recommended = resolved_failure != "user_input_required"
         return CompletionFlowDecision(
             ResultStatus.NEED_CONTEXT, False, False, False, replan_recommended,
             resolved_failure, "user_input_required" if not replan_recommended else "context_required",
         )
     if result_status == ResultStatus.BLOCKED:
-        return CompletionFlowDecision(
-            ResultStatus.BLOCKED, False, False, False, bool(retryable),
-            failure_kind or "blocked", "blocked",
-        )
+        return CompletionFlowDecision(ResultStatus.BLOCKED, False, False, False, bool(retryable), failure_kind or "blocked", "blocked")
     if result_status == ResultStatus.PARTIAL:
         return CompletionFlowDecision(ResultStatus.PARTIAL, False, False, False, True, failure_kind or "business_insufficient", "partial")
     return CompletionFlowDecision(ResultStatus.FAILED, False, False, False, bool(retryable), failure_kind or "worker_execution_failure", "failed")
@@ -304,11 +252,9 @@ def canonicalize_completion_report(
     result_status: ResultStatus,
     completion: dict[str, Any],
     contract_reports: list[Any],
-    produced_slots: list[str],
+    produced_data_names: list[str],
     result_data: dict[str, Any] | None,
 ) -> tuple[ResultStatus, dict[str, Any], bool]:
-    """Make result status and nested completion fields one authoritative state."""
-
     report = dict(completion or {})
     required_pairs = [
         (contract, contract_report)
@@ -323,23 +269,21 @@ def canonicalize_completion_report(
         isinstance(result_data, dict)
         and (
             result_data.get("business_empty") is True
-            or result_data.get("found") is False
+            or (
+                isinstance(result_data.get("business_data"), dict)
+                and bool(result_data.get("business_data"))
+                and all(value in (None, {}, [], "") for value in result_data["business_data"].values())
+            )
         )
     )
     report["contract_reports"] = [item.to_dict() for item in contract_reports]
-    report["produced_information_slots"] = list(dict.fromkeys(produced_slots))
-    report["missing_information_slots"] = [
-        slot for slot in task.expected_output_slots if slot not in set(produced_slots)
-    ]
+    report["produced_data_names"] = list(dict.fromkeys(produced_data_names))
+    report["missing_data_names"] = [name for name in task.expected_data_names if name not in set(produced_data_names)]
     report["expected_task_completed"] = bool(satisfied)
     report["completion_status"] = "completed" if satisfied else "not_completed"
 
     if satisfied:
-        status = (
-            ResultStatus.PROPOSAL_READY
-            if result_status == ResultStatus.PROPOSAL_READY
-            else ResultStatus.COMPLETED
-        )
+        status = ResultStatus.PROPOSAL_READY if result_status == ResultStatus.PROPOSAL_READY else ResultStatus.COMPLETED
         report.update({
             "execution_status": "succeeded",
             "contract_status": "valid",
@@ -350,14 +294,19 @@ def canonicalize_completion_report(
         return status, report, True
 
     report["contract_status"] = "not_satisfied"
-    if result_status == ResultStatus.NEED_CONTEXT:
-        report["execution_status"] = "need_context"
-    elif result_status == ResultStatus.BLOCKED:
-        report["execution_status"] = "blocked"
-    elif result_status == ResultStatus.PARTIAL:
-        report["execution_status"] = "partial"
-    else:
-        report["execution_status"] = "failed"
+    report["execution_status"] = (
+        "need_context" if result_status == ResultStatus.NEED_CONTEXT else
+        "blocked" if result_status == ResultStatus.BLOCKED else
+        "partial" if result_status == ResultStatus.PARTIAL else "failed"
+    )
     if not str(report.get("failure_kind") or "").strip() or report.get("failure_kind") == "none":
         report["failure_kind"] = "worker_execution_failure"
     return result_status, report, False
+
+
+__all__ = [
+    "COMPLETION_CONTRACT_VERSION", "COMPLETION_REPORT_VERSION", "CompletionFlowDecision",
+    "build_completion_report", "canonicalize_completion_report", "compile_completion_contract",
+    "evaluate_need_completion", "flow_decision", "non_success_completion_report",
+    "runtime_completion_report", "validate_completion_report",
+]

@@ -64,7 +64,7 @@ def test_coordinator_does_not_pass_previous_session_entity_to_planner_when_entry
     import pytest
 
     from agent.collaboration.coordinator import AgentCollaborationCoordinator
-    from agent.collaboration.entry_decision import ContextBinding, EntityScope, EntryDecision, RequestMode
+    from agent.collaboration.context_binding import ContextBinding, EntityScope
     from agent.context.context_hydrator import HydratedContext
 
     class FakeSessionState:
@@ -75,20 +75,6 @@ def test_coordinator_does_not_pass_previous_session_entity_to_planner_when_entry
         def put(self, **kwargs):
             del kwargs
 
-    class FakeEntry:
-        def decide(self, **kwargs):
-            del kwargs
-            return EntryDecision(
-                mode=RequestMode.PROPOSAL,
-                reason="完整组合调整",
-                confidence=1.0,
-                context_binding=ContextBinding(
-                    entity_scope=EntityScope.PORTFOLIO,
-                    inherit_previous_focus=False,
-                    reason="完整组合任务不继承上一轮单一证券",
-                ),
-            )
-
     class FakeHydrator:
         def hydrate(self, **kwargs):
             del kwargs
@@ -97,13 +83,14 @@ def test_coordinator_does_not_pass_previous_session_entity_to_planner_when_entry
                 session_id="s",
                 session_summary="上一轮分析了贵州茅台。",
                 previous_focus_refs=[],
+                typed_focus_refs={},
                 pending_run_ids=[],
                 pending_proposal_ids=[],
                 permission_context={},
                 available_parameters={},
                 long_term_memory_summary="",
                 long_term_memory_refs=[],
-                source_audit=[{"slot_id": "session_summary", "source": "session_state"}],
+                source_audit=[{"context_key": "session_summary", "source": "session_state"}],
             )
 
     class FakeCheckpoints:
@@ -125,17 +112,17 @@ def test_coordinator_does_not_pass_previous_session_entity_to_planner_when_entry
     coordinator.db_path = None
     coordinator.runtime_services = None
     coordinator.session_state = FakeSessionState()
-    coordinator.entry = FakeEntry()
     coordinator.context_hydrator = FakeHydrator()
     coordinator.checkpoints = FakeCheckpoints()
     coordinator.planner = CapturePlanner()
+    coordinator.specialist = types.SimpleNamespace(context_bundle=types.SimpleNamespace(run_id="r"))
     coordinator._resolve_request_refs = types.MethodType(
         lambda self, **kwargs: ([], [], {"mentions": [], "items": [], "context_binding": kwargs.get("context_binding") or {}}),
         coordinator,
     )
 
     with pytest.raises(RuntimeError, match="stop_after_memory_capture"):
-        coordinator.execute(
+        coordinator._execute_read_request(
             query="你觉得我的持仓应该怎么调整？",
             decomposition={},
             user_id="u",
@@ -144,6 +131,12 @@ def test_coordinator_does_not_pass_previous_session_entity_to_planner_when_entry
             run_id="r",
             language="zh",
             execution_context={},
+            proposal_required=True,
+            context_binding=ContextBinding(
+                entity_scope=EntityScope.PORTFOLIO,
+                inherit_previous_focus=False,
+                reason="完整组合任务不继承上一轮单一证券",
+            ),
         )
 
     assert coordinator.planner.memory_summary == ""
@@ -151,7 +144,7 @@ def test_coordinator_does_not_pass_previous_session_entity_to_planner_when_entry
     assert coordinator.planner.context_binding["inherit_previous_focus"] is False
 
 
-def test_canonical_intent_prompt_receives_authoritative_portfolio_scope_without_historical_entity() -> None:
+def test_request_need_prompt_receives_authoritative_portfolio_scope_without_historical_entity() -> None:
     import json
 
     from agent.collaboration.planner import CoordinatorPlanner
@@ -163,41 +156,59 @@ def test_canonical_intent_prompt_receives_authoritative_portfolio_scope_without_
         def generate_json(self, **kwargs):
             self.messages = kwargs["messages"]
             payload = {
-                "intent_summary": "用户希望基于当前整个持仓获得组合调整建议。",
                 "needs": [
-                    {"description": "获取当前组合、持仓、账户和用户约束。", "required": True},
-                    {"description": "分析当前组合的集中度、暴露和风险约束。", "required": True},
-                    {"description": "基于组合事实和风险分析形成持仓调整建议。", "required": True},
+                    {"description": "获取当前组合、持仓和用户约束。", "required": True, "requirements": [
+                        {"semantic_key": "portfolio_state", "direction": "output", "required": True, "required_paths": []},
+                        {"semantic_key": "portfolio_positions", "direction": "output", "required": True, "required_paths": []},
+                        {"semantic_key": "user_constraints", "direction": "output", "required": True, "required_paths": []},
+                    ]},
+                    {"description": "分析当前组合的集中度、暴露和风险约束。", "required": True, "requirements": [
+                        {"semantic_key": "portfolio_state", "direction": "input", "required": True, "required_paths": []},
+                        {"semantic_key": "portfolio_positions", "direction": "input", "required": True, "required_paths": []},
+                        {"semantic_key": "user_constraints", "direction": "input", "required": True, "required_paths": []},
+                        {"semantic_key": "portfolio_risk", "direction": "output", "required": True, "required_paths": []},
+                    ]},
+                    {"description": "基于组合事实和风险分析形成持仓调整建议。", "required": True, "requirements": [
+                        {"semantic_key": "portfolio_risk", "direction": "input", "required": True, "required_paths": []},
+                        {"semantic_key": "user_constraints", "direction": "input", "required": True, "required_paths": []},
+                        {"semantic_key": "rebalance_proposal", "direction": "output", "required": True, "required_paths": []},
+                    ]},
                 ],
-                "constraints": [],
-                "scope_note": "当前整个投资组合。",
-                "effect_limit": "proposal",
             }
             kwargs["validator"](payload)
             return payload
 
     llm = CaptureLLM()
     planner = CoordinatorPlanner(CapabilityWorkerDirectory(), llm_service=llm)
-    initial_slots = planner._initial_slots(focus_refs=[], context_refs=[], memory_summary="")
-    result = planner._plan_intent_contract(
-        query="你觉得我的持仓应该怎么调整？",
-        request_mode="proposal",
+    initial_context_names = planner._initial_context_names(
+        focus_refs=[], context_refs=[], memory_summary=""
+    )
+    result = planner._plan_request_need_contract(
+        query="生成当前完整持仓的调整建议",
+        request_target={"portfolio": "current"},
+        request_constraints=["仅基于当前完整组合"],
+        effect_limit="proposal",
         run_id="r",
         language="zh",
-        initial_slots=initial_slots,
+        initial_context_names=initial_context_names,
         memory_summary="",
         context_binding={
             "entity_scope": "portfolio",
             "inherit_previous_focus": False,
             "reason": "完整组合任务不继承上一轮单一证券",
         },
+        request_id="R01",
     )
 
     user_payload = json.loads(llm.messages[1]["content"])
+    assert user_payload["request_objective"] == "生成当前完整持仓的调整建议"
+    assert user_payload["request_target"] == {"portfolio": "current"}
+    assert user_payload["request_constraints"] == ["仅基于当前完整组合"]
     assert user_payload["context_binding"]["entity_scope"] == "portfolio"
     assert user_payload["context_binding"]["inherit_previous_focus"] is False
     assert user_payload["authoritative_entity_refs_available"] is False
     assert user_payload["session_summary"] == ""
     assert "贵州茅台" not in json.dumps(user_payload, ensure_ascii=False)
-    assert "组合" in result["intent_summary"]
+    assert result["request_objective"] == "生成当前完整持仓的调整建议"
+    assert result["request_target"] == {"portfolio": "current"}
     assert "贵州茅台" not in json.dumps(result, ensure_ascii=False)

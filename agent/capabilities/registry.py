@@ -5,109 +5,99 @@ from typing import Any
 from .models import CapabilityBoundary
 
 
-# MainAgent-visible rule vocabulary. Runtime owns the checks. Capability-level
-# schema validation is intentionally generic: concrete business tasks do not
-# register one new Pydantic schema per Slot.
 ACCEPTANCE_RULES: dict[str, str] = {
-    "schema_valid": "输出必须是已物化的通用Slot，并满足合同声明的required_paths。",
-    "entity_scope_consistent": "输出实体范围必须与锁定 GraphRef 一致。",
-    "provenance_present": "业务事实必须保留来源引用。",
-    "freshness_satisfied": "数据时间必须满足任务的新鲜度要求。",
-    "no_forbidden_output": "不得产生合同禁止的信息槽位。",
-    "business_empty_explicit": "查询成功但无记录时必须明确标记业务为空。",
-    "failure_kind_classified": "参数、上下文、工具、业务为空和业务不足必须分类。",
+    "schema_valid": "输出必须是已物化的结构化业务数据，并满足声明的required_paths。",
+    "entity_scope_consistent": "输出实体范围必须与锁定GraphRef一致。",
+    "business_empty_explicit": "查询成功但无记录时也必须产出对应数据名称，值允许为空。",
+    "failure_kind_classified": "参数缺失、上下文缺失、工具失败、业务为空和业务不足必须分类。",
     "facts_and_analysis_separated": "事实与分析必须结构化分离。",
-    "claims_traceable": "专业结论必须能回溯到上游结果。",
-    "uncertainty_explicit": "必须表达不确定性和局限。",
-    "source_dates_preserved": "证据的来源时间必须保留。",
-    "no_new_business_claims": "不得增加上游不存在的业务事实。",
-    "proposal_requires_approval": "状态变更方案必须明确需要审批。",
+    "uncertainty_explicit": "分析必须表达不确定性和局限。",
+    "no_new_business_claims": "不得增加当前工作记忆中不存在的业务事实。",
+    "proposal_requires_approval": "状态变更建议必须明确只是一份待审批方案。",
     "no_persistent_write": "当前能力不得持久化修改业务状态。",
     "goal_coverage": "输出必须覆盖当前任务目标。",
 }
 
 
-# Stable semantic vocabulary used by Canonical Need Requirement compilation.
-# These are business-data meanings, not business scenarios or Worker IDs.
-# A semantic may intentionally have no current producer (for example
-# ``entity_fundamentals``); that is a valid way for planning to discover that
-# the current system cannot satisfy a user Need instead of letting a Worker
-# improvise from unrelated evidence.
+# Canonical Need semantic vocabulary.  Data requirements resolve directly to
+# simple ContextBundle labels.  The label means only the name of the data; a
+# label is created only after a query/generation successfully completes, and an
+# empty value still counts as an existing label.
 SEMANTIC_REQUIREMENTS: dict[str, dict[str, Any]] = {
     "authoritative_entity": {
-        "kind": "slot", "slot_id": "authoritative_entity_refs",
+        "kind": "context", "context_name": "authoritative_entity_refs",
         "semantic_role": "已解析并锁定的权威金融实体引用",
         "source_policy": "system", "satisfaction_rule": "non_empty",
     },
     "external_evidence": {
-        "kind": "slot", "slot_id": "entity_external_evidence",
-        "semantic_role": "目标实体的可追溯外部证据集合",
-        "source_policy": "system", "satisfaction_rule": "non_empty",
+        "kind": "data", "data_name": "evidence",
+        "semantic_role": "目标实体已查询完成的外部证据",
+        "source_policy": "system", "satisfaction_rule": "exists",
     },
     "entity_model_signals": {
-        "kind": "slot", "slot_id": "entity_model_signals",
-        "semantic_role": "本系统针对目标实体产生的模型预测与评分信号",
-        "source_policy": "system", "satisfaction_rule": "non_empty",
+        "kind": "data", "data_name": "prediction",
+        "semantic_role": "本系统针对目标实体产生的模型预测与评分数据",
+        "source_policy": "system", "satisfaction_rule": "exists",
     },
     "market_ranking": {
-        "kind": "slot", "slot_id": "market_ranking_signals",
-        "semantic_role": "本系统产生的市场排名与候选信号",
-        "source_policy": "system", "satisfaction_rule": "non_empty",
+        "kind": "data", "data_name": "ranking",
+        "semantic_role": "本系统产生的市场排名数据",
+        "source_policy": "system", "satisfaction_rule": "exists",
     },
     "entity_analysis": {
-        "kind": "slot", "slot_id": "entity_analysis",
-        "semantic_role": "基于已验证事实形成的结构化实体分析",
-        "source_policy": "system", "satisfaction_rule": "non_empty",
+        "kind": "data", "data_name": "analysis",
+        "semantic_role": "基于当前工作记忆形成的结构化实体分析",
+        "source_policy": "system", "satisfaction_rule": "exists",
     },
     "entity_uncertainty": {
-        "kind": "slot", "slot_id": "entity_analysis_uncertainty",
+        "kind": "data", "data_name": "analysis_uncertainty",
         "semantic_role": "实体分析的不确定性与数据边界",
-        "source_policy": "system", "satisfaction_rule": "non_empty",
+        "source_policy": "system", "satisfaction_rule": "exists",
     },
     "portfolio_state": {
-        "kind": "slot", "slot_id": "current_portfolio_state",
-        "semantic_role": "当前完整投资组合状态快照",
+        "kind": "data", "data_name": "portfolio",
+        "semantic_role": "当前完整投资组合状态",
         "source_policy": "system", "satisfaction_rule": "exists",
     },
     "portfolio_positions": {
-        "kind": "slot", "slot_id": "portfolio_positions",
-        "semantic_role": "当前完整投资组合的持仓明细",
-        "source_policy": "system", "satisfaction_rule": "non_empty",
+        "kind": "data", "data_name": "positions",
+        "semantic_role": "当前投资组合持仓明细",
+        "source_policy": "system", "satisfaction_rule": "exists",
+    },
+    "account_state": {
+        "kind": "data", "data_name": "account",
+        "semantic_role": "当前账户资金状态",
+        "source_policy": "system", "satisfaction_rule": "exists",
     },
     "user_constraints": {
-        "kind": "slot", "slot_id": "user_constraints",
+        "kind": "data", "data_name": "user_constraints",
         "semantic_role": "用户投资目标、风险与流动性等约束",
         "source_policy": "system", "satisfaction_rule": "exists",
     },
     "user_profile": {
-        "kind": "slot", "slot_id": "user_profile_state",
+        "kind": "data", "data_name": "user_profile",
         "semantic_role": "用户画像与投资偏好状态",
         "source_policy": "system", "satisfaction_rule": "exists",
     },
     "portfolio_risk": {
-        "kind": "slot", "slot_id": "portfolio_risk_result",
-        "semantic_role": "组合风险、集中度与约束审查结果",
-        "source_policy": "system", "satisfaction_rule": "non_empty",
+        "kind": "data", "data_name": "risk",
+        "semantic_role": "组合风险、集中度与约束分析结果",
+        "source_policy": "system", "satisfaction_rule": "exists",
     },
     "risk_constraint_review": {
-        "kind": "slot", "slot_id": "risk_constraint_review",
-        "semantic_role": "对用户硬约束与风险边界的结构化审查",
-        "source_policy": "system", "satisfaction_rule": "non_empty",
+        "kind": "data", "data_name": "risk_constraints",
+        "semantic_role": "用户硬约束与风险边界审查结果",
+        "source_policy": "system", "satisfaction_rule": "exists",
     },
     "rebalance_proposal": {
-        "kind": "slot", "slot_id": "reviewed_proposal",
-        "semantic_role": "已审查且等待用户审批的调仓/配置方案",
-        "source_policy": "system", "satisfaction_rule": "non_empty",
+        "kind": "data", "data_name": "proposal",
+        "semantic_role": "等待用户审批的调仓/配置建议",
+        "source_policy": "system", "satisfaction_rule": "exists",
     },
     "rebalance_instructions": {
-        "kind": "slot", "slot_id": "proposal.rebalance",
-        "semantic_role": "调仓方案中的具体目标配置与变更指令",
-        "source_policy": "system", "satisfaction_rule": "non_empty",
-    },
-    "user_report": {
-        "kind": "slot", "slot_id": "user_facing_report",
-        "semantic_role": "只基于已验证上游结果生成的用户可读报告",
-        "source_policy": "system", "satisfaction_rule": "non_empty",
+        "kind": "data", "data_name": "rebalance",
+        "semantic_role": "调仓建议中的目标配置与变更指令",
+        "source_policy": "system", "satisfaction_rule": "exists",
     },
     "target_allocation": {
         "kind": "parameter", "parameter_id": "target_asset_allocation",
@@ -117,29 +107,25 @@ SEMANTIC_REQUIREMENTS: dict[str, dict[str, Any]] = {
         "description": "需用户明确指定的目标配置比例或投入金额",
         "expected_format": "percentage or cash amount",
     },
-    # The following semantic facts are deliberately registered even though the
-    # current Worker/Tool catalog may not yet produce them.  This lets Runtime
-    # report an unsatisfied planning requirement instead of treating news/RAG as
-    # a substitute for missing structured fundamentals or market snapshots.
     "entity_fundamentals": {
-        "kind": "slot", "slot_id": "entity_fundamentals",
-        "semantic_role": "连续期间的结构化财务基本面事实",
-        "source_policy": "system", "satisfaction_rule": "non_empty",
+        "kind": "data", "data_name": "financial",
+        "semantic_role": "连续期间的结构化财务基本面数据",
+        "source_policy": "system", "satisfaction_rule": "exists",
     },
     "market_snapshot": {
-        "kind": "slot", "slot_id": "market_snapshot",
-        "semantic_role": "满足本轮时点要求的行情与估值快照",
-        "source_policy": "system", "satisfaction_rule": "non_empty",
+        "kind": "data", "data_name": "market",
+        "semantic_role": "满足本轮时点要求的行情与估值数据",
+        "source_policy": "system", "satisfaction_rule": "exists",
     },
     "peer_valuation_context": {
-        "kind": "slot", "slot_id": "peer_valuation_context",
-        "semantic_role": "同业可比公司估值与比较事实",
-        "source_policy": "system", "satisfaction_rule": "non_empty",
+        "kind": "data", "data_name": "valuation",
+        "semantic_role": "同业可比公司估值与比较数据",
+        "source_policy": "system", "satisfaction_rule": "exists",
     },
     "market_flow_context": {
-        "kind": "slot", "slot_id": "market_flow_context",
-        "semantic_role": "目标实体或行业的资金流与市场风格事实",
-        "source_policy": "system", "satisfaction_rule": "non_empty",
+        "kind": "data", "data_name": "market_flow",
+        "semantic_role": "目标实体或行业的资金流与市场风格数据",
+        "source_policy": "system", "satisfaction_rule": "exists",
     },
 }
 
@@ -151,15 +137,15 @@ def _boundary(
     description: str,
     responsibilities: list[str],
     non_responsibilities: list[str],
-    accepted_input_patterns: list[str],
-    produced_output_patterns: list[str],
-    input_slot_examples: list[str],
-    accepted_business_parameter_patterns: list[str] | None = None,
-    output_slot_examples: list[str],
+    accepted_data_patterns: list[str],
+    produced_data_patterns: list[str],
+    input_data_examples: list[str],
+    output_data_examples: list[str],
     allowed_acceptance_rule_ids: list[str],
-    required_context_slots: list[str] | None = None,
+    accepted_business_parameter_patterns: list[str] | None = None,
+    required_runtime_context_names: list[str] | None = None,
     allowed_information_sources: list[str] | None = None,
-    max_effect_level: str = "read",
+    mutation_allowed: bool = False,
     completion_principles: list[str] | None = None,
 ) -> CapabilityBoundary:
     return CapabilityBoundary(
@@ -168,15 +154,15 @@ def _boundary(
         description=description,
         responsibilities=responsibilities,
         non_responsibilities=non_responsibilities,
-        accepted_input_patterns=accepted_input_patterns,
-        produced_output_patterns=produced_output_patterns,
+        accepted_data_patterns=accepted_data_patterns,
+        produced_data_patterns=produced_data_patterns,
         accepted_business_parameter_patterns=list(accepted_business_parameter_patterns or []),
-        input_slot_examples=input_slot_examples,
-        output_slot_examples=output_slot_examples,
+        input_data_examples=input_data_examples,
+        output_data_examples=output_data_examples,
         allowed_acceptance_rule_ids=allowed_acceptance_rule_ids,
-        required_context_slots=list(required_context_slots or []),
+        required_runtime_context_names=list(required_runtime_context_names or []),
         allowed_information_sources=list(allowed_information_sources or []),
-        max_effect_level=max_effect_level,
+        mutation_allowed=mutation_allowed,
         completion_principles=list(completion_principles or []),
     )
 
@@ -185,184 +171,177 @@ _BOUNDARIES: dict[str, CapabilityBoundary] = {
     "external_evidence.research": _boundary(
         boundary_id="external_evidence.research",
         name="外部证据研究",
-        description="检索、整理并去重目标实体相关的新闻、公告和研究证据；entity_external_evidence 是面向下游分析的紧凑统一主证据集合，完整 Tool 结果不跨 Worker 传输；evidence_source_records 是轻量溯源索引，evidence.* 是按来源的可选视图。",
-        responsibilities=["收集外部证据", "形成统一主证据集合", "按需发布来源视图和溯源索引", "保留来源和时间", "明确业务为空"],
-        non_responsibilities=["解释最终含义", "生成风险评级", "生成操作方案"],
-        accepted_input_patterns=["authoritative_entity_refs", "current_user_request", "as_of_time", "entity.*", "request.*", "time.*"],
-        produced_output_patterns=["evidence.*", "entity_external_evidence", "evidence_source_records"],
-        input_slot_examples=["authoritative_entity_refs", "current_user_request", "as_of_time"],
-        output_slot_examples=["entity_external_evidence", "evidence_source_records", "evidence.news", "evidence.research"],
-        allowed_acceptance_rule_ids=["schema_valid", "entity_scope_consistent", "provenance_present", "source_dates_preserved", "business_empty_explicit", "no_persistent_write"],
-        required_context_slots=["authoritative_entity_refs"],
+        description="查询并整理目标实体的新闻、公告和RAG证据，成功结束后写入当前Run的evidence数据名称。",
+        responsibilities=["查询外部证据", "按实体整理结果", "空结果也形成已查询数据名称"],
+        non_responsibilities=["最终实体分析", "风险评级", "状态修改"],
+        accepted_data_patterns=[],
+        produced_data_patterns=["evidence", "evidence_sources"],
+        input_data_examples=[],
+        output_data_examples=["evidence"],
+        allowed_acceptance_rule_ids=["schema_valid", "entity_scope_consistent", "business_empty_explicit", "no_persistent_write"],
+        required_runtime_context_names=["authoritative_entity_refs"],
         allowed_information_sources=["registered_external_evidence_tools"],
-        completion_principles=["证据可追溯", "不得补造", "按实体去重", "跨 Worker 只传分析所需的单份标准化正文与必要 provenance", "output_slot_examples 是可选语义输出，不要求同一任务全部发布"],
     ),
     "internal_fact.retrieval": _boundary(
         boundary_id="internal_fact.retrieval",
         name="内部权威事实读取",
-        description="读取预测、排名、指标、回测和策略等系统内部结构化事实。",
-        responsibilities=["读取内部事实", "保留数据日期", "返回标准化槽位"],
-        non_responsibilities=["检索外部新闻", "替代专业分析", "修改业务状态"],
-        accepted_input_patterns=["authoritative_entity_refs", "user_identity", "current_user_request", "as_of_time", "business_parameters", "entity.*", "request.*", "state.*"],
-        produced_output_patterns=["entity.*", "ranking.*", "metric.*", "backtest.*", "strategy.*", "state.*", "entity_model_signals", "market_ranking_signals", "model_quality_metrics", "backtest_summary", "selected_strategy_state"],
-        input_slot_examples=["authoritative_entity_refs", "user_identity", "current_user_request", "business_parameters"],
-        output_slot_examples=["entity_model_signals", "market_ranking_signals", "model_quality_metrics", "backtest_summary", "selected_strategy_state"],
-        allowed_acceptance_rule_ids=["schema_valid", "entity_scope_consistent", "provenance_present", "freshness_satisfied", "business_empty_explicit", "failure_kind_classified", "no_persistent_write"],
+        description="读取模型预测、排名、指标、回测和策略等系统内部数据并写入当前Run工作记忆。",
+        responsibilities=["读取内部事实", "按简单数据名称发布"],
+        non_responsibilities=["最终实体分析", "业务修改"],
+        accepted_data_patterns=[],
+        produced_data_patterns=["prediction", "ranking", "model_metrics", "backtest", "strategy"],
+        input_data_examples=[],
+        output_data_examples=["prediction", "ranking", "model_metrics", "backtest", "strategy"],
+        allowed_acceptance_rule_ids=["schema_valid", "entity_scope_consistent", "business_empty_explicit", "failure_kind_classified", "no_persistent_write"],
+        required_runtime_context_names=["user_identity"],
         allowed_information_sources=["registered_internal_read_tools"],
-        completion_principles=["只返回真实记录", "业务为空与工具失败分离"],
     ),
     "portfolio.analysis": _boundary(
         boundary_id="portfolio.analysis",
-        name="组合结构分析",
-        description="读取并描述当前账户组合、持仓和资产结构。",
-        responsibilities=["读取组合状态", "返回持仓与资产结构事实"],
-        non_responsibilities=["风险评级", "调仓方案", "修改账户状态"],
-        accepted_input_patterns=["user_identity", "permission_context", "as_of_time", "user.*", "permission.*", "time.*"],
-        produced_output_patterns=["state.*", "portfolio.*", "current_portfolio_state", "portfolio_positions"],
-        input_slot_examples=["user_identity", "permission_context", "as_of_time"],
-        output_slot_examples=["current_portfolio_state", "portfolio_positions", "state.portfolio", "state.positions"],
-        allowed_acceptance_rule_ids=["schema_valid", "entity_scope_consistent", "provenance_present", "business_empty_explicit", "no_persistent_write"],
-        required_context_slots=["user_identity"],
+        name="组合事实读取",
+        description="读取当前账户、组合和持仓等内部事实并写入当前Run工作记忆。",
+        responsibilities=["读取组合事实", "读取账户状态"],
+        non_responsibilities=["风险结论", "调仓建议", "修改持仓"],
+        accepted_data_patterns=[],
+        produced_data_patterns=["portfolio", "positions", "account"],
+        input_data_examples=[],
+        output_data_examples=["portfolio", "positions", "account"],
+        allowed_acceptance_rule_ids=["schema_valid", "business_empty_explicit", "failure_kind_classified", "no_persistent_write"],
+        required_runtime_context_names=["user_identity"],
         allowed_information_sources=["registered_portfolio_read_tools"],
-        completion_principles=["覆盖当前有效持仓", "使用权威用户身份"],
     ),
     "user_context.retrieval": _boundary(
         boundary_id="user_context.retrieval",
         name="用户上下文读取",
-        description="读取账户资金、用户画像和业务约束。",
-        responsibilities=["读取账户状态", "读取用户画像和约束"],
-        non_responsibilities=["修改画像", "修改资金", "生成最终策略"],
-        accepted_input_patterns=["user_identity", "permission_context", "as_of_time", "user.*", "permission.*", "time.*"],
-        produced_output_patterns=["state.*", "profile.*", "constraint.*", "account_financial_state", "user_profile_state", "user_constraints"],
-        input_slot_examples=["user_identity", "permission_context", "as_of_time"],
-        output_slot_examples=["account_financial_state", "user_profile_state", "user_constraints", "state.account", "profile.user", "constraint.user"],
-        allowed_acceptance_rule_ids=["schema_valid", "provenance_present", "business_empty_explicit", "failure_kind_classified", "no_persistent_write"],
-        required_context_slots=["user_identity"],
+        description="读取用户画像与约束并写入当前Run工作记忆。",
+        responsibilities=["读取用户画像", "读取用户约束"],
+        non_responsibilities=["风险结论", "状态修改"],
+        accepted_data_patterns=[],
+        produced_data_patterns=["user_profile", "user_constraints"],
+        input_data_examples=[],
+        output_data_examples=["user_profile", "user_constraints"],
+        allowed_acceptance_rule_ids=["schema_valid", "failure_kind_classified", "no_persistent_write"],
+        required_runtime_context_names=["user_identity"],
         allowed_information_sources=["registered_user_context_read_tools"],
-        completion_principles=["只读取当前用户", "缺失记录明确返回"],
     ),
     "graph_relation.retrieval": _boundary(
         boundary_id="graph_relation.retrieval",
-        name="金融关系检索",
-        description="在锁定 GraphRef 范围内检索实体关系和路径。",
-        responsibilities=["读取关系路径", "返回图关系事实"],
-        non_responsibilities=["自行创造实体", "形成最终判断", "写入图数据库"],
-        accepted_input_patterns=["authoritative_entity_refs", "source_entity_refs", "target_entity_refs", "current_user_request", "as_of_time", "entity.*", "request.*"],
-        produced_output_patterns=["graph.*", "relation.*", "financial_relation_paths", "graph_relation_facts"],
-        input_slot_examples=["authoritative_entity_refs", "source_entity_refs", "target_entity_refs"],
-        output_slot_examples=["financial_relation_paths", "graph_relation_facts", "relation.paths", "graph.facts"],
-        allowed_acceptance_rule_ids=["schema_valid", "entity_scope_consistent", "provenance_present", "no_persistent_write"],
-        required_context_slots=["authoritative_entity_refs"],
+        name="图关系读取",
+        description="在已锁定GraphRef范围内查询关系和路径，成功结束后写入relations数据。",
+        responsibilities=["读取图关系", "读取关联路径"],
+        non_responsibilities=["创建实体", "最终业务判断", "图写入"],
+        accepted_data_patterns=[],
+        produced_data_patterns=["relations"],
+        input_data_examples=[],
+        output_data_examples=["relations"],
+        allowed_acceptance_rule_ids=["schema_valid", "entity_scope_consistent", "business_empty_explicit", "no_persistent_write"],
+        required_runtime_context_names=["authoritative_entity_refs"],
         allowed_information_sources=["registered_graph_read_tools"],
-        completion_principles=["关系端点来自权威 GraphRef", "路径可追溯"],
     ),
     "entity.analysis": _boundary(
         boundary_id="entity.analysis",
-        name="金融实体分析",
-        description="基于上游证据和内部事实形成结构化实体分析；存在 entity_external_evidence 时优先消费统一主证据，避免把同源 evidence.* 派生视图重复送入分析。",
-        responsibilities=["区分事实与分析", "优先消费统一主证据而非重复派生视图", "解释模型信号", "表达不确定性"],
-        non_responsibilities=["自行检索证据", "生成交易方案", "提交业务写入"],
-        accepted_input_patterns=["authoritative_entity_refs", "entity.*", "evidence.*", "ranking.*", "metric.*", "graph.*", "relation.*", "entity_external_evidence", "evidence_source_records", "entity_model_signals", "market_ranking_signals", "model_quality_metrics", "financial_relation_paths", "graph_relation_facts", "entity_fundamentals", "market_snapshot", "peer_valuation_context", "market_flow_context"],
-        produced_output_patterns=["analysis.*", "entity_analysis", "entity_analysis_uncertainty"],
-        input_slot_examples=["entity_external_evidence", "entity_model_signals", "financial_relation_paths"],
-        output_slot_examples=["entity_analysis", "entity_analysis_uncertainty", "analysis.entity"],
-        allowed_acceptance_rule_ids=["schema_valid", "entity_scope_consistent", "facts_and_analysis_separated", "claims_traceable", "uncertainty_explicit", "no_new_business_claims", "no_persistent_write"],
-        allowed_information_sources=["verified_upstream_slots"],
-        completion_principles=["结论可回溯", "事实与判断分离"],
+        name="实体分析",
+        description="对已解析实体的当前Run工作记忆进行结构化分析；不负责查询数据。",
+        responsibilities=["分析实体", "比较实体", "判断当前数据质量与充分性", "表达不确定性"],
+        non_responsibilities=["定位实体", "查询数据", "指定其他Worker或Tool"],
+        accepted_data_patterns=["*"],
+        produced_data_patterns=["analysis", "analysis_uncertainty"],
+        input_data_examples=["evidence", "prediction", "financial", "market"],
+        output_data_examples=["analysis", "analysis_uncertainty"],
+        allowed_acceptance_rule_ids=["schema_valid", "facts_and_analysis_separated", "uncertainty_explicit", "no_new_business_claims", "no_persistent_write"],
+        allowed_information_sources=["context_bundle_working_memory"],
     ),
     "portfolio.risk_assessment": _boundary(
         boundary_id="portfolio.risk_assessment",
-        name="组合风险评估",
-        description="基于组合状态和用户约束评估集中度、暴露和风险边界。",
-        responsibilities=["计算风险事实", "审查风险约束", "结构化风险结论"],
-        non_responsibilities=["修改持仓", "执行订单", "绕过 Proposal 审批"],
-        accepted_input_patterns=["state.*", "portfolio.*", "profile.*", "constraint.*", "ranking.*", "analysis.*", "impact.*", "current_portfolio_state", "portfolio_positions", "account_financial_state", "user_profile_state", "user_constraints", "market_ranking_signals", "entity_analysis", "entity_model_signals", "impact_facts"],
-        produced_output_patterns=["risk.*", "analysis.risk*", "constraint.risk*", "portfolio_risk_result", "risk_constraint_review"],
+        name="组合风险分析",
+        description="读取当前Run工作记忆中的组合、账户、用户约束和已有分析，形成风险判断；不修改状态。",
+        responsibilities=["组合风险分析", "集中度与暴露分析", "约束审查", "判断数据充分性"],
+        non_responsibilities=["查询原始业务数据", "修改持仓", "生成Commit"],
+        accepted_data_patterns=["*"],
+        produced_data_patterns=["risk", "risk_constraints"],
         accepted_business_parameter_patterns=["target_asset_allocation", "target_weight", "target_amount", "target_ratio", "allocation_ratio", "investment_amount", "planned_amount"],
-        input_slot_examples=["current_portfolio_state", "portfolio_positions", "user_constraints", "entity_analysis", "impact_facts"],
-        output_slot_examples=["portfolio_risk_result", "risk_constraint_review", "analysis.risk", "constraint.risk"],
-        allowed_acceptance_rule_ids=["schema_valid", "provenance_present", "claims_traceable", "failure_kind_classified", "no_persistent_write"],
-        allowed_information_sources=["verified_upstream_slots", "registered_risk_tools"],
-        completion_principles=["风险事实与建议分离", "不把业务为空当工具失败", "执行前由Capability requirement contract统一确认必需Slot和用户业务参数"],
+        input_data_examples=["portfolio", "positions", "account", "user_constraints", "analysis"],
+        output_data_examples=["risk", "risk_constraints"],
+        allowed_acceptance_rule_ids=["schema_valid", "failure_kind_classified", "uncertainty_explicit", "no_persistent_write"],
+        allowed_information_sources=["context_bundle_working_memory", "registered_risk_tools"],
     ),
     "state_change.proposal": _boundary(
         boundary_id="state_change.proposal",
-        name="状态变更方案",
-        description="根据显式变更目标生成待审批 Proposal，不直接提交。",
-        responsibilities=["生成待审批方案", "审查约束", "声明审批边界"],
-        non_responsibilities=["直接 Commit", "绕过 Approval", "修改持仓或资金"],
-        accepted_input_patterns=["state.*", "portfolio.*", "profile.*", "constraint.*", "risk.*", "analysis.*", "ranking.*", "strategy.*", "current_portfolio_state", "portfolio_positions", "account_financial_state", "user_profile_state", "user_constraints", "portfolio_risk_result", "risk_constraint_review", "market_ranking_signals", "selected_strategy_state", "entity_analysis"],
-        produced_output_patterns=["proposal.*", "reviewed_proposal"],
+        name="状态变更建议",
+        description="读取当前Run工作记忆并生成待审批建议；生成建议不是业务状态修改。",
+        responsibilities=["生成待审批建议", "审查当前约束", "明确审批边界"],
+        non_responsibilities=["直接Commit", "修改持仓或资金", "绕过Approval"],
+        accepted_data_patterns=["*"],
+        produced_data_patterns=["proposal", "rebalance"],
         accepted_business_parameter_patterns=["target_asset_allocation", "target_weight", "target_amount", "target_ratio", "allocation_ratio", "investment_amount", "planned_amount"],
-        input_slot_examples=["current_portfolio_state", "portfolio_positions", "user_constraints", "portfolio_risk_result"],
-        output_slot_examples=["reviewed_proposal", "proposal.rebalance"],
-        allowed_acceptance_rule_ids=["schema_valid", "claims_traceable", "proposal_requires_approval", "no_persistent_write", "goal_coverage"],
-        max_effect_level="proposal",
-        allowed_information_sources=["verified_upstream_slots"],
-        completion_principles=["显式变更意图", "Proposal 与 Commit 分离"],
+        input_data_examples=["portfolio", "positions", "user_constraints", "risk", "analysis"],
+        output_data_examples=["proposal", "rebalance"],
+        allowed_acceptance_rule_ids=["schema_valid", "proposal_requires_approval", "no_persistent_write", "goal_coverage"],
+        allowed_information_sources=["context_bundle_working_memory"],
+        mutation_allowed=False,
+        completion_principles=["建议与Commit分离"],
     ),
     "result.composition": _boundary(
         boundary_id="result.composition",
         name="结果汇总",
-        description="把终端专业结果组织成用户可读报告。",
-        responsibilities=["组织自然语言", "保留来源任务", "表达局限"],
-        non_responsibilities=["重新查询数据", "新增专业判断", "修改上游结论"],
-        accepted_input_patterns=["*"],
-        produced_output_patterns=["result.*", "report.*", "user_facing_report", "goal_completion_summary"],
-        input_slot_examples=["entity_analysis", "portfolio_risk_result", "reviewed_proposal"],
-        output_slot_examples=["user_facing_report", "goal_completion_summary", "result.user_facing"],
-        allowed_acceptance_rule_ids=["schema_valid", "claims_traceable", "uncertainty_explicit", "no_new_business_claims", "goal_coverage", "no_persistent_write"],
-        allowed_information_sources=["verified_upstream_slots"],
-        completion_principles=["不新增上游没有的结论", "保留局限"],
+        description="把Request完成状态和结构化结果组织成用户可读报告。",
+        responsibilities=["组织自然语言", "表达局限"],
+        non_responsibilities=["重新查询数据", "新增专业判断", "修改业务状态"],
+        accepted_data_patterns=[],
+        produced_data_patterns=["report", "goal_summary"],
+        input_data_examples=[],
+        output_data_examples=["report", "goal_summary"],
+        allowed_acceptance_rule_ids=["schema_valid", "no_new_business_claims", "goal_coverage", "no_persistent_write"],
+        allowed_information_sources=["request_result_state"],
     ),
     "system.diagnosis": _boundary(
         boundary_id="system.diagnosis",
         name="系统诊断",
-        description="诊断运行时、工具、参数、上下文和业务结果问题。",
+        description="直接读取Runtime/Request/Task/WorkerResult状态诊断运行问题。",
         responsibilities=["区分失败类型", "检查运行状态", "输出诊断结论"],
-        non_responsibilities=["金融研究", "交易方案", "修改业务状态"],
-        accepted_input_patterns=["runtime_context", "current_user_request", "session_summary", "runtime.*", "request.*", "context.*"],
-        produced_output_patterns=["diagnostic.*", "runtime.*", "system_diagnosis", "runtime_status"],
-        input_slot_examples=["runtime_context", "current_user_request", "session_summary"],
-        output_slot_examples=["system_diagnosis", "runtime_status", "diagnostic.runtime"],
+        non_responsibilities=["金融研究", "交易建议", "修改业务状态"],
+        accepted_data_patterns=[],
+        produced_data_patterns=["diagnosis", "runtime_status"],
+        input_data_examples=[],
+        output_data_examples=["diagnosis", "runtime_status"],
         allowed_acceptance_rule_ids=["schema_valid", "failure_kind_classified", "no_persistent_write"],
-        allowed_information_sources=["runtime_context", "registered_diagnostic_tools"],
-        completion_principles=["严格区分失败类型"],
+        required_runtime_context_names=["runtime_context"],
+        allowed_information_sources=["runtime_request_task_worker_state"],
     ),
     "context.resolution": _boundary(
         boundary_id="context.resolution",
         name="上下文补齐",
-        description="在已知边界内补齐被阻塞任务需要的可验证上下文。",
-        responsibilities=["读取可验证上下文", "发布标准上下文槽位"],
-        non_responsibilities=["猜测用户参数", "绕过权限", "修改业务状态"],
-        accepted_input_patterns=["runtime_context", "session_summary", "user_identity", "runtime.*", "context.*", "user.*"],
-        produced_output_patterns=["context.*", "resolved_context"],
-        input_slot_examples=["runtime_context", "session_summary", "user_identity"],
-        output_slot_examples=["resolved_context", "context.resolved"],
-        allowed_acceptance_rule_ids=["schema_valid", "provenance_present", "failure_kind_classified", "no_persistent_write"],
+        description="在已知边界内读取可验证的运行上下文，不猜测用户业务参数。",
+        responsibilities=["读取可验证运行上下文"],
+        non_responsibilities=["猜测用户参数", "修改业务状态"],
+        accepted_data_patterns=[],
+        produced_data_patterns=["resolved_context"],
+        input_data_examples=[],
+        output_data_examples=["resolved_context"],
+        allowed_acceptance_rule_ids=["schema_valid", "failure_kind_classified", "no_persistent_write"],
+        required_runtime_context_names=["runtime_context"],
         allowed_information_sources=["runtime_context", "verified_memory"],
-        completion_principles=["只补齐可验证上下文"],
     ),
     "graph_context.write": _boundary(
         boundary_id="graph_context.write",
         name="图上下文写入",
-        description="将已验证结果幂等写入非交易性图上下文。",
-        responsibilities=["非交易性图上下文写入"],
+        description="读取当前Run工作记忆中的已验证业务数据并幂等写入非交易图上下文。",
+        responsibilities=["非交易图上下文写入"],
         non_responsibilities=["交易下单", "绕过权限", "任意数据库写入"],
-        accepted_input_patterns=["state.*", "portfolio.*", "evidence.*", "permission.*", "current_portfolio_state", "portfolio_positions", "entity_external_evidence", "evidence_source_records", "permission_context"],
-        produced_output_patterns=["graph_context.*", "portfolio_graph_context", "evidence_graph_context"],
-        input_slot_examples=["current_portfolio_state", "entity_external_evidence", "permission_context"],
-        output_slot_examples=["portfolio_graph_context", "evidence_graph_context", "graph_context.portfolio"],
-        allowed_acceptance_rule_ids=["schema_valid", "entity_scope_consistent", "provenance_present"],
-        max_effect_level="write",
-        allowed_information_sources=["validated_upstream_slots"],
-        completion_principles=["显式写合同", "权限校验", "幂等审计"],
+        accepted_data_patterns=["*"],
+        produced_data_patterns=["portfolio_graph_context", "evidence_graph_context"],
+        input_data_examples=["portfolio", "positions", "evidence"],
+        output_data_examples=["portfolio_graph_context", "evidence_graph_context"],
+        allowed_acceptance_rule_ids=["schema_valid", "entity_scope_consistent"],
+        allowed_information_sources=["context_bundle_working_memory"],
+        mutation_allowed=True,
+        completion_principles=["显式写权限", "幂等审计"],
     ),
 }
 
 
 class CapabilityRegistry:
-    """Business-boundary registry with open semantic-slot families."""
+    """Business-boundary registry with simple Working-Memory data names."""
 
     def __init__(self, directory: Any | None = None) -> None:
         del directory
@@ -375,14 +354,6 @@ class CapabilityRegistry:
         return self._boundaries[key]
 
     def aggregate_scope(self, boundary_ids: list[str] | tuple[str, ...] | set[str]) -> dict[str, Any]:
-        """Merge existing boundary definitions into one Worker-level capability scope.
-
-        The existing boundary registry remains the source of truth for semantic
-        Slot patterns and acceptance rules.  MainAgent no longer selects one of
-        these fine-grained boundaries; Runtime uses their union only to validate
-        the owning Worker's overall professional scope.
-        """
-
         boundaries = [self.get_boundary(str(boundary_id)) for boundary_id in boundary_ids]
         if not boundaries:
             raise KeyError("empty_worker_capability_scope")
@@ -397,15 +368,16 @@ class CapabilityRegistry:
 
         return {
             "source_boundary_ids": [boundary.boundary_id for boundary in boundaries],
-            "accepted_input_patterns": merge("accepted_input_patterns"),
-            "produced_output_patterns": merge("produced_output_patterns"),
+            "accepted_data_patterns": merge("accepted_data_patterns"),
+            "produced_data_patterns": merge("produced_data_patterns"),
             "accepted_business_parameter_patterns": merge("accepted_business_parameter_patterns"),
-            "input_slot_examples": merge("input_slot_examples"),
-            "output_slot_examples": merge("output_slot_examples"),
+            "input_data_examples": merge("input_data_examples"),
+            "output_data_examples": merge("output_data_examples"),
             "allowed_acceptance_rule_ids": merge("allowed_acceptance_rule_ids"),
-            "required_context_slots": merge("required_context_slots"),
+            "required_runtime_context_names": merge("required_runtime_context_names"),
             "allowed_information_sources": merge("allowed_information_sources"),
             "completion_principles": merge("completion_principles"),
+            "mutation_allowed": any(boundary.mutation_allowed for boundary in boundaries),
         }
 
     def semantic_requirement_exists(self, semantic_key: str) -> bool:
@@ -422,41 +394,27 @@ class CapabilityRegistry:
         for key, raw in sorted(SEMANTIC_REQUIREMENTS.items()):
             row = dict(raw)
             row["semantic_key"] = key
-            # Keep the MainAgent catalog small and safe. Concrete Worker IDs are
-            # intentionally absent; Worker selection remains a later stage.
             rows.append(row)
         return rows
 
     def public_catalog(
         self,
         *,
-        request_mode: str,
+        effect_limit: str,
         boundary_ids: list[str] | set[str] | None = None,
     ) -> list[dict[str, Any]]:
-        mode = str(request_mode or "analysis").lower()
-        maximum = "proposal" if mode == "proposal" else "read"
-        order = {"read": 0, "proposal": 1, "write": 2}
+        del effect_limit
         allowed = {str(item) for item in (boundary_ids or []) if str(item)}
         rows: list[dict[str, Any]] = []
         for boundary_id, boundary in sorted(self._boundaries.items()):
             if allowed and boundary_id not in allowed:
                 continue
-            if order.get(boundary.max_effect_level, 99) > order[maximum]:
+            # BUSINESS planning never grants mutation rights. Mutating Workers
+            # are used only by the explicit control/write path.
+            if boundary.mutation_allowed:
                 continue
-            row = boundary.safe_for_main_agent()
-            row["acceptance_rules"] = {
-                rule_id: ACCEPTANCE_RULES[rule_id]
-                for rule_id in boundary.allowed_acceptance_rule_ids
-                if rule_id in ACCEPTANCE_RULES
-            }
-            rows.append(row)
+            rows.append(boundary.safe_for_main_agent())
         return rows
 
-    def acceptance_rule_exists(self, rule_id: str) -> bool:
-        return str(rule_id or "") in ACCEPTANCE_RULES
 
-    def acceptance_rule_description(self, rule_id: str) -> str:
-        return str(ACCEPTANCE_RULES.get(str(rule_id or ""), ""))
-
-
-__all__ = ["ACCEPTANCE_RULES", "SEMANTIC_REQUIREMENTS", "CapabilityRegistry"]
+__all__ = ["ACCEPTANCE_RULES", "CapabilityRegistry", "SEMANTIC_REQUIREMENTS"]

@@ -7,6 +7,7 @@ from typing import Any
 
 from agent.console_trace import flow_event
 from agent.tool_runtime import ToolError, ToolExecutor, UnifiedToolResult
+from agent.runtime_state import RuntimeResourceBudget
 
 from .contracts import (
     ToolDagExecutionResult,
@@ -18,9 +19,14 @@ from .validation import dependencies_from_inputs
 
 
 class ToolDagExecutor:
-    def __init__(self, tool_executor: ToolExecutor, *, max_parallel: int = 4) -> None:
+    def __init__(
+        self, tool_executor: ToolExecutor, *, max_parallel: int = 4,
+        resource_budget: RuntimeResourceBudget | None = None,
+    ) -> None:
         self.tool_executor = tool_executor
-        self.max_parallel = max(1, int(max_parallel))
+        self.resource_budget = resource_budget
+        configured = resource_budget.max_parallel_tools if resource_budget is not None else max_parallel
+        self.max_parallel = max(1, min(int(max_parallel), int(configured)))
 
     @staticmethod
     def _resolve_ref(
@@ -288,12 +294,15 @@ class ToolDagExecutor:
                     "tool_task_id": task_id,
                     "agent_role": plan.worker_role,
                 }
-                result = self.tool_executor.execute(
-                    task.tool_name,
-                    arguments,
-                    context=context,
-                    agent_type=plan.worker_role,
-                )
+                if self.resource_budget is None:
+                    result = self.tool_executor.execute(
+                        task.tool_name, arguments, context=context, agent_type=plan.worker_role
+                    )
+                else:
+                    with self.resource_budget.tool_slot():
+                        result = self.tool_executor.execute(
+                            task.tool_name, arguments, context=context, agent_type=plan.worker_role
+                        )
                 return task_id, result
 
             batch_success: list[str] = []

@@ -198,6 +198,7 @@ class ContextBundle:
     approval_context: ApprovalContext = field(default_factory=ApprovalContext)
     runtime_context: RuntimeContext = field(default_factory=RuntimeContext)
     memory_context: MemoryContext = field(default_factory=MemoryContext)
+    business_data: list[dict[str, Any]] = field(default_factory=list)
     visibility_policy: dict[str, Any] = field(default_factory=dict)
     token_budget: dict[str, int] = field(default_factory=lambda: {"max_total_tokens": 1800})
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -216,6 +217,129 @@ class ContextBundle:
 
     def to_dict(self) -> dict[str, Any]:
         return _plain(self)
+
+    @staticmethod
+    def _business_entity_id(entity_ref: dict[str, Any] | None) -> str:
+        ref = dict(entity_ref or {})
+        return str(ref.get("node_id") or "__run__")
+
+    def put_business_data(
+        self,
+        *,
+        entity_ref: dict[str, Any] | None,
+        name: str,
+        value: Any,
+        data_time: str = "",
+    ) -> dict[str, Any]:
+        """Append one successfully queried/generated business-data item.
+
+        The label is only the business data name.  Empty values are retained
+        because the presence of the label itself means the query completed.
+        Failed Worker/Tool paths never call this method.
+        """
+        data_name = str(name or "").strip()
+        if not data_name:
+            raise ValueError("business_data_name_required")
+        ref = dict(entity_ref or {})
+        item = {
+            "entity_ref": ref,
+            "entity_id": self._business_entity_id(ref),
+            "name": data_name,
+            "value": _plain(value),
+            "data_time": str(data_time or ""),
+            "created_at": _now_text(),
+        }
+        self.business_data.append(item)
+        self.updated_at = _now_text()
+        return dict(item)
+
+    def business_data_context(
+        self,
+        *,
+        entity_refs: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Return the latest entity+name values from this run working memory."""
+        refs = [
+            dict(ref) for ref in list(entity_refs or [])
+            if isinstance(ref, dict) and str(ref.get("node_id") or "")
+        ]
+        wanted_ids = {str(ref.get("node_id") or "") for ref in refs}
+        latest: dict[tuple[str, str], dict[str, Any]] = {}
+        for raw in list(self.business_data or []):
+            if not isinstance(raw, dict):
+                continue
+            entity_id = str(raw.get("entity_id") or self._business_entity_id(raw.get("entity_ref")))
+            name = str(raw.get("name") or "").strip()
+            if not name:
+                continue
+            if wanted_ids and entity_id not in wanted_ids and entity_id != "__run__":
+                continue
+            latest[(entity_id, name)] = dict(raw)
+
+        if not refs:
+            inferred: dict[str, dict[str, Any]] = {}
+            for (entity_id, _), row in latest.items():
+                if entity_id != "__run__" and isinstance(row.get("entity_ref"), dict):
+                    inferred[entity_id] = dict(row.get("entity_ref") or {})
+            refs = list(inferred.values())
+
+        entities: list[dict[str, Any]] = []
+        for ref in refs:
+            entity_id = str(ref.get("node_id") or "")
+            data = {
+                name: row.get("value")
+                for (row_entity, name), row in latest.items()
+                if row_entity == entity_id
+            }
+            # An entity with only empty values is still included: the labels
+            # prove those queries completed.
+            if data:
+                entities.append({"entity_ref": dict(ref), "data": data})
+
+        global_data = {
+            name: row.get("value")
+            for (row_entity, name), row in latest.items()
+            if row_entity == "__run__"
+        }
+        return {
+            "schema_version": "context_bundle_business_data.v1",
+            "run_id": str(self.run_id or ""),
+            "entities": entities,
+            "global_data": global_data,
+            "available_names": sorted({name for (_, name) in latest}),
+        }
+
+    def has_business_data(self, *, entity_id: str, name: str) -> bool:
+        target_entity = str(entity_id or "__run__")
+        target_name = str(name or "").strip()
+        return any(
+            str(item.get("entity_id") or self._business_entity_id(item.get("entity_ref"))) == target_entity
+            and str(item.get("name") or "") == target_name
+            for item in list(self.business_data or [])
+            if isinstance(item, dict)
+        )
+
+    def missing_business_data_entities(
+        self,
+        *,
+        entity_refs: list[Any],
+        names: list[str],
+    ) -> list[Any]:
+        required = [str(name) for name in names if str(name)]
+        if not required:
+            return []
+        missing: list[Any] = []
+        for ref in list(entity_refs or []):
+            entity_id = str(getattr(ref, "node_id", "") or (ref.get("node_id") if isinstance(ref, dict) else ""))
+            if not entity_id:
+                continue
+            if any(
+                not self.has_business_data(entity_id=entity_id, name=name)
+                and not self.has_business_data(entity_id="__run__", name=name)
+                for name in required
+            ):
+                missing.append(ref)
+        return missing
 
     def to_minimal_context(self) -> dict[str, Any]:
         return {
@@ -253,5 +377,10 @@ class ContextBundle:
             "handoff_refs": list(self.runtime_context.handoff_refs),
             "latest_handoff_trace_id": self.runtime_context.latest_handoff_trace_id,
             "handoff_role_summaries": list(self.runtime_context.handoff_role_summaries),
+            "business_data_names": sorted({
+                str(item.get("name") or "")
+                for item in self.business_data
+                if isinstance(item, dict) and str(item.get("name") or "")
+            }),
             "metadata": dict(self.metadata),
         }

@@ -121,12 +121,11 @@ class CollaborationRuntimeServices:
                         "assigned_agent": task.assigned_agent,
                         "boundary_id": task.boundary_id,
                         "task_contract_version": task.contract_version,
-                        "required_outputs": list(task.expected_output_slots),
+                        "required_outputs": list(task.expected_data_names),
                                                 "priority": task.priority,
                         "attempt": task.attempt,
-                        "request_mode": task.metadata.get("request_mode"),
-                        "resolved_input_bindings": task.resolved_input_bindings,
-                        "dependency_derivation": "output_input_slot_binding",
+                        "effect_limit": task.metadata.get("effect_limit") or task.effect_limit,
+                        "dependency_derivation": "execution_order_only",
                         **self._ref_summary(task),
                     },
                 )
@@ -187,8 +186,7 @@ class CollaborationRuntimeServices:
                     "agent_role": task.assigned_agent,
                     "agent_input_summary": {
                         "objective": task.objective[:500],
-                        "required_outputs": list(task.expected_output_slots),
-                        "resolved_input_bindings": task.resolved_input_bindings,
+                        "required_outputs": list(task.expected_data_names),
                         "dependency_task_ids": list(task.dependency_task_ids),
                     },
                     "agent_output_summary": {

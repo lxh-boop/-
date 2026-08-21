@@ -1,518 +1,301 @@
-"""Worker execution facade for the capability-contract runtime."""
-
+"""Worker execution facade using ContextBundle as the run business-data memory."""
 from __future__ import annotations
 
+import copy
 import time
 from pathlib import Path
 from typing import Any
 
 from core.llm import LLMService
-
-from agent.capabilities import CapabilityContract, CapabilityContractValidator, RequirementResolver
-from agent.capabilities.semantic_slots import SemanticSlotError
+from agent.capabilities import BusinessParameterResolver, CapabilityContract, CapabilityContractValidator
 from agent.communication import MessageType, publish_agent_message
-from agent.console_trace import flow_event, get_llm_execution_timing, get_tool_execution_timing
+from agent.console_trace import get_llm_execution_timing, get_tool_execution_timing
+from agent.context.context_types import ContextBundle
 from agent.graph.impact_service import GraphImpactService
 from agent.graph.provider_adapter import GraphProviderAdapter
 from agent.llm_audit import activate_llm_audit_context
+from agent.runtime_state import RuntimeResourceBudget
 from agent.tool_dag import ToolDagExecutor, ToolDagValidator, WorkerToolDagPlanner, WorkerToolDagRuntime
 from agent.tool_runtime import ToolExecutor
-from agent.runtime_state import RunSlotStore
 from agent.worker_tools import WorkerToolDirectory, build_worker_tool_registry
 
-from .context_projection import WorkerInputProjectionMiddleware
-from .worker_directory import (
-    CapabilityWorkerDirectory,
-    DATABASE_WRITER,
-    ENTITY_ANALYST,
-    EVIDENCE_COLLECTOR,
-    GRAPH_RELATION_RETRIEVER,
-    PORTFOLIO_ANALYST,
-    REPORT_WRITER,
-    RISK_ANALYST,
-    STRATEGY_GUARD,
-    SYSTEM_DIAGNOSTIC,
-)
-from .error_contracts import escalation_from_worker_result
 from .completion import canonicalize_completion_report, flow_decision, non_success_completion_report, runtime_completion_report
+from .error_contracts import escalation_from_worker_result
 from .models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus, TaskStatus
-from .workers import (
-    run_diagnostic,
-    run_evidence,
-    run_entity_analysis,
-    run_graph_context,
-    run_graph_impact,
-    run_internal_system,
-    run_report_writer,
-    run_risk,
-    run_strategy_guard,
-)
+from .worker_directory import (CapabilityWorkerDirectory, DATABASE_WRITER, ENTITY_ANALYST, EVIDENCE_COLLECTOR,
+    GRAPH_RELATION_RETRIEVER, PORTFOLIO_ANALYST, REPORT_WRITER, RISK_ANALYST, STRATEGY_GUARD, SYSTEM_DIAGNOSTIC)
+from .workers import (run_diagnostic, run_evidence, run_entity_analysis, run_graph_context, run_graph_impact,
+    run_internal_system, run_report_writer, run_risk, run_strategy_guard)
 from .workers.common import dependency_results as _dependency_results
 from .workers.common import refs_from_dependencies as _refs_from_dependencies
 from .workers.common import safe_public_value as _safe
 
 
-# V23.0.9: RequirementResolver统一接管输入充分性。
-# 兼容说明：它覆盖旧的 missing_contract_required_slot_ids 仅检查Slot存在性的职责，
-# 并进一步处理source_policy与用户业务参数。
-
 class SpecialistRuntime:
-    """Execute one Worker-selected capability task.
+    """Execute one already-assigned Worker.
 
-    Worker selection is already complete.  This layer exposes only the assigned
-    Worker's private tools, resolves declared slot bindings, executes the domain
-    Worker and validates every contract in the task's contract list.
+    Business data never travels on task edges. Query/generation Workers publish
+    successful values (including empty values) into the current run ContextBundle.
+    Analysis/decision Workers receive only the relevant ContextBundle view.
     """
 
-    def __init__(
-        self,
-        *,
-        llm_service: LLMService,
-        provider: GraphProviderAdapter,
-        impact_service: GraphImpactService,
-        slot_store: RunSlotStore,
-        directory: CapabilityWorkerDirectory | None = None,
-    ) -> None:
+    def __init__(self, *, llm_service: LLMService, provider: GraphProviderAdapter,
+                 impact_service: GraphImpactService, directory: CapabilityWorkerDirectory | None = None,
+                 resource_budget: RuntimeResourceBudget | None = None) -> None:
         self.llm_service = llm_service
         self.provider = provider
         self.impact_service = impact_service
         self.directory = directory or CapabilityWorkerDirectory()
-        self.input_projection = WorkerInputProjectionMiddleware(slot_store)
-        self.worker_tool_registry = build_worker_tool_registry(
-            provider=provider,
-            impact_service=impact_service,
-        )
+        self.resource_budget = resource_budget
+        self.context_bundle: ContextBundle | None = None
+        self.worker_tool_registry = build_worker_tool_registry(provider=provider, impact_service=impact_service)
         self.worker_tool_directory = WorkerToolDirectory(self.worker_tool_registry)
         self.worker_tool_executor = ToolExecutor(registry=self.worker_tool_registry)
         validator = ToolDagValidator(self.worker_tool_registry, self.worker_tool_directory)
-        planner = WorkerToolDagPlanner(
-            llm_service=self.llm_service,
-            directory=self.worker_tool_directory,
-            validator=validator,
-        )
+        planner = WorkerToolDagPlanner(llm_service=self.llm_service, directory=self.worker_tool_directory, validator=validator)
         self.worker_tool_dag_runtime = WorkerToolDagRuntime(
             planner=planner,
-            executor=ToolDagExecutor(self.worker_tool_executor, max_parallel=4),
+            executor=ToolDagExecutor(self.worker_tool_executor, max_parallel=4, resource_budget=self.resource_budget),
         )
         self.contract_validator = CapabilityContractValidator()
-        self.requirement_resolver = RequirementResolver()
+        self.parameter_resolver = BusinessParameterResolver()
+
+    def bind_context_bundle(self, bundle: ContextBundle) -> None:
+        self.context_bundle = bundle
 
     @staticmethod
-    def _produced_slots(task: GraphAgentTask, result: GraphWorkerResult) -> list[str]:
-        del task
-        data = dict(result.data or {}) if isinstance(result.data, dict) else {}
-        materialized = data.get("slots") if isinstance(data.get("slots"), dict) else {}
-        return list(dict.fromkeys(
-            str(slot_id) for slot_id, value in materialized.items()
-            if str(slot_id) and value is not None
-        ))
+    def _ref_dict(ref: Any) -> dict[str, Any]:
+        if isinstance(ref, dict):
+            return dict(ref)
+        if hasattr(ref, "to_dict"):
+            return dict(ref.to_dict())
+        return {}
 
-    def run(
-        self,
-        task: GraphAgentTask,
-        *,
-        current_user_request: str,
-        output_dir: str | Path,
-        db_path: str | Path | None,
-        default_top_k: int,
-        language: str,
-        execution_context: dict[str, Any] | None = None,
-    ) -> GraphWorkerResult:
+    @staticmethod
+    def _produced_data(result: GraphWorkerResult) -> tuple[dict[str, Any], list[str]]:
+        payload = dict(result.data or {}) if isinstance(result.data, dict) else {}
+        values = dict(payload.get("business_data") or {}) if isinstance(payload.get("business_data"), dict) else {}
+        names = [str(name) for name in payload.get("produced_data_names") or values.keys() if str(name)]
+        names = list(dict.fromkeys(name for name in names if name in values))
+        return values, names
+
+    def _working_context(self, task: GraphAgentTask) -> dict[str, Any]:
+        if self.context_bundle is None:
+            return {"schema_version": "context_bundle_business_data.v1", "run_id": task.run_id,
+                    "entities": [], "global_data": {}, "available_names": []}
+        return self.context_bundle.business_data_context(entity_refs=[self._ref_dict(ref) for ref in task.focus_refs])
+
+    def _provider_reuse(self, task: GraphAgentTask) -> GraphWorkerResult | None:
+        if self.context_bundle is None:
+            return None
+        card = self.directory.get(task.worker_id or task.assigned_agent)
+        if card.working_memory_mode != "provider" or not task.expected_data_names:
+            return None
+        refs = list(task.focus_refs or [])
+        if refs:
+            missing = self.context_bundle.missing_business_data_entities(entity_refs=refs, names=task.expected_data_names)
+            if missing:
+                return None
+            view = self._working_context(task)
+            values: dict[str, Any] = {}
+            for entity in view.get("entities") or []:
+                if not isinstance(entity, dict):
+                    continue
+                for name, value in dict(entity.get("data") or {}).items():
+                    if name in task.expected_data_names:
+                        values.setdefault(name, value)
+        else:
+            view = self.context_bundle.business_data_context()
+            global_data = dict(view.get("global_data") or {})
+            if not all(name in global_data for name in task.expected_data_names):
+                return None
+            values = {name: global_data.get(name) for name in task.expected_data_names}
+        if not values:
+            return None
+        data = {"business_data": values, "produced_data_names": list(values),
+                "business_empty": all(value in (None, {}, [], "") for value in values.values()),
+                "working_memory_reused": True}
+        result = GraphWorkerResult(task_id=task.task_id, agent_id=task.assigned_agent, status=ResultStatus.COMPLETED,
+            output_type="CapabilityResult", data=data, payload=data, payload_schema="capability_result.v2", error=None,
+            focus_refs=task.focus_refs, summary="已复用本轮ContextBundle中的同实体已查询数据，未重复调用查询Tool。",
+            findings=[{"kind": "context_bundle_reuse", "data_names": list(values)}], confidence=1.0,
+            metadata={"working_memory_reused": True, "database_write": False})
+        result.completion = runtime_completion_report(task, result_status=result.status, output_type=result.output_type,
+                                                      data=result.data, error=result.error)
+        return result
+
+    def _provider_execution_task(self, task: GraphAgentTask) -> GraphAgentTask:
+        if self.context_bundle is None or not task.focus_refs or not task.expected_data_names:
+            return task
+        card = self.directory.get(task.worker_id or task.assigned_agent)
+        if card.working_memory_mode != "provider":
+            return task
+        missing = self.context_bundle.missing_business_data_entities(entity_refs=task.focus_refs, names=task.expected_data_names)
+        if not missing or len(missing) == len(task.focus_refs):
+            return task
+        clone = copy.deepcopy(task)
+        clone.focus_refs = list(missing)
+        missing_ids = {getattr(ref, "node_id", "") for ref in missing}
+        clone.context_refs = [ref for ref in clone.context_refs if getattr(ref, "node_id", "") in missing_ids]
+        clone.metadata["working_memory_partial_reuse"] = True
+        return clone
+
+    @staticmethod
+    def _candidate_refs_from_value(value: Any) -> list[dict[str, Any]]:
+        refs: list[dict[str, Any]] = []
+        def visit(node: Any) -> None:
+            if isinstance(node, dict):
+                for key in ("selected_entity_ref", "entity_ref", "graph_ref"):
+                    ref = node.get(key)
+                    if isinstance(ref, dict) and str(ref.get("node_id") or ""):
+                        refs.append(dict(ref))
+                for key in ("entity_refs", "focus_refs"):
+                    seq = node.get(key)
+                    if isinstance(seq, list):
+                        for ref in seq:
+                            if isinstance(ref, dict) and str(ref.get("node_id") or ""):
+                                refs.append(dict(ref))
+                for child in node.values():
+                    visit(child)
+            elif isinstance(node, list):
+                for child in node:
+                    visit(child)
+        visit(value)
+        unique: dict[str, dict[str, Any]] = {}
+        for ref in refs:
+            unique[str(ref.get("node_id"))] = ref
+        return list(unique.values())
+
+    def _publish_business_data(self, task: GraphAgentTask, result: GraphWorkerResult) -> list[dict[str, Any]]:
+        if self.context_bundle is None or result.status not in {ResultStatus.COMPLETED, ResultStatus.PARTIAL, ResultStatus.PROPOSAL_READY}:
+            return []
+        values, names = self._produced_data(result)
+        if not names:
+            return []
+        refs = [self._ref_dict(ref) for ref in (result.focus_refs or task.focus_refs) if self._ref_dict(ref)]
+        if not refs:
+            for value in values.values():
+                refs.extend(self._candidate_refs_from_value(value))
+        unique_refs: dict[str, dict[str, Any]] = {str(ref.get("node_id")): ref for ref in refs if str(ref.get("node_id") or "")}
+        target_refs = list(unique_refs.values()) or [None]
+        records: list[dict[str, Any]] = []
+        for ref in target_refs:
+            for name in names:
+                records.append(self.context_bundle.put_business_data(entity_ref=ref, name=name, value=values.get(name),
+                    data_time=str(task.as_of_time or "")))
+        return records
+
+    def _parameter_gate(self, task: GraphAgentTask, context: dict[str, Any], language: str) -> GraphWorkerResult | None:
+        contracts = [CapabilityContract.from_dict(item) for item in task.contracts]
+        resolution = self.parameter_resolver.resolve(contracts=contracts, business_parameters=task.business_parameters,
+            available_parameters=dict(context.get("available_parameters") or {}))
+        if resolution.satisfied:
+            return None
+        missing = [MissingContextItem(key=gap.parameter_id, description=gap.description,
+            expected_format=gap.expected_format or "business parameter", reason="user_owned_parameter_missing",
+            searched_sources=gap.searched_sources, blocking=True) for gap in resolution.gaps]
+        result = GraphWorkerResult(task_id=task.task_id, agent_id=task.assigned_agent, status=ResultStatus.NEED_CONTEXT,
+            output_type="CapabilityResult", data=None,
+            error={"error_id": "user_input_required", "code": "user_input_required", "message": "缺少用户业务参数。",
+                   "component": "business_parameter_resolver", "retryable": False}, focus_refs=task.focus_refs,
+            summary="缺少执行当前任务所需的用户业务参数。" if language != "en" else "Required user business parameters are missing.",
+            missing_items=missing, completion=non_success_completion_report(task, execution_status="need_context",
+                reason="missing user business parameter", failure_kind="user_input_required"),
+            metadata={"input_gate_owner": "runtime", "parameter_resolution": resolution.to_dict()})
+        return result
+
+    def run(self, task: GraphAgentTask, *, current_user_request: str, output_dir: str | Path,
+            db_path: str | Path | None, default_top_k: int, language: str,
+            execution_context: dict[str, Any] | None = None) -> GraphWorkerResult:
         started = time.perf_counter()
         context = dict(execution_context or {})
-        context.update({
-            "current_user_request": current_user_request,
-            "language": language,
-        })
-        activate_llm_audit_context(
-            run_id=task.run_id,
-            conversation_id=task.session_id,
-            output_dir=output_dir,
-            formal_entry_used=True,
-            formal_entry_name="agent.collaboration.specialist_runtime",
-            task_id=task.task_id,
-            worker_id=task.worker_id,
-            agent_id=task.assigned_agent,
-        )
+        context.update({"current_user_request": current_user_request, "language": language})
+        activate_llm_audit_context(run_id=task.run_id, conversation_id=task.session_id, output_dir=output_dir,
+            formal_entry_used=True, formal_entry_name="agent.collaboration.specialist_runtime", task_id=task.task_id,
+            worker_id=task.worker_id, agent_id=task.assigned_agent)
         task.status = TaskStatus.RUNNING
-        try:
-            resolved_inputs, projected_inputs = self.input_projection.project(
-                task, execution_context=context
-            )
-        except SemanticSlotError as exc:
-            task.status = TaskStatus.FAILED
-            return GraphWorkerResult(
-                task_id=task.task_id,
-                agent_id=task.assigned_agent,
-                status=ResultStatus.FAILED,
-                output_type="CapabilityResult",
-                data=None,
-                error={
-                    "error_id": "contract_validation_failure",
-                    "code": exc.code,
-                    "message": str(exc),
-                    "component": "worker_input_projection",
-                    "retryable": False,
-                    "slot_id": exc.slot_id,
-                    "detail": exc.detail,
-                },
-                focus_refs=task.focus_refs,
-                summary=(
-                    "CapabilityContract要求的Slot字段不存在，Worker未执行。"
-                    if language != "en"
-                    else "A required Slot field is missing; the Worker was not executed."
-                ),
-                completion=non_success_completion_report(
-                    task,
-                    execution_status="failed",
-                    reason=str(exc),
-                    failure_kind="contract_validation_failure",
-                ),
-                metadata={
-                    "input_gate_owner": "runtime",
-                    "main_agent_replan_recommended": False,
-                },
-            )
-        flow_event(
-            "WORKER_INPUT_PROJECTED",
-            {
-                "task_id": task.task_id,
-                "worker_id": task.worker_id,
-                "slot_ids": [item.slot_id for item in projected_inputs],
-                "upstream_value_refs": [item.value_ref for item in projected_inputs if item.value_ref],
-                "projection_mode": "slot_store_field_projected",
-                "coordinator_summary_used_as_execution_input": False,
-                "slot_projection": [
-                    {
-                        "slot_id": item.slot_id,
-                        "required_paths": item.required_paths,
-                        "optional_paths": item.optional_paths,
-                        "raw_chars": item.raw_chars,
-                        "projected_chars": item.projected_chars,
-                        "raw_token_estimate": item.raw_token_estimate,
-                        "projected_token_estimate": item.projected_token_estimate,
-                    }
-                    for item in projected_inputs
-                ],
-                "raw_token_estimate_total": sum(item.raw_token_estimate for item in projected_inputs),
-                "projected_token_estimate_total": sum(item.projected_token_estimate for item in projected_inputs),
-            },
-            run_id=task.run_id,
-        )
-        for item in projected_inputs:
-            if item.projected_token_estimate > 8000:
-                flow_event(
-                    "SLOT_OVERSIZED",
-                    {
-                        "task_id": task.task_id,
-                        "worker_id": task.worker_id,
-                        "slot_id": item.slot_id,
-                        "raw_token_estimate": item.raw_token_estimate,
-                        "projected_token_estimate": item.projected_token_estimate,
-                        "required_paths": item.required_paths,
-                    },
-                    run_id=task.run_id,
-                )
-        projected_total = sum(item.projected_token_estimate for item in projected_inputs)
-        if projected_total > 16000:
-            flow_event(
-                "WORKER_INPUT_OVERSIZED",
-                {
-                    "task_id": task.task_id,
-                    "worker_id": task.worker_id,
-                    "projected_token_estimate_total": projected_total,
-                    "slot_ids": [item.slot_id for item in projected_inputs],
-                },
-                run_id=task.run_id,
-            )
-
-        # Capability requirement sufficiency is a Runtime responsibility, not a
-        # domain Worker judgment.  Slot requirements and user business-parameter
-        # requirements are evaluated from the public CapabilityContract before any
-        # private Tool DAG is invoked.  Internal/system gaps take precedence over
-        # user questions, so the system never asks the user for data it can still
-        # recover from an upstream capability.
-        parsed_contracts = [CapabilityContract.from_dict(item) for item in task.contracts]
-        requirement_resolution = self.requirement_resolver.resolve(
-            contracts=parsed_contracts,
-            resolved_inputs=resolved_inputs,
-            business_parameters=task.business_parameters,
-            available_parameters=dict(context.get("available_parameters") or {}),
-        )
-        if not requirement_resolution.satisfied:
+        gate = self._parameter_gate(task, context, language)
+        if gate is not None:
             task.status = TaskStatus.WAITING_CONTEXT
-            failure_kind = requirement_resolution.failure_kind
-            selected_gaps = (
-                requirement_resolution.system_gaps
-                if requirement_resolution.system_gaps
-                else requirement_resolution.user_gaps
-            )
-            user_required = failure_kind == "user_input_required"
-            reason = (
-                "CapabilityContract仍缺少必须由用户明确提供的业务参数。"
-                if user_required and language != "en"
-                else "CapabilityContract still requires an explicit user business parameter."
-                if user_required
-                else "CapabilityContract要求的内部业务Slot在绑定/物化后仍不可用或不完整。"
-                if language != "en"
-                else "A system-owned CapabilityContract input is still unavailable or incomplete after binding/materialization."
-            )
-            result = GraphWorkerResult(
-                task_id=task.task_id,
-                agent_id=task.assigned_agent,
-                status=ResultStatus.NEED_CONTEXT,
-                output_type="CapabilityResult",
-                data=None,
-                error={
-                    "error_id": failure_kind,
-                    "operation": task.objective or task.boundary_id,
-                    "reason": reason,
-                    "retryable": not user_required,
-                },
-                focus_refs=task.focus_refs,
-                summary=reason,
-                missing_items=[
-                    MissingContextItem(
-                        key=gap.requirement_id,
-                        description=gap.description,
-                        expected_format=gap.expected_format or (
-                            "one of: " + ", ".join(gap.satisfy_by)
-                            if gap.satisfy_by else "Runtime semantic Slot"
-                        ),
-                        reason=(
-                            f"parameter missing; source_policy={gap.source_policy}; "
-                            f"satisfy_by={','.join(gap.satisfy_by)}"
-                            if gap.kind == "parameter"
-                            else f"worker_input_slot_unresolved; source_policy={gap.source_policy}; "
-                            f"missing_paths={','.join(gap.missing_paths)}"
-                        ),
-                        searched_sources=list(gap.searched_sources),
-                        blocking=True,
-                    )
-                    for gap in selected_gaps
-                ],
-                completion=non_success_completion_report(
-                    task,
-                    execution_status="need_context",
-                    reason=reason,
-                    failure_kind=failure_kind,
-                ),
-                metadata={
-                    "boundary_id": task.boundary_id,
-                    "attempt": task.attempt,
-                    "resolved_input_slots": sorted(resolved_inputs),
-                    "produced_information_slots": [],
-                    "input_gate_owner": "runtime_requirement_resolver",
-                    "requirement_resolution": requirement_resolution.to_dict(),
-                },
-            )
-            decision = flow_decision(
-                result.status,
-                result.completion,
-                output_type=result.output_type,
-                retryable=not user_required,
-            )
-            result.status = decision.result_status
-            result.metadata.update({
-                "semantic_satisfied": decision.semantic_satisfied,
-                "should_freeze": decision.should_freeze,
-                "reusable": decision.reusable,
-                "replan_recommended": decision.replan_recommended,
-                "failure_kind": decision.failure_kind,
-                "freeze_reason": decision.freeze_reason,
-            })
-            return result
+            return gate
 
+        reused = self._provider_reuse(task)
+        execution_task = self._provider_execution_task(task) if reused is None else task
         card = self.directory.get(task.worker_id or task.assigned_agent)
-        allowed_tools = list(task.metadata.get("allowed_tool_ids") or getattr(card, "private_tool_ids", []) or [])
+        allowed_tools = list(card.private_tool_ids)
+        working_context = self._working_context(execution_task)
+        if reused is not None:
+            result = reused
+        else:
+            try:
+                if task.assigned_agent == EVIDENCE_COLLECTOR:
+                    result = run_evidence(self.worker_tool_dag_runtime, execution_task, current_user_request,
+                        output_dir, db_path, default_top_k, worker_prompt=str(card.private_worker_prompt or ""),
+                        allowed_tool_names=allowed_tools)
+                elif task.assigned_agent == PORTFOLIO_ANALYST:
+                    result = run_internal_system(self.worker_tool_dag_runtime, execution_task, output_dir, db_path,
+                        default_top_k, worker_prompt=str(card.private_worker_prompt or ""), allowed_tool_names=allowed_tools,
+                        provider=self.provider)
+                elif task.assigned_agent == DATABASE_WRITER:
+                    result = run_graph_context(self.worker_tool_executor, execution_task, output_dir, db_path,
+                        working_memory_context=working_context)
+                elif task.assigned_agent == ENTITY_ANALYST:
+                    result = run_entity_analysis(self.llm_service, execution_task, working_memory_context=working_context, language=language)
+                elif task.assigned_agent == GRAPH_RELATION_RETRIEVER:
+                    result = run_graph_impact(self.worker_tool_dag_runtime, execution_task, working_memory_context=working_context,
+                        worker_prompt=str(card.private_worker_prompt or ""), allowed_tool_names=allowed_tools,
+                        output_dir=output_dir, db_path=db_path)
+                elif task.assigned_agent == RISK_ANALYST:
+                    result = run_risk(self.llm_service, self.worker_tool_dag_runtime, execution_task, output_dir, db_path,
+                        working_memory_context=working_context, worker_prompt=str(card.private_worker_prompt or ""),
+                        allowed_tool_names=allowed_tools, language=language)
+                elif task.assigned_agent == STRATEGY_GUARD:
+                    result = run_strategy_guard(self.llm_service, execution_task, current_user_request=current_user_request,
+                        working_memory_context=working_context, output_dir=output_dir, db_path=db_path,
+                        default_top_k=default_top_k, language=language, execution_context=context)
+                elif task.assigned_agent == REPORT_WRITER:
+                    result = run_report_writer(self.llm_service, execution_task, language,
+                        request_bundle_results=context.get("request_bundle_results"),
+                        presentation_policy=dict(context.get("presentation_policy") or {}))
+                elif task.assigned_agent == SYSTEM_DIAGNOSTIC:
+                    result = run_diagnostic(self.provider, execution_task)
+                else:
+                    raise RuntimeError(f"unknown_worker_agent:{task.assigned_agent}")
+            except Exception as exc:
+                kind = "structured_output_failure" if type(exc).__name__ == "LLMJSONError" or "json" in type(exc).__name__.lower() else "worker_execution_failure"
+                result = GraphWorkerResult(task_id=task.task_id, agent_id=task.assigned_agent, status=ResultStatus.FAILED,
+                    output_type="CapabilityResult", data=None,
+                    error={"code": kind, "message": str(exc), "component": task.assigned_agent,
+                           "retryable": False if kind == "structured_output_failure" else True},
+                    focus_refs=task.focus_refs, summary="Worker执行失败。", warnings=[f"{type(exc).__name__}:{exc}"],
+                    completion=non_success_completion_report(task, execution_status="failed", reason=str(exc), failure_kind=kind))
 
-        try:
-            if task.assigned_agent == EVIDENCE_COLLECTOR:
-                result = run_evidence(
-                    self.worker_tool_dag_runtime, task, current_user_request,
-                    output_dir, db_path, default_top_k,
-                    worker_prompt=str(card.private_worker_prompt or ""),
-                    allowed_tool_names=allowed_tools,
-                )
-            elif task.assigned_agent == PORTFOLIO_ANALYST:
-                result = run_internal_system(
-                    self.worker_tool_dag_runtime, task, output_dir, db_path, default_top_k,
-                    worker_prompt=str(card.private_worker_prompt or ""),
-                    allowed_tool_names=allowed_tools,
-                    provider=self.provider,
-                )
-            elif task.assigned_agent == DATABASE_WRITER:
-                result = run_graph_context(
-                    self.worker_tool_executor, task, output_dir, db_path,
-                    resolved_inputs=resolved_inputs,
-                )
-            elif task.assigned_agent == ENTITY_ANALYST:
-                result = run_entity_analysis(
-                    self.llm_service, task,
-                    resolved_inputs=resolved_inputs, language=language,
-                )
-            elif task.assigned_agent == GRAPH_RELATION_RETRIEVER:
-                result = run_graph_impact(
-                    self.worker_tool_dag_runtime, task,
-                    resolved_inputs=resolved_inputs,
-                    worker_prompt=str(card.private_worker_prompt or ""),
-                    allowed_tool_names=allowed_tools,
-                    output_dir=output_dir,
-                    db_path=db_path,
-                )
-            elif task.assigned_agent == RISK_ANALYST:
-                result = run_risk(
-                    self.llm_service, self.worker_tool_dag_runtime, task,
-                    output_dir, db_path,
-                    resolved_inputs=resolved_inputs,
-                    worker_prompt=str(card.private_worker_prompt or ""),
-                    allowed_tool_names=allowed_tools,
-                    language=language,
-                )
-            elif task.assigned_agent == STRATEGY_GUARD:
-                result = run_strategy_guard(
-                    self.llm_service, task,
-                    current_user_request=current_user_request,
-                    resolved_inputs=resolved_inputs,
-                    output_dir=output_dir,
-                    db_path=db_path,
-                    default_top_k=default_top_k,
-                    language=language,
-                    execution_context=context,
-                )
-            elif task.assigned_agent == REPORT_WRITER:
-                result = run_report_writer(
-                    self.llm_service, task, language,
-                    resolved_inputs=resolved_inputs,
-                )
-            elif task.assigned_agent == SYSTEM_DIAGNOSTIC:
-                result = run_diagnostic(self.provider, task)
-            else:
-                raise RuntimeError(f"unknown_worker_agent:{task.assigned_agent}")
-        except Exception as exc:
-            exc_name = type(exc).__name__
-            structured_output_failure = exc_name == "LLMJSONError" or "json" in exc_name.lower()
-            failure_kind = (
-                "structured_output_failure"
-                if structured_output_failure
-                else "worker_execution_failure"
-            )
-            result = GraphWorkerResult(
-                task_id=task.task_id,
-                agent_id=task.assigned_agent,
-                status=ResultStatus.FAILED,
-                output_type="CapabilityResult",
-                data=None,
-                error={
-                    "code": failure_kind,
-                    "message": str(exc),
-                    "component": task.assigned_agent,
-                    "retryable": False if structured_output_failure else True,
-                    "local_recovery_exhausted": bool(structured_output_failure),
-                },
-                focus_refs=task.focus_refs,
-                summary=(
-                    "Worker结构化输出修复失败。"
-                    if structured_output_failure and language != "en"
-                    else "Worker structured-output recovery failed."
-                    if structured_output_failure
-                    else "Worker 执行失败."
-                    if language != "en"
-                    else "Worker execution failed."
-                ),
-                warnings=[f"{exc_name}:{exc}"],
-                completion=non_success_completion_report(
-                    task,
-                    execution_status="failed",
-                    reason=str(exc),
-                    failure_kind=failure_kind,
-                ),
-                metadata={
-                    "main_agent_replan_recommended": not structured_output_failure,
-                    "structured_output_local_recovery": (
-                        "exhausted" if structured_output_failure else ""
-                    ),
-                },
-            )
-
-        produced = self._produced_slots(task, result)
-        result.metadata.update({
-            "boundary_id": task.boundary_id,
-            "attempt": task.attempt,
-            "resolved_input_slots": sorted(resolved_inputs),
-            "produced_information_slots": produced,
-        })
+        published = [] if reused is not None else self._publish_business_data(task, result)
+        values, produced = self._produced_data(result)
+        result.metadata.update({"boundary_id": task.boundary_id, "attempt": task.attempt,
+            "business_data_owner": "ContextBundle", "produced_data_names": produced,
+            "working_memory_records_published": len(published), "can_mutate": bool(card.can_mutate)})
         if not result.completion:
-            result.completion = runtime_completion_report(
-                task,
-                result_status=result.status,
-                output_type=result.output_type,
-                data=result.data,
-                error=result.error,
-            )
-
+            result.completion = runtime_completion_report(task, result_status=result.status, output_type=result.output_type,
+                                                          data=result.data, error=result.error)
         contracts = [CapabilityContract.from_dict(item) for item in task.contracts]
-        materialized_slots = (
-            dict((result.data or {}).get("slots") or {})
-            if isinstance(result.data, dict) and isinstance((result.data or {}).get("slots"), dict)
-            else {}
-        )
-        contract_reports = self.contract_validator.validate(
-            contracts=contracts,
-            produced_slots=set(produced),
-            materialized_slots=materialized_slots,
-            result_status=result.status.value,
-            result_payload=result.data,
-            evidence_refs=[ref.node_id for ref in result.evidence_refs] or [f"worker_result:{task.task_id}"],
-        )
-        result.status, result.completion, satisfied = canonicalize_completion_report(
-            task,
-            result_status=result.status,
-            completion=result.completion,
-            contract_reports=contract_reports,
-            produced_slots=produced,
-            result_data=result.data,
-        )
+        reports = self.contract_validator.validate(contracts=contracts, produced_data_names=set(produced),
+            materialized_data=values, result_status=result.status.value, result_payload=result.data,
+            evidence_refs=[ref.node_id for ref in result.evidence_refs] or [f"worker_result:{task.task_id}"])
+        result.status, result.completion, satisfied = canonicalize_completion_report(task, result_status=result.status,
+            completion=result.completion, contract_reports=reports, produced_data_names=produced, result_data=result.data)
         if satisfied:
-            # Contract validation is authoritative. Clear stale local errors or
-            # limitations left by an unnecessary Tool-DAG replan.
             result.error = None
             result.missing_items = []
-            result.warnings = [
-                item for item in result.warnings
-                if not str(item).startswith((
-                    "worker_local_handling_exhausted",
-                    "worker_private_tool_exhausted",
-                ))
-            ]
-            if "未能完成" in result.summary or "failed" in result.summary.lower():
-                result.summary = "Worker已完成合同要求的信息槽位。"
-        decision = flow_decision(
-            result.status,
-            result.completion,
-            output_type=result.output_type,
-            retryable=bool((result.error or {}).get("retryable")),
-        )
+        decision = flow_decision(result.status, result.completion, output_type=result.output_type,
+                                 retryable=bool((result.error or {}).get("retryable")))
         result.status = decision.result_status
-        result.metadata.update({
-            "semantic_satisfied": decision.semantic_satisfied,
-            "should_freeze": decision.should_freeze,
-            "reusable": decision.reusable,
-            "replan_recommended": decision.replan_recommended,
-            "failure_kind": decision.failure_kind,
-            "freeze_reason": decision.freeze_reason,
-        })
-
+        result.metadata.update({"semantic_satisfied": decision.semantic_satisfied, "should_freeze": decision.should_freeze,
+            "reusable": decision.reusable, "replan_recommended": decision.replan_recommended,
+            "failure_kind": decision.failure_kind, "freeze_reason": decision.freeze_reason})
         escalation = escalation_from_worker_result(task, result)
         if escalation is not None:
-            # Worker-local recovery is already exhausted at this point. Preserve
-            # whether the owning Worker considers a MainAgent-level retry useful
-            # before replacing the public error with the safe escalation contract.
-            result.metadata["worker_escalation_retryable"] = bool(
-                (result.error or {}).get("retryable")
-            )
-            # Private Tool/LLM details stay private. MainAgent receives only this
-            # capability-level error contract, never raw arguments or traces.
+            result.metadata["worker_escalation_retryable"] = bool((result.error or {}).get("retryable"))
             result.error = escalation.to_dict()
             result.metadata["worker_escalation"] = escalation.to_dict()
 
@@ -521,44 +304,21 @@ class SpecialistRuntime:
         tool_timing = get_tool_execution_timing(task.run_id, task.task_id)
         result.metadata["llm_execution_timing"] = llm_timing
         result.metadata["tool_execution_timing"] = tool_timing
-        result.metadata["unattributed_worker_execution_ms"] = round(max(
-            0.0,
-            float(result.metadata["duration_ms"])
-            - float(llm_timing.get("provider_transport_ms_sum") or 0.0)
-            - float(tool_timing.get("wall_duration_ms") or 0.0),
-        ), 3)
-
-        publish_agent_message(
-            output_dir=output_dir,
-            user_id=task.user_id,
-            conversation_id=task.session_id,
-            run_id=task.run_id,
-            task_id=task.task_id,
-            sender=task.assigned_agent,
-            receiver="COORDINATOR",
+        result.metadata["unattributed_worker_execution_ms"] = round(max(0.0, float(result.metadata["duration_ms"])
+            - float(llm_timing.get("provider_transport_ms_sum") or 0.0) - float(tool_timing.get("wall_duration_ms") or 0.0)), 3)
+        publish_agent_message(output_dir=output_dir, user_id=task.user_id, conversation_id=task.session_id,
+            run_id=task.run_id, task_id=task.task_id, sender=task.assigned_agent, receiver="COORDINATOR",
             message_type=MessageType.WORKER_RESULT_AVAILABLE,
-            payload={
-                "status": result.status.value,
-                "output_type": result.output_type,
-                "summary": result.summary[:500],
-                "boundary_id": task.boundary_id,
-                "produced_information_slots": produced,
-                "expected_task_completed": bool(result.completion.get("expected_task_completed")),
-            },
-            payload_schema="capability_worker_result_available.v1",
-            context_refs=[ref.to_dict() for ref in result.focus_refs[:20]],
-            artifact_refs=list(result.artifact_refs[:20]),
-            source_refs=[ref.to_dict() for ref in result.evidence_refs[:20]],
-            warnings=list(result.warnings[:10]),
-            error=dict(result.error or {}),
-            metadata={"worker_id": task.worker_id, "boundary_id": task.boundary_id},
-        )
-        task.status = (
-            TaskStatus.COMPLETED if result.status in {ResultStatus.COMPLETED, ResultStatus.PROPOSAL_READY}
+            payload={"status": result.status.value, "output_type": result.output_type, "summary": result.summary[:500],
+                     "boundary_id": task.boundary_id, "produced_data_names": produced,
+                     "expected_task_completed": bool(result.completion.get("expected_task_completed"))},
+            payload_schema="capability_worker_result_available.v2", context_refs=[ref.to_dict() for ref in result.focus_refs[:20]],
+            artifact_refs=list(result.artifact_refs[:20]), source_refs=[ref.to_dict() for ref in result.evidence_refs[:20]],
+            warnings=list(result.warnings[:10]), error=dict(result.error or {}),
+            metadata={"worker_id": task.worker_id, "boundary_id": task.boundary_id})
+        task.status = (TaskStatus.COMPLETED if result.status in {ResultStatus.COMPLETED, ResultStatus.PROPOSAL_READY}
             else TaskStatus.PARTIAL if result.status == ResultStatus.PARTIAL
-            else TaskStatus.WAITING_CONTEXT if result.status == ResultStatus.NEED_CONTEXT
-            else TaskStatus.FAILED
-        )
+            else TaskStatus.WAITING_CONTEXT if result.status == ResultStatus.NEED_CONTEXT else TaskStatus.FAILED)
         return result
 
 

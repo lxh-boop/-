@@ -10,7 +10,8 @@ from agent.tool_dag import WorkerToolDagRuntime
 
 from ..completion import runtime_completion_report
 from ..models import GraphAgentTask, GraphWorkerResult, ResultStatus
-from .common import contract_acceptance_rules, contract_output_slots, execution_safe_value, safe_public_value
+from agent.capabilities.data_names import LEGACY_OUTPUT_NAME_MAP
+from .common import contract_acceptance_rules, contract_output_data_names, execution_safe_value, safe_public_value
 
 
 
@@ -39,21 +40,22 @@ def _available_context(
     return context
 
 
-def _publish_slots(task: GraphAgentTask, dag_result: Any) -> tuple[dict[str, Any], list[str], list[str]]:
-    wanted = set(contract_output_slots(task))
-    slots: dict[str, Any] = {}
+def _publish_business_data(task: GraphAgentTask, dag_result: Any) -> tuple[dict[str, Any], list[str], list[str]]:
+    wanted = set(contract_output_data_names(task))
+    business_data: dict[str, Any] = {}
     warnings: list[str] = []
     for tool_result in list(getattr(dag_result, "final_results", []) or []):
         data = execution_safe_value(dict(getattr(tool_result, "data", {}) or {}))
-        semantic_slots = data.get("slots") if isinstance(data.get("slots"), dict) else {}
-        for slot, value in semantic_slots.items():
-            if str(slot) in wanted:
-                slots[str(slot)] = execution_safe_value(value)
+        tool_data = data.get("business_data") if isinstance(data.get("business_data"), dict) else data.get("slots") if isinstance(data.get("slots"), dict) else {}
+        for raw_name, value in tool_data.items():
+            name = LEGACY_OUTPUT_NAME_MAP.get(str(raw_name), str(raw_name))
+            if name in wanted:
+                business_data[name] = execution_safe_value(value)
         warnings.extend(str(item) for item in getattr(tool_result, "warnings", []) or [] if str(item))
         warnings.extend(str(item) for item in getattr(tool_result, "errors", []) or [] if str(item))
-    produced = [slot for slot in contract_output_slots(task) if slot in slots]
-    missing = [slot for slot in contract_output_slots(task) if slot not in slots]
-    return slots, produced, list(dict.fromkeys([*warnings, *missing]))
+    produced = [name for name in contract_output_data_names(task) if name in business_data]
+    missing = [name for name in contract_output_data_names(task) if name not in business_data]
+    return business_data, produced, list(dict.fromkeys([*warnings, *missing]))
 
 
 def run_internal_system(
@@ -68,7 +70,7 @@ def run_internal_system(
     provider: Any = None,
 ) -> GraphWorkerResult:
     del provider
-    required_outputs = contract_output_slots(task)
+    required_outputs = contract_output_data_names(task)
     available_context = _available_context(task, default_top_k=default_top_k)
     dag_result = tool_dag_runtime.run(
         worker_task_id=task.task_id,
@@ -93,15 +95,15 @@ def run_internal_system(
         read_only=True,
         max_replans=1,
     )
-    slots, produced, warnings = _publish_slots(task, dag_result)
-    success = bool(dag_result.success and not [slot for slot in required_outputs if slot not in produced])
+    business_data, produced, warnings = _publish_business_data(task, dag_result)
+    success = bool(dag_result.success and not [name for name in required_outputs if name not in produced])
     status = ResultStatus.COMPLETED if success else ResultStatus.PARTIAL if produced else ResultStatus.FAILED
     payload = {
         "boundary_id": task.boundary_id,
-        "slots": slots,
-        "produced_information_slots": produced,
-        "missing_information_slots": [slot for slot in required_outputs if slot not in produced],
-        "business_empty": bool(produced and all(value in ({}, [], None) for value in slots.values())),
+        "business_data": business_data,
+        "produced_data_names": produced,
+        "missing_data_names": [name for name in required_outputs if name not in produced],
+        "business_empty": bool(produced and all(value in ({}, [], None, "") for value in business_data.values())),
     }
     result = GraphWorkerResult(
         task_id=task.task_id,
@@ -113,7 +115,7 @@ def run_internal_system(
         data=payload if produced else None,
         error=None if produced else {
             "code": "internal_capability_tool_dag_failed",
-            "message": "W02 私有 Tool DAG 未产生合同承诺的信息槽位。",
+            "message": "W02 私有 Tool DAG 未产生合同承诺的业务数据。",
             "component": task.assigned_agent,
             "retryable": True,
         },
@@ -122,13 +124,13 @@ def run_internal_system(
             "已通过 W02 私有 Tool DAG 读取内部权威事实。"
             if produced else "内部权威事实读取失败。"
         ),
-        findings=[{"kind": "capability_slots", "slots": produced}],
+        findings=[{"kind": "capability_business_data", "data_names": produced}],
         confidence=1.0 if success else 0.6 if produced else 0.0,
         warnings=warnings,
         metadata={
             "boundary_id": task.boundary_id,
             "tool_dag_task_count": len(getattr(getattr(dag_result, "plan", None), "tasks", []) or []),
-            "produced_information_slots": produced,
+            "produced_data_names": produced,
         },
     )
     result.completion = runtime_completion_report(

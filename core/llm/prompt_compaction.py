@@ -216,17 +216,17 @@ def _compact_semantic_inputs_schema(value: Any) -> Any:
 def planning_catalog_for_prompt(
     catalog: Any,
     *,
-    request_mode: str,
+    effect_limit: str,
 ) -> list[dict[str, Any]]:
-    """Create a smaller but semantically equivalent MainAgent catalog.
+    """Create a smaller MainAgent catalog constrained by side-effect level.
 
-    Capabilities that cannot legally pass the existing request-mode/access
-    validators are omitted. This does not choose a Worker: the LLM still owns
-    Worker selection, task parameters, and all semantic DAG edges among every
-    capability that is valid for the current request mode.
+    RequestBundle is the semantic entry authority.  This helper therefore
+    filters only by ``effect_limit``/access boundaries and has no routing-mode
+    compatibility semantics.
     """
 
-    mode = str(request_mode or "analysis").strip().lower()
+    request_limit = "proposal" if str(effect_limit or "read").strip().lower() == "proposal" else "read"
+    effect_order = {"read": 0, "proposal": 1, "write": 2}
     compact_workers: list[dict[str, Any]] = []
     for raw_worker in list(catalog or []):
         worker = catalog_for_prompt(raw_worker)
@@ -240,12 +240,8 @@ def planning_catalog_for_prompt(
             if not isinstance(raw_task, dict):
                 continue
             task = dict(raw_task)
-            allowed_modes = {
-                str(item).strip().lower()
-                for item in task.get("allowed_request_modes") or []
-                if str(item).strip()
-            }
-            if allowed_modes and mode not in allowed_modes:
+            task_effect = str(task.get("effect_limit") or task.get("max_effect_level") or "read").lower()
+            if effect_order.get(task_effect, 99) > effect_order[request_limit]:
                 continue
             if str(task.get("access_mode") or "read").lower() == "write":
                 continue
@@ -405,11 +401,11 @@ def coordinator_result_for_replan(value: Any) -> dict[str, Any]:
         "output_type": str(result.get("output_type") or ""),
         "summary": str(result.get("summary") or "")[:500],
         "confidence": result.get("confidence", 0.0),
-        "produced_information_slots": list(
-            completion.get("produced_information_slots") or []
+        "produced_data_names": list(
+            completion.get("produced_data_names") or []
         ),
-        "missing_information_slots": list(
-            completion.get("missing_information_slots") or []
+        "missing_data_names": list(
+            completion.get("missing_data_names") or []
         ),
         "execution_status": str(completion.get("execution_status") or ""),
         "contract_status": str(completion.get("contract_status") or ""),
@@ -447,11 +443,11 @@ def observation_for_replan(value: Any) -> dict[str, Any]:
         "contract_valid": bool(row.get("contract_valid")),
         "completion_report_valid": bool(row.get("completion_report_valid")),
         "semantic_satisfied": bool(row.get("semantic_satisfied")),
-        "produced_information_slots": list(
-            row.get("produced_information_slots") or []
+        "produced_data_names": list(
+            row.get("produced_data_names") or []
         ),
-        "missing_information_slots": list(
-            row.get("missing_information_slots") or []
+        "missing_data_names": list(
+            row.get("missing_data_names") or []
         ),
         "failure_kind": str(row.get("failure_kind") or ""),
         "retryable": bool(row.get("retryable")),

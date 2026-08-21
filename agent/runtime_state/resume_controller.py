@@ -34,6 +34,6 @@ class ResumeController:
     ) -> RunCheckpoint:
         supplied = set(str(key) for key in supplied_parameters)
         checkpoint.missing_parameters = [key for key in checkpoint.missing_parameters if key not in supplied]
-        if not checkpoint.missing_parameters and not checkpoint.missing_context_slots:
+        if not checkpoint.missing_parameters and not checkpoint.missing_context:
             checkpoint.status = "running"
         return self.store.save(checkpoint)

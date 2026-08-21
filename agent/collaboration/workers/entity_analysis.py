@@ -1,36 +1,18 @@
-"""Analyze financial entities from completed upstream evidence and fact results."""
-
+"""W09 financial-entity analysis from the current ContextBundle working memory."""
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from core.llm import LLMService
 from core.llm.contracts import LLMJSONError
 from core.llm.prompt_compaction import compact_json_dumps, schema_for_prompt
 
-from ..completion import build_completion_report
+from ..completion import build_completion_report, non_success_completion_report
 from ..models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus
 from ..worker_contracts import array_schema, object_schema, string_schema, validate_schema
-from .common import execution_safe_value, materialize_promised_slots, safe_public_value
-from .slot_inputs import contract_input_slot_ids, slot_envelopes
+from .common import execution_safe_value, materialize_promised_data, safe_public_value
 from .structured_output import generate_json_with_local_structural_repair
 
-
-_CLAIM_LIST_FIELDS = ("facts", "analysis", "uncertainties")
-
-
-_CANONICAL_EVIDENCE_SLOT = "entity_external_evidence"
-_SOURCE_RECORDS_SLOT = "evidence_source_records"
-_EVIDENCE_VIEW_PREFIX = "evidence."
-
-
-def _is_evidence_slot(slot_id: str) -> bool:
-    return slot_id in {_CANONICAL_EVIDENCE_SLOT, _SOURCE_RECORDS_SLOT} or slot_id.startswith(_EVIDENCE_VIEW_PREFIX)
-
-
-_MAX_EVIDENCE_RECORDS_PER_ENTITY = 12
-_MAX_RECORD_TEXT_CHARS = 700
 _MAX_PRIMARY_OUTPUT_TOKENS = 2600
 _MAX_REPAIR_OUTPUT_TOKENS = 2200
 _MAX_REPAIR_INPUT_CHARS = 12000
@@ -41,371 +23,96 @@ def _claim_schema() -> dict[str, Any]:
         {
             "claim_id": string_schema(min_length=1, max_length=80),
             "statement": string_schema(min_length=1, max_length=320),
-            "source_task_ids": array_schema(
-                string_schema(min_length=1, max_length=80), max_items=8
-            ),
         },
-        required=["claim_id", "statement", "source_task_ids"],
+        required=["claim_id", "statement"],
         additional_properties=False,
     )
 
 
-def _entity_analysis_llm_schema() -> dict[str, Any]:
+def _analysis_schema() -> dict[str, Any]:
     claim = _claim_schema()
     return object_schema(
         {
-            "entity_refs": array_schema(
-                object_schema({}, additional_properties=True), max_items=8
-            ),
-            "facts": array_schema(claim, max_items=8),
-            "analysis": array_schema(claim, max_items=6),
-            "uncertainties": array_schema(claim, max_items=4),
-            "conclusion": string_schema(max_length=500),
-            "source_task_ids": array_schema(
-                string_schema(min_length=1, max_length=80), max_items=20
-            ),
+            "context_sufficient": {"type": "boolean"},
+            "missing_information": array_schema(string_schema(min_length=1, max_length=160), max_items=8),
+            "facts": array_schema(claim, max_items=10),
+            "analysis": array_schema(claim, max_items=8),
+            "uncertainties": array_schema(claim, max_items=6),
+            "conclusion": string_schema(max_length=600),
         },
-        required=[
-            "entity_refs",
-            "facts",
-            "analysis",
-            "uncertainties",
-            "conclusion",
-            "source_task_ids",
-        ],
+        required=["context_sufficient", "missing_information", "facts", "analysis", "uncertainties", "conclusion"],
         additional_properties=False,
     )
 
 
-def _resolved_items(
-    task: GraphAgentTask,
-    resolved_inputs: dict[str, Any] | None,
-) -> list[dict[str, Any]]:
-    """Project only contract-declared SlotBinder inputs that are actually present."""
-
-    return slot_envelopes(
-        task,
-        resolved_inputs,
-        include_slots=contract_input_slot_ids(task),
-    )
-
-
-def _trim_text(value: Any, *, limit: int = _MAX_RECORD_TEXT_CHARS) -> str:
-    return str(value or "")[:limit]
-
-
-def _compact_record(row: dict[str, Any]) -> dict[str, Any]:
-    """Keep only grounded fields needed for analysis and structured attribution."""
-
-    wanted = (
-        "canonical_id",
-        "source_ids",
-        "retrieved_by",
-        "chunk_id",
-        "news_id",
-        "source_id",
-        "source_type",
-        "provider_type",
-        "source",
-        "title",
-        "section_title",
-        "publish_time",
-        "trade_date",
-        "date",
-        "url",
-        "event_type",
-        "sentiment",
-        "importance_score",
-        "is_announcement",
-        "relevance_score",
-        "mapping_confidence",
-        "impact_direction",
-        "impact_strength",
-        "impact_confidence",
-        "score",
-        "merged_record_count",
-        "text_source_field",
-        "text_original_chars",
-        "text_truncated",
-    )
-    compact = {
-        key: safe_public_value(row.get(key))
-        for key in wanted
-        if row.get(key) not in (None, "", [], {})
-    }
-    text = row.get("text") or row.get("content") or row.get("summary")
-    if text not in (None, ""):
-        compact["text"] = _trim_text(text)
-    return compact
-
-
-def _compact_evidence_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    results: list[dict[str, Any]] = []
-    for item in list(payload.get("results") or [])[:20]:
-        if not isinstance(item, dict):
-            continue
-        results.append(
-            {
-                "focus_ref": safe_public_value(item.get("focus_ref") or {}),
-                "source_names": [str(value) for value in item.get("source_names") or []][:10],
-                "records": [
-                    _compact_record(row)
-                    for row in list(item.get("records") or [])[:_MAX_EVIDENCE_RECORDS_PER_ENTITY]
-                    if isinstance(row, dict)
-                ],
-                "sources": [
-                    _compact_record(row)
-                    for row in list(item.get("sources") or [])[:12]
-                    if isinstance(row, dict)
-                ],
-                "warnings": [str(value)[:500] for value in item.get("warnings") or []][:10],
-                "errors": [str(value)[:500] for value in item.get("errors") or []][:10],
-            }
-        )
-    return {
-        "entity_refs": safe_public_value(payload.get("entity_refs") or []),
-        "entity_catalog": safe_public_value(payload.get("entity_catalog") or []),
-        "collection_goal": _trim_text(payload.get("collection_goal"), limit=800),
-        "results": results,
-        "record_count": int(payload.get("record_count") or 0),
-        "source_count": int(payload.get("source_count") or 0),
-        "deduplication": safe_public_value(payload.get("deduplication") or {}),
-        "coverage": safe_public_value(payload.get("coverage") or {}),
-        "business_empty": bool(payload.get("business_empty", False)),
-    }
-
-
-def _compact_payload(slot_id: str, payload: Any) -> Any:
-    if not isinstance(payload, dict):
-        return safe_public_value(payload)
-    if _is_evidence_slot(slot_id):
-        return _compact_evidence_payload(payload)
-    # Internal fact results are already structured and normally much smaller.
-    encoded = json.dumps(execution_safe_value(payload), ensure_ascii=False, default=str)
-    if len(encoded) <= 16000:
-        return execution_safe_value(payload)
-    return {
-        "truncated": True,
-        "summary": encoded[:15000],
-    }
-
-
-def _claim_text(item: dict[str, Any]) -> str:
-    return str(item.get("statement") or item.get("text") or item.get("summary") or "").strip()
-
-
-def _claim_source_ids(item: dict[str, Any]) -> list[str]:
-    values = item.get("source_task_ids")
-    if not isinstance(values, list):
-        single = str(item.get("source_task_id") or "").strip()
-        values = [single] if single else []
-    return [str(value).strip() for value in values if str(value).strip()]
-
-
-def _authoritative_entity_refs(
-    task: GraphAgentTask,
-    evidence_items: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    refs = [ref.to_dict() for ref in task.focus_refs if getattr(ref, "node_id", "")]
-    if refs:
-        return safe_public_value(refs)
-    rows: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in evidence_items:
-        payload = item.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        for ref in payload.get("entity_refs") or []:
-            if not isinstance(ref, dict):
-                continue
-            node_id = str(ref.get("node_id") or "")
-            if node_id and node_id not in seen:
-                seen.add(node_id)
-                rows.append(safe_public_value(ref))
-    return rows
-
-
-def _authoritative_entity_catalog(
-    task: GraphAgentTask,
-    evidence_items: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    catalog = task.metadata.get("authoritative_entity_catalog")
-    if isinstance(catalog, list) and all(isinstance(item, dict) for item in catalog):
-        return safe_public_value(catalog)
-    rows: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in evidence_items:
-        payload = item.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        for descriptor in payload.get("entity_catalog") or []:
-            if not isinstance(descriptor, dict):
-                continue
-            node_id = str(descriptor.get("node_id") or descriptor.get("entity_ref", {}).get("node_id") or "")
-            if node_id and node_id not in seen:
-                seen.add(node_id)
-                rows.append(safe_public_value(descriptor))
-    return rows
+def _validate_analysis(payload: dict[str, Any]) -> None:
+    validate_schema(payload, _analysis_schema())
+    for field in ("facts", "analysis", "uncertainties"):
+        seen: set[str] = set()
+        for index, item in enumerate(payload.get(field) or []):
+            claim_id = str(item.get("claim_id") or "").strip()
+            if not claim_id:
+                raise RuntimeError(f"entity_analysis_{field}_claim_id_required:{index}")
+            if claim_id in seen:
+                raise RuntimeError(f"entity_analysis_duplicate_claim_id:{claim_id}")
+            seen.add(claim_id)
+            if not str(item.get("statement") or "").strip():
+                raise RuntimeError(f"entity_analysis_{field}_statement_required:{index}")
 
 
 def run_entity_analysis(
     llm_service: LLMService,
     task: GraphAgentTask,
     *,
-    resolved_inputs: dict[str, Any] | None = None,
+    working_memory_context: dict[str, Any] | None = None,
     language: str = "zh",
 ) -> GraphWorkerResult:
+    """Analyze only the supplied target-entity working memory.
 
-    items = _resolved_items(task, resolved_inputs)
-    evidence_items = [item for item in items if _is_evidence_slot(str(item.get("slot_id") or ""))]
-
-    canonical_source_task_ids = {
-        str(source_id)
-        for item in items
-        if str(item.get("slot_id") or "") == _CANONICAL_EVIDENCE_SLOT
-        for source_id in item.get("source_task_ids") or []
-        if str(source_id)
-    }
-    safe_items: list[dict[str, Any]] = []
-    suppressed_redundant_evidence_slots: list[str] = []
-    for item in items:
-        slot_id = str(item.get("slot_id") or "")
-        source_task_ids = [str(value) for value in item.get("source_task_ids") or [] if str(value)]
-        payload = item.get("payload")
-        if (
-            slot_id != _CANONICAL_EVIDENCE_SLOT
-            and _is_evidence_slot(slot_id)
-            and set(source_task_ids).intersection(canonical_source_task_ids)
-        ):
-            # Derivative evidence views are valid runtime Slots, but when the same
-            # upstream task also supplies the canonical collection they do not add
-            # independent facts for W09. Runtime has already validated/materialized
-            # them; omit their repeated record bodies from the analysis prompt.
-            suppressed_redundant_evidence_slots.append(slot_id)
-            continue
-        compact_payload = _compact_payload(slot_id, payload)
-        safe_items.append({
-            "slot_id": slot_id,
-            "source_task_ids": source_task_ids,
-            "status": str(item.get("status") or "available"),
-            "payload": compact_payload,
-        })
-    known_source_task_ids = {
-        str(source_id)
-        for item in safe_items
-        for source_id in item.get("source_task_ids") or []
-        if str(source_id)
-    }
-
-    output_schema = _entity_analysis_llm_schema()
-
-    def validate(payload: dict[str, Any]) -> None:
-        validate_schema(payload, output_schema)
-        required = ["entity_refs", *_CLAIM_LIST_FIELDS, "conclusion", "source_task_ids"]
-        missing = [key for key in required if key not in payload]
-        if missing:
-            raise RuntimeError(f"entity_analysis_missing_fields:{','.join(missing)}")
-        if not isinstance(payload.get("entity_refs"), list) or any(
-            not isinstance(item, dict) for item in payload.get("entity_refs") or []
-        ):
-            raise RuntimeError("entity_analysis_entity_refs_must_be_object_array")
-        seen_claim_ids: set[str] = set()
-        for field in _CLAIM_LIST_FIELDS:
-            values = payload.get(field)
-            if not isinstance(values, list):
-                raise RuntimeError(f"entity_analysis_{field}_must_be_array")
-            for index, item in enumerate(values):
-                if not isinstance(item, dict):
-                    raise RuntimeError(
-                        f"entity_analysis_{field}_item_must_be_object:{index}"
-                    )
-                claim_id = str(item.get("claim_id") or "").strip()
-                if not claim_id:
-                    raise RuntimeError(f"entity_analysis_{field}_claim_id_required:{index}")
-                if claim_id in seen_claim_ids:
-                    raise RuntimeError(f"entity_analysis_duplicate_claim_id:{claim_id}")
-                seen_claim_ids.add(claim_id)
-                if not _claim_text(item):
-                    raise RuntimeError(
-                        f"entity_analysis_{field}_statement_required:{index}"
-                    )
-                source_ids = _claim_source_ids(item)
-                if field != "uncertainties" and not source_ids:
-                    raise RuntimeError(
-                        f"entity_analysis_{field}_source_task_ids_required:{index}"
-                    )
-                unknown = sorted(set(source_ids) - known_source_task_ids)
-                if unknown:
-                    raise RuntimeError(
-                        f"entity_analysis_unknown_source_task_ids:{field}:{index}:{','.join(unknown)}"
-                    )
-        source_task_ids = payload.get("source_task_ids")
-        if not isinstance(source_task_ids, list) or any(
-            not isinstance(item, str) for item in source_task_ids
-        ):
-            raise RuntimeError("entity_analysis_source_task_ids_must_be_string_array")
-        unknown_overall = sorted(set(source_task_ids) - known_source_task_ids)
-        if unknown_overall:
-            raise RuntimeError(
-                "entity_analysis_unknown_overall_source_task_ids:"
-                + ",".join(unknown_overall)
-            )
-        if not isinstance(payload.get("conclusion"), str):
-            raise RuntimeError("entity_analysis_conclusion_must_be_string")
+    W09 never sees producer Worker/Tool/Request identities. It decides whether
+    the available business data is sufficient for the concrete analysis goal.
+    """
+    context = execution_safe_value(dict(working_memory_context or {}))
+    authoritative_refs = [ref.to_dict() for ref in task.focus_refs]
+    available_names = [str(x) for x in context.get("available_names") or [] if str(x)]
+    output_schema = _analysis_schema()
 
     system = (
-        "你是W09结构化实体分析Worker。你只处理本任务实际绑定并物化给你的信息Slot，"
-        "这些Slot就是你完整的工作世界；不要猜测、枚举或评价未绑定的信息、Worker、Tool、数据源或潜在分析维度。"
-        "你的职责是把收到的结构化输入融合为通用facts、analysis、uncertainties和conclusion。"
-        "不同来源的数据都统一融合进这些通用字段，不要按系统内部能力域创建固定输出栏目。"
-        "不得自行检索、查询数据库、解析新实体或补造输入中不存在的事实、数值、风险、建议和因果关系。"
-        "每个非空claim必须有唯一claim_id、statement和source_task_ids，且source_task_ids只能引用本次实际输入的上游任务。"
-        "uncertainties只能描述实际输入内容本身存在的不确定性，不得把未收到的信息描述成缺口。"
-        "只输出业务分析JSON，不输出completion_report；完成度和合同验收由Runtime负责。只输出JSON，不生成面向用户的完整自然语言报告。"
+        "你是W09金融实体分析Worker。你只负责分析已确定身份的目标金融实体。Runtime已经把本轮ContextBundle中属于这些实体的已查询业务数据整理在working_memory中。"
+        "你不需要也不得判断数据来自哪个Worker、Tool、RAG或Request，不自行检索，也不指定下一步应调用谁。"
+        "标签存在代表该查询/生成已经成功结束；即使值为空，也代表已查询但结果为空。"
+        "你必须根据具体analysis_goal自行判断现有数据的质量和充分性。若不足，context_sufficient=false，只说明缺什么业务信息以及原因；不要输出无依据分析。"
+        "若足够，严格区分facts、analysis、uncertainties，并且不得引入working_memory中不存在的业务事实。只输出JSON。"
+        if language != "en" else
+        "You are W09, a financial entity-analysis Worker. Analyze only the resolved target entities using the supplied ContextBundle working memory. "
+        "Do not care which Worker, Tool, RAG flow, or Request produced the data. Do not retrieve more data or select another Worker. "
+        "An existing data name means the operation completed even when its value is empty. Judge data quality and sufficiency for the specific analysis goal yourself. "
+        "If insufficient, set context_sufficient=false and state only what business information is missing. Return JSON only."
     )
-    if language == "en":
-        system = (
-            "You are W09, a structured entity-analysis Worker. Process only the information slots actually bound and materialized for this task; those slots are your entire working world. "
-            "Do not infer, enumerate, or evaluate unbound information, Workers, Tools, data sources, or hypothetical analysis dimensions. "
-            "Fuse supplied structured inputs into generic facts, analysis, uncertainties, and a conclusion. Do not create fixed output categories based on internal capability domains. "
-            "Do not retrieve data, query databases, resolve new entities, or invent facts, numbers, risks, recommendations, or causal claims. Every non-empty claim must cite only source_task_ids attached to actual inputs. "
-            "Uncertainties may describe uncertainty inside supplied information only. Return JSON only."
-        )
-
-
-    generation_messages = [
+    messages = [
         {"role": "system", "content": system},
-        {
-            "role": "user",
-            "content": compact_json_dumps(
-                {
-                    "analysis_goal": str(task.args.get("analysis_goal") or task.objective),
-                    "comparison_mode": len(task.focus_refs) > 1,
-                    "allowed_source_task_ids": sorted(known_source_task_ids),
-                    "bound_input_slot_ids": sorted(str(item.get("slot_id") or "") for item in safe_items),
-                    "authoritative_entity_refs": _authoritative_entity_refs(task, evidence_items),
-                    "authoritative_entity_catalog": _authoritative_entity_catalog(task, evidence_items),
-                    "bound_information_slots": safe_items,
-                    "entity_analysis_output_schema": schema_for_prompt(output_schema),
-                    "reply_language": language,
-                },
-            ),
-        },
+        {"role": "user", "content": compact_json_dumps({
+            "analysis_goal": str(task.args.get("analysis_goal") or task.objective),
+            "comparison_mode": len(task.focus_refs) > 1,
+            "authoritative_entity_refs": authoritative_refs,
+            "working_memory": context,
+            "entity_analysis_output_schema": schema_for_prompt(output_schema),
+            "reply_language": language,
+        })},
     ]
     try:
         analysis = generate_json_with_local_structural_repair(
             llm_service,
             stage="graph_entity_analysis",
             operation=task.boundary_id,
-            messages=generation_messages,
+            messages=messages,
             output_schema=output_schema,
-            validator=validate,
+            validator=_validate_analysis,
             immutable_repair_context={
-                "allowed_source_task_ids": sorted(known_source_task_ids),
+                "authoritative_entity_refs": authoritative_refs,
+                "available_names": available_names,
             },
-            repair_guidance=(
-                "Preserve existing claims and source_task_ids. Do not redo analysis or add facts/sources."
-            ),
+            repair_guidance="只修复JSON结构；不得新增Working Memory中不存在的事实。",
             primary_max_output_tokens=_MAX_PRIMARY_OUTPUT_TOKENS,
             repair_max_output_tokens=_MAX_REPAIR_OUTPUT_TOKENS,
             max_invalid_output_chars=_MAX_REPAIR_INPUT_CHARS,
@@ -419,50 +126,74 @@ def run_entity_analysis(
             business_status="unknown",
             completion_status="not_completed",
             expected_task_completed=False,
-            produced_information_slots=[],
+            produced_data_names=[],
             limitations=[str(exc)[:1000]],
             failure_kind="worker_structured_output_failure",
-            report_source="runtime",
         )
         return GraphWorkerResult(
-            task_id=task.task_id,
-            agent_id=task.assigned_agent,
-            status=ResultStatus.FAILED,
-            output_type="CapabilityResult",
-            data=None,
-            error={
-                "code": "worker_structured_output_failed",
-                "message": str(exc),
-                "component": task.assigned_agent,
-                "retryable": False,
-                "local_recovery_exhausted": True,
-            },
+            task_id=task.task_id, agent_id=task.assigned_agent, status=ResultStatus.FAILED,
+            output_type="EntityAnalysisResult", data=None,
+            error={"code": "worker_structured_output_failed", "message": str(exc), "component": task.assigned_agent, "retryable": False},
             focus_refs=task.focus_refs,
-            summary=(
-                "W09结构化输出修复失败。"
-                if language != "en" else
-                "W09 structured-output repair failed."
-            ),
-            warnings=[f"LLMJSONError:{exc}"],
+            summary="W09结构化输出修复失败。" if language != "en" else "W09 structured-output repair failed.",
+            warnings=[f"LLMJSONError:{exc}"], completion=completion,
+            metadata={"database_write": False, "working_memory_mode": True},
+        )
+
+    if not bool(analysis.get("context_sufficient")):
+        missing_information = [str(x).strip() for x in analysis.get("missing_information") or [] if str(x).strip()]
+        reason = str(analysis.get("conclusion") or "当前实体工作记忆不足以支持可靠分析。")
+        completion = non_success_completion_report(
+            task, execution_status="need_context", reason=reason, failure_kind="entity_context_insufficient"
+        )
+        return GraphWorkerResult(
+            task_id=task.task_id, agent_id=task.assigned_agent, status=ResultStatus.NEED_CONTEXT,
+            output_type="EntityAnalysisResult", data=None,
+            error={"error_id": "entity_context_insufficient", "operation": task.objective or task.boundary_id, "reason": reason, "retryable": True},
+            focus_refs=task.focus_refs,
+            summary="当前实体工作记忆不足以支持可靠分析，已反馈缺失的业务信息。",
+            missing_items=[
+                MissingContextItem(
+                    key=f"entity_information_{index}", description=value,
+                    expected_format="business information", reason="W09 judged current entity working memory insufficient",
+                    searched_sources=["ContextBundle"], blocking=True,
+                )
+                for index, value in enumerate(missing_information or [reason], start=1)
+            ],
             completion=completion,
             metadata={
-                "structured_output_local_recovery": "exhausted",
-                "main_agent_replan_recommended": False,
+                "working_memory_mode": True,
+                "working_memory_available_names": available_names,
+                "context_sufficient": False,
+                "missing_information": missing_information,
+                "replan_recommended": True,
+                "failure_kind": "entity_context_insufficient",
                 "database_write": False,
             },
         )
 
-    authoritative_refs = _authoritative_entity_refs(task, evidence_items)
-    entity_analysis_slot = {
-        "entity_refs": authoritative_refs or execution_safe_value(analysis.get("entity_refs") or []),
-        "entity_catalog": _authoritative_entity_catalog(task, evidence_items),
-        "facts": execution_safe_value(analysis.get("facts") or []),
-        "analysis": execution_safe_value(analysis.get("analysis") or []),
-        "uncertainties": execution_safe_value(analysis.get("uncertainties") or []),
+    analysis_record = {
+        "entity_refs": authoritative_refs,
+        "facts": safe_public_value(analysis.get("facts") or []),
+        "analysis": safe_public_value(analysis.get("analysis") or []),
+        "uncertainties": safe_public_value(analysis.get("uncertainties") or []),
         "conclusion": str(analysis.get("conclusion") or ""),
-        "source_task_ids": sorted(known_source_task_ids),
+        "context_assessment": {
+            "sufficient": True,
+            "missing_information": [],
+            "available_names": available_names,
+        },
     }
-    slots = materialize_promised_slots(task, entity_analysis_slot)
+    uncertainty_record = {
+        "entity_refs": authoritative_refs,
+        "uncertainties": analysis_record["uncertainties"],
+        "available_names": available_names,
+    }
+    business_data = materialize_promised_data(
+        task,
+        analysis_record,
+        per_name={"analysis": analysis_record, "analysis_uncertainty": uncertainty_record},
+    )
     completion = build_completion_report(
         task,
         execution_status="succeeded",
@@ -470,44 +201,36 @@ def run_entity_analysis(
         business_status="sufficient",
         completion_status="completed",
         expected_task_completed=True,
-        produced_information_slots=list(slots),
+        produced_data_names=list(business_data),
         limitations=[],
         failure_kind="none",
-        report_source="runtime",
     )
-    payload = {
-        **entity_analysis_slot,
-        "slots": slots,
-        "produced_information_slots": list(slots),
-    }
+    payload = {**analysis_record, "business_data": business_data, "produced_data_names": list(business_data)}
     return GraphWorkerResult(
         task_id=task.task_id,
         agent_id=task.assigned_agent,
         status=ResultStatus.COMPLETED,
         output_type="EntityAnalysisResult",
-        payload_schema="entity_analysis_result.v1",
+        payload_schema="entity_analysis_result.v2",
         payload=payload,
         data=payload,
         error=None,
         focus_refs=task.focus_refs,
-        summary="已基于上游证据和结构化事实完成金融实体分析。",
-        findings=[
-            {
-                "kind": "entity_analysis_output_diagnostics",
-                "fact_count": len(payload["facts"]),
-                "analysis_count": len(payload["analysis"]),
-                "uncertainty_count": len(payload["uncertainties"]),
-                "source_task_count": len(payload["source_task_ids"]),
-                "suppressed_redundant_evidence_slots": list(suppressed_redundant_evidence_slots),
-            },
-        ],
+        summary="已基于目标实体当前ContextBundle工作记忆完成金融实体分析。",
+        findings=[{
+            "kind": "entity_analysis_output_diagnostics",
+            "fact_count": len(payload["facts"]),
+            "analysis_count": len(payload["analysis"]),
+            "uncertainty_count": len(payload["uncertainties"]),
+            "working_memory_available_names": available_names,
+        }],
         confidence=0.85,
         completion=completion,
         metadata={
             "database_write": False,
-            "source_task_ids": payload["source_task_ids"],
-            "bound_slot_projection": "execution_materialized_then_worker_compacted",
-            "suppressed_redundant_evidence_slots": list(suppressed_redundant_evidence_slots),
+            "working_memory_mode": True,
+            "working_memory_available_names": available_names,
+            "context_sufficient": True,
         },
     )
 

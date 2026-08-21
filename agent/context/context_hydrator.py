@@ -11,7 +11,7 @@ from agent.graph.contracts import GraphRef, refs_from
 
 @dataclass(frozen=True)
 class ContextRequirement:
-    slot_id: str
+    context_key: str
     required: bool = True
     source_preferences: list[str] = field(default_factory=list)
     entity_role: str = ""
@@ -70,12 +70,12 @@ class ContextHydrator:
         execution_context: dict[str, Any] | None = None,
     ) -> HydratedContext:
         context = dict(execution_context or {})
-        required_ids = {item.slot_id for item in requirements or []}
+        required_ids = {item.context_key for item in requirements or []}
         previous_refs: list[GraphRef] = []
         summary = ""
         audit: list[dict[str, Any]] = []
         focus_requirement = next(
-            (item for item in requirements or [] if item.slot_id == "previous_focus_entities"),
+            (item for item in requirements or [] if item.context_key == "previous_focus_entities"),
             None,
         )
         if focus_requirement is not None and focus_requirement.allow_session_inheritance:
@@ -83,17 +83,17 @@ class ContextHydrator:
                 item = self.session_state.get(session_id, "active_graph_refs")
                 if item is not None:
                     previous_refs = refs_from(item.value)
-                    audit.append({"slot_id": "previous_focus_entities", "source": "session_state"})
+                    audit.append({"context_key": "previous_focus_entities", "source": "session_state"})
             except Exception:
                 previous_refs = []
         typed_focus_refs: dict[str, list[GraphRef]] = {}
         typed_requirements = [
             item for item in requirements or []
-            if str(item.slot_id or "").startswith("typed_focus:")
+            if str(item.context_key or "").startswith("typed_focus:")
             and item.allow_session_inheritance
         ]
         for requirement in typed_requirements:
-            focus_type = str(requirement.slot_id).split(":", 1)[1].strip().lower()
+            focus_type = str(requirement.context_key).split(":", 1)[1].strip().lower()
             if not focus_type:
                 continue
             try:
@@ -103,7 +103,7 @@ class ContextHydrator:
                     if refs:
                         typed_focus_refs[focus_type] = refs
                         audit.append({
-                            "slot_id": f"typed_focus:{focus_type}",
+                            "context_key": f"typed_focus:{focus_type}",
                             "source": "session_state",
                             "record_count": len(refs),
                         })
@@ -115,7 +115,7 @@ class ContextHydrator:
                 summaries = [str(item.summary) for item in rows if str(item.summary).strip()]
                 summary = "\n".join(summaries[-8:])[:2400]
                 if summary:
-                    audit.append({"slot_id": "session_summary", "source": "session_state"})
+                    audit.append({"context_key": "session_summary", "source": "session_state"})
             except Exception:
                 summary = ""
         pending_runs: list[str] = []
@@ -123,7 +123,7 @@ class ContextHydrator:
             try:
                 pending_runs = [item.run_id for item in self.checkpoint_store.pending_for_session(session_id)]
                 if pending_runs:
-                    audit.append({"slot_id": "pending_runs", "source": "run_checkpoint_store"})
+                    audit.append({"context_key": "pending_runs", "source": "run_checkpoint_store"})
             except Exception:
                 pending_runs = []
         long_term_summary = ""
@@ -151,13 +151,13 @@ class ContextHydrator:
                 long_term_summary = "\n".join(rows)[:2400]
                 if long_term_refs:
                     audit.append({
-                        "slot_id": "long_term_memory",
+                        "context_key": "long_term_memory",
                         "source": "sqlite_memory_store",
                         "record_count": len(long_term_refs),
                     })
             except Exception as exc:
                 audit.append({
-                    "slot_id": "long_term_memory",
+                    "context_key": "long_term_memory",
                     "source": "sqlite_memory_store",
                     "status": "unavailable",
                     "error": type(exc).__name__,

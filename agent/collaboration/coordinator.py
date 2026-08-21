@@ -12,8 +12,11 @@ from core.llm.prompt_compaction import compact_json_dumps
 
 from agent.console_trace import flow_event, trace_exception
 from agent.context.context_hydrator import ContextHydrator, ContextRequirement
+from agent.context.context_types import ContextBundle
 from agent.context.context_sufficiency_gate import ContextAndEntitySufficiencyGate
-from agent.runtime_state import RunCheckpoint, RunCheckpointStore, RunSlotStore
+from agent.runtime_state import (
+    LLMConcurrencyGate, RequestCheckpoint, RunCheckpoint, RunCheckpointStore, RuntimeResourceBudget,
+)
 
 from agent.graph.contracts import GraphNodeKind, GraphRef, refs_from
 from agent.graph.errors import GraphConfigurationError, GraphUnavailableError
@@ -28,13 +31,18 @@ from agent.graph.impact_service import GraphImpactService
 
 from .completion import evaluate_need_completion, flow_decision, non_success_completion_report, validate_completion_report
 from .worker_directory import CapabilityWorkerDirectory, REPORT_WRITER
-from .control_gateway import ControlGateway
-from .entry_decision import MainEntryDecisionPlanner, RequestMode
+from .context_binding import ContextBinding
 from .models import GraphAgentTask, GraphWorkerResult, MissingContextItem, ResultStatus
 from .planner import CoordinatorPlanner
+from .presentation_policy import PresentationPolicy, PresentationPolicyResolver, PresentationValidator
+from .request_bundle import (
+    RequestBundle, RequestCategory, RequestDecomposer, RequestItem, RequestStatus, RequestType,
+)
+from .request_parallel import BatchSessionMutationCommitter, SessionMutationProposal, SharedRunContext
 from .runtime_services import CollaborationRuntimeServices
 from .session_state import SessionStateStore
 from .specialist_runtime import SpecialistRuntime
+from .write_runtime import WriteRequestExecutor
 
 
 def _dedupe_refs(refs: list[GraphRef]) -> list[GraphRef]:
@@ -162,7 +170,7 @@ def _planning_memory_summary(
 ) -> str:
     """Build the memory view that may influence business-intent planning.
 
-    MainEntryDecision owns whether the current request inherits the previous
+    RequestBundle ContextBinding owns whether the current request inherits the previous
     conversation focus.  When it explicitly rejects that inheritance, the
     canonical-intent planner must not be allowed to re-introduce a previous
     named financial entity through ``session_summary``.  Long-term memory stays
@@ -210,11 +218,11 @@ class AgentCollaborationCoordinator:
     ) -> None:
         self.output_dir = output_dir
         self.db_path = db_path
-        self.llm_service = llm_service
+        self.resource_budget = RuntimeResourceBudget()
+        self.llm_service = LLMConcurrencyGate(llm_service, self.resource_budget)
         self.runtime_services = runtime_services
         self.session_state = SessionStateStore(output_dir=output_dir)
         self.checkpoints = RunCheckpointStore(output_dir)
-        self.slot_store = RunSlotStore(output_dir)
         self.context_hydrator = ContextHydrator(
             session_state=self.session_state,
             checkpoint_store=self.checkpoints,
@@ -228,22 +236,29 @@ class AgentCollaborationCoordinator:
         self.store.ensure_schema()
         self.identity = GraphEntityIdentityService(self.store)
         validator = GraphPatchValidator(self.store)
+        self.write_executor = WriteRequestExecutor(
+            output_dir=self.output_dir, db_path=self.db_path, graph_validator=validator
+        )
         provider = GraphProviderAdapter(
             identity=self.identity,
             evidence_ingestion=EvidenceIngestionService(validator),
             portfolio_graph=PortfolioGraphService(self.identity, validator),
         )
         self.specialist = SpecialistRuntime(
-            llm_service=llm_service,
+            llm_service=self.llm_service,
             provider=provider,
             impact_service=GraphImpactService(self.store),
-            slot_store=self.slot_store,
             directory=self.directory,
+            resource_budget=self.resource_budget,
         )
-        self.entry = MainEntryDecisionPlanner(llm_service=llm_service)
+        # RequestBundle is the only public semantic entry.
+        self.request_decomposer = RequestDecomposer(llm_service=self.llm_service)
+        self.presentation_policy_resolver = PresentationPolicyResolver()
+        self.presentation_validator = PresentationValidator()
+        self.session_mutation_committer = BatchSessionMutationCommitter(self.session_state)
         self.planner = CoordinatorPlanner(
             self.directory,
-            llm_service=llm_service,
+            llm_service=self.llm_service,
             worker_tool_directory=self.specialist.worker_tool_directory,
         )
 
@@ -391,7 +406,7 @@ class AgentCollaborationCoordinator:
         elif reference_type not in {"", "none", "unknown"} and typed_refs:
             # Typed focus is a durable per-entity-class conversation pointer. It
             # survives unrelated portfolio/account turns and is used only when
-            # MainEntryDecision says the current request refers to that class.
+            # RequestBundle ContextBinding says the current request refers to that class.
             focus = typed_refs
             audit.append({
                 "mention": "<typed_conversation_focus>",
@@ -437,6 +452,260 @@ class AgentCollaborationCoordinator:
             "typed_focus_source_count": len(typed_refs),
         }
 
+    @staticmethod
+    def _request_dependency_usable(status: str) -> bool:
+        return str(status or "") in {
+            RequestStatus.COMPLETED.value,
+            RequestStatus.PARTIALLY_COMPLETED.value,
+            RequestStatus.WAITING_APPROVAL.value,
+            RequestStatus.PRESENTATION_APPLIED.value,
+        }
+
+    @staticmethod
+    def _classify_request_result(result: dict[str, Any]) -> RequestStatus:
+        task_results = [
+            dict(item) for item in dict(result.get("task_results") or {}).values()
+            if isinstance(item, dict)
+        ]
+        # Proposal creation completes a READ Request. Proposal lifecycle stays
+        # independently PENDING_APPROVAL in the canonical ProposalStore.
+        if any(str(item.get("status") or "") == ResultStatus.PROPOSAL_READY.value for item in task_results):
+            return RequestStatus.COMPLETED
+        failure_kinds = {
+            str((item.get("completion") or {}).get("failure_kind") or "")
+            for item in task_results
+            if isinstance(item.get("completion"), dict)
+        }
+        failure_kinds.update(
+            str((item.get("error") or {}).get("error_id") or (item.get("error") or {}).get("code") or "")
+            for item in task_results
+            if isinstance(item.get("error"), dict)
+        )
+        if "user_input_required" in failure_kinds:
+            return RequestStatus.WAITING_USER_INPUT
+        if str(result.get("execution_status") or "") == "waiting_context":
+            return RequestStatus.WAITING_CONTEXT
+        if any(kind in {"tool_execution_failure", "worker_execution_failure", "structured_output_failure"} or "tool" in kind for kind in failure_kinds if kind):
+            return RequestStatus.TOOL_FAILED
+        business_statuses = {
+            str((item.get("completion") or {}).get("business_status") or "")
+            for item in task_results
+            if isinstance(item.get("completion"), dict)
+        }
+        if business_statuses and business_statuses <= {"empty", "business_empty"}:
+            return RequestStatus.BUSINESS_EMPTY
+        if bool(result.get("success")):
+            return RequestStatus.COMPLETED
+        if str(result.get("execution_status") or "") == "partially_completed":
+            return RequestStatus.PARTIALLY_COMPLETED
+        return RequestStatus.FAILED
+
+    def _materialize_request_payload(
+        self,
+        *,
+        request: RequestItem,
+        result: dict[str, Any],
+        run_id: str,
+    ) -> dict[str, Any]:
+        """Build the verified Request payload without a point-to-point data bus."""
+        del run_id
+        business_data: dict[str, list[Any]] = {}
+        for row in dict(result.get("task_results") or {}).values():
+            if not isinstance(row, dict):
+                continue
+            data = row.get("data") if isinstance(row.get("data"), dict) else {}
+            values = data.get("business_data") if isinstance(data.get("business_data"), dict) else {}
+            for name, value in values.items():
+                business_data.setdefault(str(name), []).append(value)
+        proposal_meta: dict[str, Any] = {}
+        for row in dict(result.get("task_results") or {}).values():
+            if not isinstance(row, dict):
+                continue
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            data = row.get("data") if isinstance(row.get("data"), dict) else {}
+            candidate = {**data, **metadata}
+            if str(candidate.get("proposal_id") or "").startswith("proposal_"):
+                proposal_meta = {
+                    "proposal_id": str(candidate.get("proposal_id") or ""),
+                    "proposal_version": int(candidate.get("proposal_version") or 0),
+                    "proposal_status": str(candidate.get("proposal_status") or "pending_approval"),
+                    "payload_hash": str(candidate.get("payload_hash") or ""),
+                }
+                break
+        return {
+            "request_id": request.request_id,
+            "source_index": request.source_index,
+            "category": request.category.value,
+            "request_type": request.request_type.value if request.category == RequestCategory.BUSINESS else "",
+            "proposal_required": bool(request.proposal_required),
+            "objective": request.objective,
+            "status": request.status.value,
+            "status_reason": request.status_reason,
+            "depends_on": list(request.depends_on),
+            "need_completion": dict(result.get("need_completion") or {}),
+            "context_sufficiency": dict(result.get("context_sufficiency") or {}),
+            "business_effect_applied": False,
+            **proposal_meta,
+            "business_data": business_data,
+            "warnings": list(result.get("warnings") or []),
+            "errors": list(result.get("errors") or []),
+        }
+
+    @staticmethod
+    def _request_coverage(bundle: RequestBundle, request_results: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        rows: list[dict[str, Any]] = []
+        counts: dict[str, int] = {}
+        for request in bundle.requests:
+            result = dict(request_results.get(request.request_id) or {})
+            status = str(result.get("status") or request.status.value)
+            counts[status] = counts.get(status, 0) + 1
+            rows.append({
+                "request_id": request.request_id,
+                "source_index": request.source_index,
+                "category": request.category.value,
+                "objective": request.objective,
+                "request_type": request.request_type.value if request.category == RequestCategory.BUSINESS else "",
+                "proposal_required": bool(request.proposal_required),
+                "depends_on": list(request.depends_on),
+                "status": status,
+                "reason": str(result.get("reason") or request.status_reason or ""),
+            })
+        unresolved = [
+            row for row in rows
+            if row["status"] not in {
+                RequestStatus.COMPLETED.value,
+                RequestStatus.PARTIALLY_COMPLETED.value,
+                RequestStatus.WAITING_APPROVAL.value,
+                RequestStatus.UNSUPPORTED.value,
+                RequestStatus.PRESENTATION_APPLIED.value,
+                    RequestStatus.BUSINESS_EMPTY.value,
+            }
+        ]
+        return {
+            "schema_version": "request_coverage.v2",
+            "request_count": len(rows),
+            "counts_by_status": counts,
+            "requests": rows,
+            "all_terminal": not unresolved,
+            "unresolved_request_ids": [row["request_id"] for row in unresolved],
+        }
+
+    def _build_shared_run_context(
+        self, *, user_id: str, session_id: str, run_id: str,
+        session_preference: dict[str, Any], execution_context: dict[str, Any],
+    ) -> SharedRunContext:
+        profile_item = self.session_state.get(session_id, "user_profile_state")
+        user_profile = (
+            dict(profile_item.value or {})
+            if profile_item is not None and isinstance(profile_item.value, dict) else {}
+        )
+        cards = self.directory.list() if hasattr(self.directory, "list") else []
+        worker_catalog = [
+            {
+                "worker_id": card.worker_id, "agent_id": card.agent_id, "role": card.role,
+                "short_description": card.short_description,
+                "supported_boundary_ids": list(card.supported_boundary_ids),
+                "capability_tags": list(card.capability_tags),
+                "can_mutate": bool(card.can_mutate),
+                "execution_stage": card.execution_stage,
+                "working_memory_mode": card.working_memory_mode,
+                "execution_mode": card.execution_mode,
+            }
+            for card in cards
+        ]
+        registry = getattr(getattr(self, "planner", None), "registry", None)
+        capability_snapshot = {
+            "semantic_requirements": registry.semantic_requirement_catalog() if registry is not None else [],
+            "business_boundaries": registry.public_catalog(effect_limit="read") if registry is not None else [],
+        }
+        market_context = dict(
+            execution_context.get("global_market_context")
+            or execution_context.get("market_context")
+            or {}
+        ) if isinstance(
+            execution_context.get("global_market_context")
+            or execution_context.get("market_context")
+            or {}, dict
+        ) else {}
+        shared = SharedRunContext(
+            user_id=user_id, session_id=session_id, run_id=run_id,
+            user_profile_snapshot=user_profile,
+            session_preference_snapshot=dict(session_preference or {}),
+            global_market_context=market_context,
+            worker_public_catalog=worker_catalog,
+            capability_registry_snapshot=capability_snapshot,
+            runtime_configuration=(self.resource_budget.snapshot() if hasattr(self, "resource_budget") else {}),
+            shared_context_refs=[
+                dict(item) for item in execution_context.get("shared_context_refs") or []
+                if isinstance(item, dict)
+            ],
+        )
+        return shared
+
+    def _commit_request_batch_mutations(
+        self, *, run_id: str, batch_index: int, proposals: list[SessionMutationProposal],
+    ) -> dict[str, Any]:
+        flow_event(
+            "REQUEST_BATCH_BARRIER_ENTERED",
+            {"batch_index": batch_index, "mutation_proposal_count": len(proposals)},
+            run_id=run_id,
+        )
+        commit = self.session_mutation_committer.commit(proposals) if proposals else {
+            "schema_version": "request_batch_session_commit.v1",
+            "proposal_count": 0, "operation_count": 0, "committed": [], "conflicts": [],
+        }
+        if commit.get("conflicts"):
+            flow_event(
+                "REQUEST_BATCH_CONFLICT_DETECTED",
+                {"batch_index": batch_index, "conflicts": commit.get("conflicts")},
+                run_id=run_id, level="WARNING",
+            )
+        flow_event(
+            "REQUEST_BATCH_COMMITTED",
+            {"batch_index": batch_index, **commit},
+            run_id=run_id,
+        )
+        return commit
+
+    def _build_bundle_report_task(
+        self, *, run_id: str, session_id: str, user_id: str, objective: str,
+        include_validation_feedback: bool = False,
+    ) -> GraphAgentTask:
+        card = self.directory.get("W06")
+        task_id = "BUNDLE-FINAL-T02" if include_validation_feedback else "BUNDLE-FINAL-T01"
+        return GraphAgentTask(
+            task_id=task_id, run_id=run_id, session_id=session_id, assigned_agent=card.agent_id,
+            worker_id="W06", objective=objective, user_id=user_id, boundary_id=card.role,
+            contracts=[{
+                "contract_id": "BUNDLE-FINAL-C01",
+                "description": "根据Request Coverage与PresentationPolicy生成最终用户回答",
+                "required_data": [], "required_parameters": [],
+                "promised_data": [
+                    {"name": "report", "required_paths": []},
+                    {"name": "result.user_facing", "required_paths": []},
+                ],
+                "acceptance_rule_ids": ["schema_valid", "no_new_business_claims"],
+                "forbidden_data_names": [], "criticality": "required",
+                "mutation_allowed": False,
+                "allowed_terminal_states": ["completed", "business_empty", "business_insufficient"],
+            }],
+            business_parameters={"report_goal": objective}, dependency_task_ids=[],
+            expected_data_names=["report", "result.user_facing"], effect_limit="read",
+            execution_mode=card.execution_mode, focus_refs=[], context_refs=[], priority=1,
+            metadata={"request_id": "BUNDLE_FINAL", "bundle_report": True,
+                      "presentation_policy_required": True},
+        )
+
+    @staticmethod
+    def _report_content(result: GraphWorkerResult | None) -> str:
+        if result is None or not isinstance(result.data, dict):
+            return ""
+        content = str(result.data.get("content") or "").strip()
+        if content:
+            return content
+        data = result.data.get("business_data") if isinstance(result.data.get("business_data"), dict) else {}
+        return str(data.get("report") or data.get("result.user_facing") or "").strip()
+
     def execute(
         self,
         *,
@@ -449,6 +718,743 @@ class AgentCollaborationCoordinator:
         language: str,
         execution_context: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        """RequestBundle-only entry with Ready-Batch BUSINESS parallelism.
+
+        One user message may contain multiple Requests. READ business requests are
+        independently planned into Need lists; WRITE requests use the deterministic
+        WriteRequestExecutor fast path; PRESENTATION resolves into one authoritative
+        PresentationPolicy. Worker DAGs remain deterministic Runtime compilations.
+        """
+
+        if not hasattr(self, "resource_budget"):
+            self.resource_budget = RuntimeResourceBudget(max_parallel_requests=3, max_parallel_workers=4, max_parallel_tools=4, max_parallel_llm=4)
+        if not hasattr(self, "session_mutation_committer"):
+            self.session_mutation_committer = BatchSessionMutationCommitter(self.session_state)
+        if self.runtime_services is not None:
+            self.runtime_services.validate_identity(run_id=run_id, user_id=user_id, session_id=session_id)
+        context = dict(execution_context or {})
+        run_context_bundle = ContextBundle(user_id=user_id, conversation_id=session_id, run_id=run_id, locale=language)
+        if hasattr(self, "specialist"):
+            self.specialist.bind_context_bundle(run_context_bundle)
+        context["context_bundle_id"] = run_context_bundle.context_id
+        memory_summary = self.session_state.build_summary(session_id, limit=40)
+        flow_event(
+            "REQUEST_DECOMPOSITION_STARTED",
+            {
+                "request": str(query or ""),
+                "memory_summary_chars": len(memory_summary),
+                "execution_context_keys": sorted(context.keys()),
+            },
+            run_id=run_id,
+        )
+        bundle = self.request_decomposer.decompose(
+            query=query,
+            memory_summary=memory_summary,
+            execution_context=context,
+            language=language,
+            run_id=run_id,
+        )
+        flow_event("REQUEST_BUNDLE_CREATED", bundle.to_dict(), run_id=run_id)
+        for item in bundle.requests:
+            flow_event(
+                "REQUEST_CLASSIFIED",
+                {
+                    "request_id": item.request_id,
+                    "source_index": item.source_index,
+                    "category": item.category.value,
+                    "request_type": item.request_type.value if item.category == RequestCategory.BUSINESS else "",
+                    "proposal_required": bool(item.proposal_required),
+                    "status": item.status.value,
+                    "depends_on": list(item.depends_on),
+                    "scope": item.scope,
+                },
+                run_id=run_id,
+                level="WARNING" if item.status == RequestStatus.UNSUPPORTED else "INFO",
+            )
+
+        session_pref_item = self.session_state.get(session_id, PresentationPolicyResolver.SESSION_KEY)
+        session_pref = dict(session_pref_item.value or {}) if session_pref_item is not None and isinstance(session_pref_item.value, dict) else {}
+        presentation_policy = self.presentation_policy_resolver.resolve(
+            bundle=bundle,
+            session_preference=session_pref,
+            system_language=language,
+        )
+        flow_event(
+            "PRESENTATION_POLICY_RESOLVED",
+            presentation_policy.to_dict(),
+            run_id=run_id,
+        )
+        bundle_session_mutations = SessionMutationProposal(
+            request_id="BUNDLE", source_index=0
+        )
+        if presentation_policy.session_update:
+            persisted = dict(session_pref)
+            persisted.update(presentation_policy.session_update)
+            bundle_session_mutations.add_put(
+                session_id=session_id,
+                key=PresentationPolicyResolver.SESSION_KEY,
+                value={
+                    name: str(persisted.get(name) or "")
+                    for name in ("language", "style", "length", "format")
+                },
+                value_type="presentation_preference",
+                summary="会话级回答呈现偏好。",
+                source_type="request_bundle",
+                source_ref=run_id,
+                confirmed=True,
+                confidence=1.0,
+            )
+
+        # Store the original user turn once. Individual Business Request
+        # execution must not overwrite the user's source message boundary.
+        self.session_state.put(
+            session_id=session_id,
+            key=f"turn:{run_id}:user_message",
+            value={"user_id": user_id, "message": str(query or "")},
+            value_type="conversation_turn",
+            summary=str(query or "")[:500],
+            source_type="user_message",
+            source_ref=run_id,
+            confirmed=True,
+            confidence=1.0,
+        )
+
+        context["request_bundle"] = bundle.to_dict()
+        context["presentation_policy"] = presentation_policy.to_dict()
+        context["language"] = presentation_policy.language or language
+
+        shared_run_context = self._build_shared_run_context(
+            user_id=user_id, session_id=session_id, run_id=run_id,
+            session_preference=session_pref, execution_context=context,
+        )
+        context["shared_run_context"] = shared_run_context.to_dict()
+        flow_event(
+            "SHARED_RUN_CONTEXT_CREATED",
+            {
+                "schema_version": "shared_run_context.v1",
+                "read_only": True,
+                "worker_catalog_count": len(shared_run_context.worker_public_catalog),
+                "semantic_requirement_count": len(
+                    shared_run_context.capability_registry_snapshot.get("semantic_requirements") or []
+                ),
+                "resource_budget": self.resource_budget.snapshot(),
+            },
+            run_id=run_id,
+        )
+
+        request_results: dict[str, dict[str, Any]] = {}
+        materialized_results: dict[str, dict[str, Any]] = {}
+        pending = {item.request_id: item for item in bundle.requests}
+        request_batches: list[dict[str, Any]] = []
+        request_batch_index = 0
+        batch_commit_audit: list[dict[str, Any]] = []
+
+        flow_event(
+            "REQUEST_DEPENDENCIES_RESOLVED",
+            {
+                "dependencies": {item.request_id: list(item.depends_on) for item in bundle.requests},
+                "acyclic": True,
+            },
+            run_id=run_id,
+        )
+
+        def save_request_checkpoint(item: RequestItem, *, phase: str, status: str | None = None, result: dict[str, Any] | None = None) -> None:
+            payload = dict(result or {})
+            graph_runtime = dict(payload.get("graph_runtime") or {})
+            focus_refs = list(graph_runtime.get("focus_refs") or [])
+            tasks = list(dict(graph_runtime.get("planner") or {}).get("capability_plan", {}).get("tasks") or [])
+            if not hasattr(self.checkpoints, "save_request"):
+                return
+            self.checkpoints.save_request(RequestCheckpoint(
+                run_id=run_id,
+                request_id=item.request_id,
+                status=str(status or item.status.value),
+                current_phase=phase,
+                resolved_graph_refs=[dict(row) for row in focus_refs if isinstance(row, dict)],
+                worker_tasks=[dict(row) for row in tasks if isinstance(row, dict)],
+                missing_parameters=[
+                    str(row.get("key") or "") for row in payload.get("missing_context") or []
+                    if isinstance(row, dict) and "parameter" in str(row.get("reason") or "").lower()
+                ],
+                missing_context=[
+                    str(row.get("key") or "") for row in payload.get("missing_context") or []
+                    if isinstance(row, dict)
+                ],
+                replan_count=int(payload.get("replan_count") or 0),
+            ))
+
+        def business_call(item: RequestItem) -> dict[str, Any]:
+            """Execute one Request branch without mutating parent-run state."""
+            with self.resource_budget.request_slot():
+                dependency_payload = {
+                    dep: materialized_results[dep]
+                    for dep in item.depends_on
+                    if dep in materialized_results
+                }
+                request_context = dict(context)
+                request_context["shared_run_context"] = shared_run_context.for_request()
+                request_context["current_user_request"] = item.objective
+                request_context["request_item"] = item.to_dict()
+                request_context["dependency_request_ids"] = sorted(dependency_payload)
+                request_context["request_presentation_policy"] = presentation_policy.for_request(item.request_id)
+                flow_event(
+                    "BUSINESS_REQUEST_PLANNING_STARTED",
+                    {
+                        "request_id": item.request_id,
+                        "objective": item.objective,
+                        "request_type": item.request_type.value,
+                        "proposal_required": bool(item.proposal_required),
+                        "depends_on": list(item.depends_on),
+                        "dependency_result_ids": sorted(dependency_payload),
+                        "shared_context_read_only": True,
+                    },
+                    run_id=run_id,
+                )
+                save_request_checkpoint(item, phase="business_planning", status=RequestStatus.RUNNING.value)
+                try:
+                    if item.request_type != RequestType.READ:
+                        raise RuntimeError("write_request_entered_read_planning_path")
+                    business_result = self._execute_read_request(
+                        query=item.objective,
+                        decomposition={},
+                        user_id=user_id,
+                        default_top_k=default_top_k,
+                        session_id=session_id,
+                        run_id=run_id,
+                        language=(presentation_policy.for_request(item.request_id).get("language") or presentation_policy.language or language),
+                        execution_context=request_context,
+                        proposal_required=bool(item.proposal_required),
+                        context_binding=item.context_binding,
+                        request_id=item.request_id,
+                        task_id_prefix=f"{item.request_id}-",
+                        persist_checkpoint=False,
+                        persist_user_turn=False,
+                        defer_session_mutations=True,
+                        request_source_index=item.source_index,
+                    )
+                    status = self._classify_request_result(business_result)
+                    business_result["status"] = status.value
+                    materialized = self._materialize_request_payload(
+                        request=item,
+                        result=business_result,
+                        run_id=run_id,
+                    )
+                    mutation_payload = dict(business_result.get("session_mutation_proposal") or {})
+                    proposal = SessionMutationProposal(
+                        request_id=item.request_id,
+                        source_index=item.source_index,
+                        operations=[dict(row) for row in mutation_payload.get("operations") or [] if isinstance(row, dict)],
+                    )
+                    return {
+                        "status": status,
+                        "result": business_result,
+                        "materialized": materialized,
+                        "mutation_proposal": proposal,
+                        "reason": str(business_result.get("clarification_question") or business_result.get("answer") or "")[:500],
+                    }
+                except Exception as exc:
+                    detail = str(exc)
+                    status = (
+                        RequestStatus.UNSUPPORTED
+                        if "unresolvable" in detail or "no_consumer_worker" in detail or "no_owner_worker" in detail
+                        else RequestStatus.FAILED
+                    )
+                    return {
+                        "status": status,
+                        "result": {
+                            "request_id": item.request_id,
+                            "status": status.value,
+                            "reason": f"{type(exc).__name__}:{detail}"[:500],
+                            "exception_type": type(exc).__name__,
+                        },
+                        "materialized": {},
+                        "mutation_proposal": SessionMutationProposal(item.request_id, item.source_index),
+                        "reason": f"{type(exc).__name__}:{detail}"[:500],
+                    }
+
+        while pending:
+            progressed = False
+            for request_id, item in list(pending.items()):
+                blocked_by = [
+                    dep for dep in item.depends_on
+                    if dep in request_results and not self._request_dependency_usable(str(request_results[dep].get("status") or ""))
+                ]
+                if not blocked_by:
+                    continue
+                item.status = RequestStatus.BLOCKED
+                item.status_reason = f"blocked_by_request:{','.join(blocked_by)}"
+                request_results[request_id] = {
+                    "request_id": request_id,
+                    "status": item.status.value,
+                    "reason": item.status_reason,
+                    "blocked_by": blocked_by,
+                }
+                pending.pop(request_id, None)
+                save_request_checkpoint(item, phase="blocked", result=request_results[request_id])
+                progressed = True
+                flow_event("REQUEST_COMPLETION_UPDATED", request_results[request_id], run_id=run_id, level="WARNING")
+
+            ready = sorted([
+                item for item in pending.values()
+                if all(dep in request_results and self._request_dependency_usable(str(request_results[dep].get("status") or "")) for dep in item.depends_on)
+            ], key=lambda row: (row.source_index, row.request_id))
+            if not ready:
+                if progressed:
+                    continue
+                for item in list(pending.values()):
+                    item.status = RequestStatus.BLOCKED
+                    item.status_reason = "unresolved_request_dependency"
+                    request_results[item.request_id] = {
+                        "request_id": item.request_id, "status": item.status.value, "reason": item.status_reason,
+                    }
+                    save_request_checkpoint(item, phase="blocked", result=request_results[item.request_id])
+                    pending.pop(item.request_id, None)
+                break
+
+            # WRITE is deterministic and serialized. It never enters MainAgent or
+            # the READ Worker pool. Confirmation creates a new WRITE Request.
+            writes = [
+                item for item in ready
+                if item.category == RequestCategory.BUSINESS and item.request_type == RequestType.WRITE
+            ]
+            if writes:
+                item = writes[0]
+                pending.pop(item.request_id, None)
+                item.status = RequestStatus.RUNNING
+                request_batch_index += 1
+                batch_meta = {
+                    "batch_index": request_batch_index,
+                    "request_ids": [item.request_id],
+                    "parallelizable": False,
+                    "execution_mode": "deterministic_write_fast_path",
+                    "action_type": item.action_type,
+                }
+                request_batches.append(batch_meta)
+                flow_event("REQUEST_BATCH_STARTED", batch_meta, run_id=run_id)
+                save_request_checkpoint(item, phase="write_fast_path", status=RequestStatus.RUNNING.value)
+                write_result = self.write_executor.execute(
+                    action_type=item.action_type,
+                    query=item.objective or query,
+                    user_id=user_id,
+                    session_id=session_id,
+                    run_id=run_id,
+                    context=context,
+                )
+                write_status = str(write_result.get("status") or "failed")
+                if write_status == "completed":
+                    item.status = RequestStatus.COMPLETED
+                elif write_status == "waiting_user_input":
+                    item.status = RequestStatus.WAITING_USER_INPUT
+                else:
+                    item.status = RequestStatus.FAILED
+                item.status_reason = str(write_result.get("outcome") or "")[:500]
+                write_result.update({
+                    "request_id": item.request_id,
+                    "source_index": item.source_index,
+                    "category": "business",
+                    "request_type": "write",
+                    "objective": item.objective,
+                    "status": item.status.value,
+                })
+                request_results[item.request_id] = write_result
+                materialized_results[item.request_id] = {
+                    "request_id": item.request_id,
+                    "source_index": item.source_index,
+                    "category": "business",
+                    "request_type": "write",
+                    "proposal_required": False,
+                    "objective": item.objective,
+                    "status": item.status.value,
+                    "status_reason": item.status_reason,
+                    "depends_on": list(item.depends_on),
+                    "business_effect_applied": bool(write_result.get("business_effect_applied")),
+                    "outcome": str(write_result.get("outcome") or ""),
+                    "proposal_id": str(write_result.get("proposal_id") or ""),
+                    "proposal_version": int(write_result.get("proposal_version") or 0),
+                    "proposal_status": str(write_result.get("proposal_status") or ""),
+                    "mutation_status": str(write_result.get("mutation_status") or ""),
+                    "warnings": list(write_result.get("warnings") or []),
+                    "errors": list(write_result.get("errors") or []),
+                }
+                save_request_checkpoint(item, phase="write_completed", result=write_result)
+                flow_event("WRITE_REQUEST_COMPLETED", write_result, run_id=run_id,
+                           level="INFO" if item.status == RequestStatus.COMPLETED else "WARNING")
+                continue
+
+            # PRESENTATION and pre-classified UNSUPPORTED do not enter the parallel business pool.
+            for item in list(ready):
+                if item.status == RequestStatus.UNSUPPORTED:
+                    pending.pop(item.request_id, None)
+                    request_results[item.request_id] = {
+                        "request_id": item.request_id, "status": RequestStatus.UNSUPPORTED.value,
+                        "reason": item.status_reason or "request_marked_unsupported",
+                    }
+                    save_request_checkpoint(item, phase="unsupported", result=request_results[item.request_id])
+                    flow_event("REQUEST_COMPLETION_UPDATED", request_results[item.request_id], run_id=run_id, level="WARNING")
+                elif item.category == RequestCategory.PRESENTATION:
+                    pending.pop(item.request_id, None)
+                    item.status = RequestStatus.PRESENTATION_APPLIED
+                    request_results[item.request_id] = {
+                        "request_id": item.request_id, "status": item.status.value,
+                        "presentation_policy": presentation_policy.to_dict(),
+                    }
+                    save_request_checkpoint(item, phase="presentation_applied", result=request_results[item.request_id])
+                    flow_event("REQUEST_COMPLETION_UPDATED", request_results[item.request_id], run_id=run_id)
+
+            ready_business = [
+                item for item in ready
+                if item.request_id in pending
+                and item.category == RequestCategory.BUSINESS
+                and item.request_type == RequestType.READ
+            ]
+            executable_ready = list(ready_business)
+            if executable_ready:
+                request_batch_index += 1
+                batch_meta = {
+                    "batch_index": request_batch_index,
+                    "request_ids": [item.request_id for item in executable_ready],
+                    "parallelizable": len(executable_ready) > 1,
+                    "execution_mode": "ready_batch_parallel_business",
+                    "max_parallel_requests": self.resource_budget.max_parallel_requests,
+                }
+                request_batches.append(batch_meta)
+                flow_event("REQUEST_BATCH_STARTED", batch_meta, run_id=run_id)
+                flow_event(
+                    "REQUEST_PARALLEL_EXECUTION_STARTED",
+                    {**batch_meta, "resource_budget": self.resource_budget.snapshot()},
+                    run_id=run_id,
+                )
+                for item in executable_ready:
+                    pending.pop(item.request_id, None)
+                    item.status = RequestStatus.RUNNING
+                outcomes: dict[str, dict[str, Any]] = {}
+                max_workers = min(self.resource_budget.max_parallel_requests, len(executable_ready))
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    futures = {pool.submit(business_call, item): item for item in executable_ready}
+                    for future in as_completed(futures):
+                        item = futures[future]
+                        outcomes[item.request_id] = future.result()
+                proposals: list[SessionMutationProposal] = []
+                # Merge in source order, never future completion order.
+                for item in executable_ready:
+                    outcome = outcomes[item.request_id]
+                    item.status = outcome["status"]
+                    item.status_reason = outcome["reason"]
+                    request_results[item.request_id] = outcome["result"]
+                    if outcome["materialized"]:
+                        materialized_results[item.request_id] = outcome["materialized"]
+                    proposals.append(outcome["mutation_proposal"])
+                    save_request_checkpoint(item, phase="business_completed", result=outcome["result"])
+                    flow_event(
+                        "BUSINESS_REQUEST_PLANNING_COMPLETED",
+                        {"request_id": item.request_id, "status": item.status.value,
+                         "need_completion": dict(outcome["result"].get("need_completion") or {})},
+                        run_id=run_id,
+                        level="INFO" if self._request_dependency_usable(item.status.value) else "WARNING",
+                    )
+                    flow_event(
+                        "REQUEST_COMPLETION_UPDATED",
+                        {"request_id": item.request_id, "status": item.status.value, "category": "business"},
+                        run_id=run_id,
+                        level="INFO" if self._request_dependency_usable(item.status.value) else "WARNING",
+                    )
+                flow_event(
+                    "REQUEST_PARALLEL_EXECUTION_FINISHED",
+                    {**batch_meta, "statuses": {item.request_id: item.status.value for item in executable_ready},
+                     "resource_budget": self.resource_budget.snapshot()},
+                    run_id=run_id,
+                )
+                commit = self._commit_request_batch_mutations(
+                    run_id=run_id, batch_index=request_batch_index, proposals=proposals
+                )
+                batch_commit_audit.append(commit)
+                continue
+
+            # Only non-executable bookkeeping requests remained in this ready set.
+            if not progressed and not any(item.request_id in pending for item in ready):
+                continue
+
+        # Persist bundle-level presentation preference only after Request execution.
+        if bundle_session_mutations.operations:
+            batch_commit_audit.append(self._commit_request_batch_mutations(
+                run_id=run_id, batch_index=request_batch_index + 1,
+                proposals=[bundle_session_mutations],
+            ))
+
+        coverage = self._request_coverage(bundle, request_results)
+        flow_event("REQUEST_COVERAGE_COMPLETED", coverage, run_id=run_id)
+
+        bundle_results_payload = {
+            "schema_version": "request_bundle_results.v2",
+            "request_bundle": bundle.to_dict(),
+            "request_coverage": coverage,
+            "request_results": {
+                item.request_id: (
+                    materialized_results.get(item.request_id)
+                    or {
+                        "request_id": item.request_id,
+                        "category": item.category.value,
+                        "request_type": item.request_type.value if item.category == RequestCategory.BUSINESS else "",
+                        "proposal_required": bool(item.proposal_required),
+                        "objective": item.objective,
+                        "status": str((request_results.get(item.request_id) or {}).get("status") or item.status.value),
+                        "reason": str((request_results.get(item.request_id) or {}).get("reason") or ""),
+                    }
+                )
+                for item in bundle.requests
+            },
+        }
+        context["request_bundle_results"] = bundle_results_payload
+        context["presentation_policy"] = presentation_policy.to_dict()
+
+        final_task = self._build_bundle_report_task(
+            run_id=run_id,
+            session_id=session_id,
+            user_id=user_id,
+            objective="按照Request原始顺序汇总本轮已验证结果，并明确未完成、待参数、待审批和不支持的Request。",
+        )
+        if self.runtime_services is not None:
+            self.runtime_services.register_tasks([final_task])
+        final_results, final_batches, final_timeline = self._run_dag(
+            [final_task],
+            query=query,
+            output_dir=self.output_dir,
+            db_path=self.db_path,
+            default_top_k=default_top_k,
+            language=presentation_policy.language or language,
+            execution_context=context,
+        )
+        final_result = final_results.get(final_task.task_id)
+        answer = self._report_content(final_result)
+        validation = self.presentation_validator.validate(answer, presentation_policy)
+        if not validation.valid:
+            flow_event(
+                "PRESENTATION_VALIDATION_FAILED",
+                validation.to_dict(),
+                run_id=run_id,
+                level="WARNING",
+            )
+            context["presentation_validation_feedback"] = validation.to_dict()
+            retry_task = self._build_bundle_report_task(
+                run_id=run_id,
+                session_id=session_id,
+                user_id=user_id,
+                objective="只修正上一版最终回答的呈现格式以满足PresentationPolicy；不得增加、删除或改变业务事实与结论。",
+                include_validation_feedback=True,
+            )
+            if self.runtime_services is not None:
+                self.runtime_services.register_tasks([retry_task])
+            retry_results, retry_batches, retry_timeline = self._run_dag(
+                [retry_task],
+                query=query,
+                output_dir=self.output_dir,
+                db_path=self.db_path,
+                default_top_k=default_top_k,
+                language=presentation_policy.language or language,
+                execution_context=context,
+            )
+            retry_result = retry_results.get(retry_task.task_id)
+            retry_answer = self._report_content(retry_result)
+            retry_validation = self.presentation_validator.validate(retry_answer, presentation_policy)
+            if retry_answer:
+                answer = retry_answer
+                validation = retry_validation
+                final_results.update(retry_results)
+                final_batches.extend(retry_batches)
+                final_timeline.extend(retry_timeline)
+
+        if not answer:
+            answer = (
+                "本轮Request已完成结构化处理，但最终呈现Worker未生成有效回答。"
+                if (presentation_policy.language or language) != "en"
+                else "The requests were processed structurally, but the final presentation Worker did not produce a valid answer."
+            )
+
+        # Parent Run state is Request-level, not one Business sub-plan's state.
+        waiting_user = [
+            row["request_id"] for row in coverage["requests"]
+            if row["status"] == RequestStatus.WAITING_USER_INPUT.value
+        ]
+        waiting_context = [
+            row["request_id"] for row in coverage["requests"]
+            if row["status"] in {RequestStatus.WAITING_CONTEXT.value, RequestStatus.BLOCKED.value}
+        ]
+        failed_requests = [
+            row["request_id"] for row in coverage["requests"]
+            if row["status"] in {RequestStatus.FAILED.value, RequestStatus.TOOL_FAILED.value}
+        ]
+        supported_terminal = [
+            row for row in coverage["requests"]
+            if row["status"] not in {RequestStatus.UNSUPPORTED.value, RequestStatus.PRESENTATION_APPLIED.value}
+        ]
+        completed_any = any(
+            row["status"] in {
+                RequestStatus.COMPLETED.value, RequestStatus.PARTIALLY_COMPLETED.value,
+                RequestStatus.WAITING_APPROVAL.value, RequestStatus.BUSINESS_EMPTY.value,
+            }
+            for row in supported_terminal
+        )
+        execution_status = (
+            "waiting_context" if waiting_user or waiting_context else
+            "partially_completed" if failed_requests and completed_any else
+            "failed" if failed_requests and not completed_any else
+            "completed"
+        )
+        success = bool(completed_any and not waiting_user and not waiting_context and not failed_requests and validation.valid)
+        self.checkpoints.save(RunCheckpoint(
+            run_id=run_id,
+            session_id=session_id,
+            user_id=user_id,
+            status=(
+                "waiting_user_input" if waiting_user else
+                "waiting_context" if waiting_context else
+                "completed" if execution_status == "completed" else "failed"
+            ),
+            current_node_id="request_bundle_final_response",
+            capability_plan={
+                "request_bundle": bundle.to_dict(),
+                "request_coverage": coverage,
+                "presentation_policy": presentation_policy.to_dict(),
+            },
+            task_states={
+                task_id: str((payload or {}).get("status") or "")
+                for request_result in request_results.values()
+                for task_id, payload in dict(request_result.get("task_results") or {}).items()
+                if isinstance(payload, dict)
+            },
+            data_refs=[],
+            missing_parameters=waiting_user,
+            missing_context=waiting_context,
+            replan_count=sum(int(result.get("replan_count") or 0) for result in request_results.values()),
+        ))
+
+        all_task_results: dict[str, Any] = {}
+        all_timeline: list[dict[str, Any]] = []
+        all_batches: list[dict[str, Any]] = []
+        for request_result in request_results.values():
+            all_task_results.update(dict(request_result.get("task_results") or {}))
+            all_timeline.extend(list(request_result.get("agent_timeline") or []))
+            all_batches.extend(list(request_result.get("execution_batches") or []))
+        all_task_results.update({task_id: result.safe_for_coordinator() for task_id, result in final_results.items()})
+        all_timeline.extend(final_timeline)
+        all_batches.extend(final_batches)
+
+        return {
+            "success": success,
+            "answer": answer,
+            "execution_status": execution_status,
+            "request_bundle": bundle.to_dict(),
+            "request_coverage": coverage,
+            "request_results": request_results,
+            "presentation_policy": presentation_policy.to_dict(),
+            "presentation_validation": validation.to_dict(),
+            "task_results": all_task_results,
+            "graph_worker_results": {
+                "contract_version": "graph_worker_results.v1",
+                "items": list(all_task_results.values()),
+                "task_count": len(all_task_results),
+                "request_count": len(bundle.requests),
+            },
+            "tool_calls": [],
+            "internal_tool_call_count": len([row for row in all_timeline if row.get("status") != "not_executed"]),
+            "execution_order": [str(row.get("task_id") or "") for row in all_timeline if str(row.get("task_id") or "")],
+            "execution_batches": all_batches,
+            "request_execution_batches": request_batches,
+            "request_parallel_metrics": {
+                "request_parallelism": self.resource_budget.snapshot()["request"]["peak"],
+                "max_parallel_requests": self.resource_budget.max_parallel_requests,
+                "resource_budget": self.resource_budget.snapshot(),
+                "batch_count": len(request_batches),
+                "batch_commit_count": len(batch_commit_audit),
+                "shared_context_reuse_count": len(bundle.business_requests()),
+            },
+            "warnings": [
+                warning
+                for result in request_results.values()
+                for warning in result.get("warnings") or []
+            ] + ([] if validation.valid else list(validation.violations)),
+            "errors": [
+                str(result.get("reason") or "")
+                for result in request_results.values()
+                if str(result.get("status") or "") in {RequestStatus.FAILED.value, RequestStatus.TOOL_FAILED.value}
+            ],
+            "need_clarification": bool(waiting_user),
+            "clarification_question": (
+                f"以下Request仍需要用户补充参数：{', '.join(waiting_user)}"
+                if waiting_user and (presentation_policy.language or language) != "en" else
+                f"User input is still required for: {', '.join(waiting_user)}" if waiting_user else ""
+            ),
+            "missing_context": waiting_context,
+            "observations": coverage["requests"],
+            "need_completion": {
+                request_id: dict(result.get("need_completion") or {})
+                for request_id, result in request_results.items()
+            },
+            "replan_audit": [
+                item
+                for result in request_results.values()
+                for item in result.get("replan_audit") or []
+            ],
+            "replan_count": sum(int(result.get("replan_count") or 0) for result in request_results.values()),
+            "invalid_replan_block_count": sum(int(result.get("invalid_replan_block_count") or 0) for result in request_results.values()),
+            "replan_limits": {"request_scoped": True, "worker_forward_replan_preserved": True},
+            "agent_outputs": all_task_results,
+            "agent_timeline": all_timeline,
+            "handoff": {
+                "handoff_available": bool(all_task_results),
+                "handoff_count": len(all_task_results),
+                "handoff_refs": [f"worker_result:{task_id}" for task_id in all_task_results],
+                "safety": {
+                    "worker_private_tools": True,
+                    "coordinator_tool_visibility": "none",
+                    "control_gateway_separate": True,
+                },
+            },
+            "graph_runtime": {
+                "contract_version": "request_bundle_capability_runtime.v1",
+                "graph_id": self.store.graph_id,
+                "request_bundle": bundle.to_dict(),
+                "request_coverage": coverage,
+                "presentation_policy": presentation_policy.to_dict(),
+                "worker_dag_build_owner": "runtime_deterministic_compiler",
+                "request_dependency_owner": "request_bundle_ready_batch_runtime",
+                "worker_private_planning_owner": "specialist_worker",
+                "request_parallel_execution": {
+                    "executable_ready_batch_enabled": True,
+                    "proposal_parallel_enabled": False,
+                    "control_parallel_enabled": False,
+                    "shared_run_context_read_only": True,
+                    "cross_request_channel": "request_order_plus_context_bundle",
+                    "resource_budget": self.resource_budget.snapshot(),
+                    "batch_session_commits": batch_commit_audit,
+                },
+                "runtime_persistence": {
+                    "agent_steps_connected": self.runtime_services is not None,
+                    "runtime_layer": "request_dag+capability_dag+worker_tool_dag",
+                },
+            },
+        }
+
+    def _execute_read_request(
+        self,
+        *,
+        query: str,
+        decomposition: dict[str, Any],
+        user_id: str,
+        default_top_k: int,
+        session_id: str,
+        run_id: str,
+        language: str,
+        execution_context: dict[str, Any] | None,
+        proposal_required: bool,
+        context_binding: ContextBinding,
+        request_id: str = "",
+        task_id_prefix: str = "",
+        persist_checkpoint: bool = True,
+        persist_user_turn: bool = True,
+        defer_session_mutations: bool = False,
+        request_source_index: int = 0,
+    ) -> dict[str, Any]:
         del decomposition
         if self.runtime_services is not None:
             self.runtime_services.validate_identity(
@@ -457,77 +1463,58 @@ class AgentCollaborationCoordinator:
                 session_id=session_id,
             )
         context = dict(execution_context or {})
+        if self.specialist.context_bundle is None or self.specialist.context_bundle.run_id != run_id:
+            self.specialist.bind_context_bundle(ContextBundle(user_id=user_id, conversation_id=session_id, run_id=run_id, locale=language))
+        session_mutation_proposal = SessionMutationProposal(
+            request_id=str(request_id or "REQUEST"),
+            source_index=int(request_source_index or 0),
+        )
         memory_summary = self.session_state.build_summary(session_id, limit=40)
+        proposal_required = bool(proposal_required)
+        # ``read_goal`` is an internal planning-output hint only. It is not a
+        # Request permission. The current Business Request remains READ.
+        read_goal = "proposal" if proposal_required else "read"
         flow_event(
-            "MAIN_ENTRY_DECISION_STARTED",
+            "BUSINESS_REQUEST_CLASSIFIED",
             {
-                "request": query,
-                "memory_summary_chars": len(memory_summary),
-                "execution_context_keys": sorted(context.keys()),
+                "request_id": str(request_id or ""),
+                "category": "business",
+                "request_type": "read",
+                "proposal_required": proposal_required,
+                "context_binding": context_binding.to_dict(),
+                "semantic_authority": "request_bundle",
             },
             run_id=run_id,
         )
-        decision = self.entry.decide(
-            query=query,
-            memory_summary=memory_summary,
-            execution_context=context,
-            language=language,
-        )
-        flow_event(
-            "MAIN_ENTRY_DECISION_COMPLETED",
-            {
-                "request_mode": decision.mode.value,
-                "routing_reason": decision.reason,
-                "source": decision.source,
-                "confidence": decision.confidence,
-                "context_binding": decision.context_binding.to_dict(),
-                "semantic_authority": "routing_only",
-                "business_intent_owner": "canonical_intent_contract",
-            },
-            run_id=run_id,
-        )
-        if decision.mode in {RequestMode.CONFIRM, RequestMode.REJECT, RequestMode.LANGUAGE}:
-            return ControlGateway(output_dir=self.output_dir, db_path=self.db_path).execute(
-                decision=decision,
-                query=query,
-                user_id=user_id,
-                session_id=session_id,
-                run_id=run_id,
-                language=language,
-                execution_context=context,
-            )
-        if decision.mode == RequestMode.UNSUPPORTED:
-            answer = "当前请求超出系统能力范围。" if language != "en" else "This request is outside the system's supported scope."
-            return self._empty_result(answer=answer, success=False, status="failed", warnings=[decision.reason])
 
         requirements = [
             ContextRequirement(
-                slot_id="session_summary",
+                context_key="session_summary",
                 required=False,
                 source_preferences=["session_state"],
             ),
             ContextRequirement(
-                slot_id="long_term_memory",
+                context_key="long_term_memory",
                 required=False,
                 source_preferences=["sqlite_memory_store"],
             ),
             ContextRequirement(
-                slot_id="pending_runs",
+                context_key="pending_runs",
                 required=False,
                 source_preferences=["run_checkpoint"],
             ),
         ]
-        if decision.context_binding.inherit_previous_focus:
+        if context_binding.inherit_previous_focus:
             requirements.append(ContextRequirement(
-                slot_id="previous_focus_entities",
+                context_key="previous_focus_entities",
                 required=True,
                 source_preferences=["session_state", "run_checkpoint"],
                 allow_session_inheritance=True,
             ))
-        reference_entity_type = decision.context_binding.reference_entity_type.value
+        reference_entity_type = context_binding.reference_entity_type.value
         if reference_entity_type not in {"none", "unknown"}:
             requirements.append(ContextRequirement(
-                slot_id=f"typed_focus:{reference_entity_type}",
+                context_key=f"typed_focus:{reference_entity_type}",
                 required=False,
                 source_preferences=["session_state"],
                 allow_session_inheritance=True,
@@ -545,7 +1532,7 @@ class AgentCollaborationCoordinator:
         planning_memory_summary = _planning_memory_summary(
             session_summary=hydrated.session_summary,
             long_term_memory_summary=hydrated.long_term_memory_summary,
-            inherit_previous_focus=decision.context_binding.inherit_previous_focus,
+            inherit_previous_focus=context_binding.inherit_previous_focus,
         )
         # Keep the full conversation summary in runtime context for audit and
         # non-business conversational handling.  The MainAgent business planner
@@ -578,7 +1565,7 @@ class AgentCollaborationCoordinator:
                 "typed_inherited_ref_count": len(typed_inherited_refs),
                 "reference_entity_type": reference_entity_type,
                 "as_of_time": explicit_as_of,
-                "context_binding": decision.context_binding.to_dict(),
+                "context_binding": context_binding.to_dict(),
             },
             run_id=run_id,
         )
@@ -589,7 +1576,7 @@ class AgentCollaborationCoordinator:
             context_refs=context_refs,
             as_of_time=explicit_as_of,
             language=language,
-            context_binding=decision.context_binding.to_dict(),
+            context_binding=context_binding.to_dict(),
         )
         flow_event(
             "GRAPH_REF_RESOLUTION_COMPLETED",
@@ -607,21 +1594,22 @@ class AgentCollaborationCoordinator:
                 missing_items=resolution_missing,
                 available_parameters=hydrated.available_parameters,
             )
-            self.checkpoints.save(RunCheckpoint(
-                run_id=run_id,
-                session_id=session_id,
-                user_id=user_id,
-                status=(
-                    "waiting_user_input"
-                    if sufficiency.missing_parameters or sufficiency.unresolved_entities
-                    else "waiting_context"
-                ),
-                current_node_id="entity_resolution",
-                blocked_task_id="",
-                resolved_entity_refs=[ref.to_dict() for ref in focus_refs],
-                missing_parameters=list(sufficiency.missing_parameters),
-                missing_context_slots=[*sufficiency.missing_context_slots, *sufficiency.unresolved_entities],
-            ))
+            if persist_checkpoint:
+                self.checkpoints.save(RunCheckpoint(
+                    run_id=run_id,
+                    session_id=session_id,
+                    user_id=user_id,
+                    status=(
+                        "waiting_user_input"
+                        if sufficiency.missing_parameters or sufficiency.unresolved_entities
+                        else "waiting_context"
+                    ),
+                    current_node_id=f"request:{request_id}:entity_resolution" if request_id else "entity_resolution",
+                    blocked_task_id="",
+                    resolved_entity_refs=[ref.to_dict() for ref in focus_refs],
+                    missing_parameters=list(sufficiency.missing_parameters),
+                    missing_context=[*sufficiency.missing_context, *sufficiency.unresolved_entities],
+                ))
             flow_event("CONTEXT_SUFFICIENCY_BLOCKED", sufficiency.to_dict(), run_id=run_id, level="WARNING")
             question = _clarification_question(resolution_missing, language)
             return {
@@ -635,70 +1623,75 @@ class AgentCollaborationCoordinator:
                     "resolution_audit": resolution_audit,
                 },
             }
-        self.session_state.put(
-            session_id=session_id,
-            key=f"turn:{run_id}:user_message",
-            value={"user_id": user_id, "message": str(query or "")},
-            value_type="conversation_turn",
-            summary=str(query or "")[:500],
-            source_type="user_message",
-            source_ref=run_id,
-            confirmed=True,
-            confidence=1.0,
-        )
-        if focus_refs:
+        if persist_user_turn:
             self.session_state.put(
                 session_id=session_id,
-                key="active_graph_refs",
-                value=[ref.to_dict() for ref in focus_refs],
-                value_type="graph_ref_list",
-                summary="当前对话已确认的金融图对象引用。",
-                source_type="graph_entity_resolution",
+                key=f"turn:{run_id}:user_message",
+                value={"user_id": user_id, "message": str(query or "")},
+                value_type="conversation_turn",
+                summary=str(query or "")[:500],
+                source_type="user_message",
                 source_ref=run_id,
                 confirmed=True,
                 confidence=1.0,
             )
+        if focus_refs:
+            focus_put = {
+                "session_id": session_id, "key": "active_graph_refs",
+                "value": [ref.to_dict() for ref in focus_refs],
+                "value_type": "graph_ref_list", "summary": "当前对话已确认的金融图对象引用。",
+                "source_type": "graph_entity_resolution", "source_ref": run_id,
+                "confirmed": True, "confidence": 1.0,
+            }
+            if defer_session_mutations:
+                session_mutation_proposal.add_put(**focus_put)
+            else:
+                self.session_state.put(**focus_put)
             typed_groups: dict[str, list[GraphRef]] = {}
             for ref in focus_refs:
                 focus_type = _graph_ref_semantic_type(ref)
                 if focus_type in {"security", "portfolio", "event"}:
                     typed_groups.setdefault(focus_type, []).append(ref)
             for focus_type, refs in typed_groups.items():
-                self.session_state.put(
-                    session_id=session_id,
-                    key=f"typed_graph_focus:{focus_type}",
-                    value=[ref.to_dict() for ref in _dedupe_refs(refs)],
-                    value_type="graph_ref_list",
-                    summary=f"最近一次已确认的{focus_type}类型金融图对象引用。",
-                    source_type="graph_entity_resolution",
-                    source_ref=run_id,
-                    confirmed=True,
-                    confidence=1.0,
-                )
+                typed_put = {
+                    "session_id": session_id, "key": f"typed_graph_focus:{focus_type}",
+                    "value": [ref.to_dict() for ref in _dedupe_refs(refs)],
+                    "value_type": "graph_ref_list",
+                    "summary": f"最近一次已确认的{focus_type}类型金融图对象引用。",
+                    "source_type": "graph_entity_resolution", "source_ref": run_id,
+                    "confirmed": True, "confidence": 1.0,
+                }
+                if defer_session_mutations:
+                    session_mutation_proposal.add_put(**typed_put)
+                else:
+                    self.session_state.put(**typed_put)
 
-        self.checkpoints.save(RunCheckpoint(
-            run_id=run_id,
-            session_id=session_id,
-            user_id=user_id,
-            status="running",
-            current_node_id="capability_planning",
-            resolved_entity_refs=[ref.to_dict() for ref in focus_refs],
-        ))
+        if persist_checkpoint:
+            self.checkpoints.save(RunCheckpoint(
+                run_id=run_id,
+                session_id=session_id,
+                user_id=user_id,
+                status="running",
+                current_node_id=f"request:{request_id}:capability_planning" if request_id else "capability_planning",
+                resolved_entity_refs=[ref.to_dict() for ref in focus_refs],
+            ))
         flow_event(
             "WORKER_PLANNING_STARTED",
             {
-                "request_mode": decision.mode.value,
+                "request_id": str(request_id or ""),
+                "request_type": "read",
+                "proposal_required": proposal_required,
                 "focus_ref_count": len(focus_refs),
                 "context_ref_count": len(context_refs),
                 "worker_selection_owner": "main_agent",
-                "planning_mode": "intent_then_descriptions_then_worker_calls_then_worker_dag",
+                "planning_mode": "business_request_need_then_worker_assignment_then_runtime_dag_compile",
                 "worker_loading": "all_public_descriptions_upfront",
                 "runtime_assignment_role": "validate_only",
-                "raw_request_semantic_owner": "canonical_intent_contract",
+                "raw_request_semantic_owner": "request_bundle.objective",
                 "planning_memory_policy": {
-                    "previous_focus_inheritance": bool(decision.context_binding.inherit_previous_focus),
+                    "previous_focus_inheritance": bool(context_binding.inherit_previous_focus),
                     "session_summary_included": bool(
-                        decision.context_binding.inherit_previous_focus
+                        context_binding.inherit_previous_focus
                         and str(hydrated.session_summary or "").strip()
                     ),
                     "long_term_memory_included": bool(str(hydrated.long_term_memory_summary or "").strip()),
@@ -709,7 +1702,7 @@ class AgentCollaborationCoordinator:
         try:
             tasks, plan_meta = self.planner.plan(
                 query=query,
-                request_mode=decision.mode.value,
+                effect_limit=read_goal,
                 session_id=session_id,
                 run_id=run_id,
                 user_id=user_id,
@@ -718,7 +1711,18 @@ class AgentCollaborationCoordinator:
                 memory_summary=planning_memory_summary,
                 language=language,
                 as_of_time=explicit_as_of,
-                context_binding=decision.context_binding.to_dict(),
+                context_binding=context_binding.to_dict(),
+                request_id=str(request_id or ""),
+                task_id_prefix=str(task_id_prefix or ""),
+                request_target=(
+                    dict(dict(context.get("request_item") or {}).get("target") or {})
+                    if isinstance(dict(context.get("request_item") or {}).get("target"), dict)
+                    else {}
+                ),
+                request_constraints=[
+                    str(item) for item in dict(context.get("request_item") or {}).get("constraints") or []
+                    if str(item)
+                ],
             )
         except Exception as exc:
             flow_event(
@@ -830,7 +1834,7 @@ class AgentCollaborationCoordinator:
             try:
                 full_tasks, new_tasks, replan_meta = self.planner.replan_forward(
                     query=query,
-                    request_mode=decision.mode.value,
+                    effect_limit=effect_limit,
                     session_id=session_id,
                     run_id=run_id,
                     user_id=user_id,
@@ -914,21 +1918,21 @@ class AgentCollaborationCoordinator:
             # whether that change actually satisfied more contracts after run.
             # Keep the two concepts separate so an executable repair is not
             # mislabeled merely because its newly added Worker later fails.
-            prior_missing_slots = {
-                str(slot)
+            prior_missing_data = {
+                str(name)
                 for item in replan_candidates
-                for slot in item.get("missing_information_slots") or []
-                if str(slot)
+                for name in item.get("missing_data_names") or []
+                if str(name)
             }
-            new_produced_slots = {
-                str(slot)
+            new_produced_data = {
+                str(name)
                 for task in new_tasks
-                for slot in task.expected_output_slots
-                if str(slot)
+                for name in task.expected_data_names
+                if str(name)
             }
             structural_progress = bool(
                 new_tasks
-                and (prior_missing_slots.intersection(new_produced_slots) or superseded_ids)
+                and (prior_missing_data.intersection(new_produced_data) or superseded_ids)
             )
             audit = {
                 "round": replan_round,
@@ -956,7 +1960,7 @@ class AgentCollaborationCoordinator:
         tasks = active_tasks
         final_observations = self._build_task_observations(tasks, results)
         need_completion = evaluate_need_completion(
-            dict(plan_meta.get("canonical_intent_contract") or {}),
+            dict(plan_meta.get("request_need_contract") or {}),
             final_observations,
         )
         flow_event(
@@ -974,17 +1978,17 @@ class AgentCollaborationCoordinator:
         )
         for result in results.values():
             for update in result.memory_updates:
-                self.session_state.put(
-                    session_id=session_id,
-                    key=update.key,
-                    value=update.value,
-                    value_type=update.value_type,
-                    summary=update.summary,
-                    source_type=update.source_type,
-                    source_ref=update.source_ref or result.task_id,
-                    confirmed=update.confirmed,
-                    confidence=update.confidence,
-                )
+                memory_put = {
+                    "session_id": session_id, "key": update.key, "value": update.value,
+                    "value_type": update.value_type, "summary": update.summary,
+                    "source_type": update.source_type,
+                    "source_ref": update.source_ref or result.task_id,
+                    "confirmed": update.confirmed, "confidence": update.confidence,
+                }
+                if defer_session_mutations:
+                    session_mutation_proposal.add_put(**memory_put)
+                else:
+                    self.session_state.put(**memory_put)
 
         public_results = {task_id: result.safe_for_coordinator() for task_id, result in results.items()}
         report = next(
@@ -998,27 +2002,27 @@ class AgentCollaborationCoordinator:
         report_content = ""
         if report is not None and isinstance(report.data, dict):
             report_content = str(report.data.get("content") or "").strip()
-            if not report_content and isinstance(report.data.get("slots"), dict):
-                report_content = str(report.data["slots"].get("user_facing_report") or "").strip()
         goal_contract = dict(plan_meta.get("goal_contract") or {})
-        goal_slots = {
+        goal_data_names = {
             str(item) for item in [
                 *(goal_contract.get("desired_outputs") or []),
-                *(goal_contract.get("required_information_slots") or []),
+                *(goal_contract.get("required_context_names") or []),
             ] if str(item)
         }
-        # Every normal Agent run owns a runtime-level N_FINAL requirement. A
-        # missing report is therefore a terminal contract failure; Worker
-        # summaries are audit material and must never become a second answer path.
-        terminal_report_missing = not bool(report_content)
+        # Every Business Request stops at structured business results. W06 runs
+        # exactly once at Bundle level after Request Coverage.
+        terminal_report_required = False
+        terminal_report_missing = terminal_report_required and not bool(report_content)
         if report_content:
             answer = report_content
-        else:
+        elif terminal_report_required:
             answer = (
                 "最终自然语言报告未生成，系统不会用Worker状态摘要冒充业务回答。"
                 if language != "en" else
                 "The final user-facing report was not generated; Worker status summaries are not used as the business answer."
             )
+        else:
+            answer = ""
         statuses = [result.status for result in results.values()]
         need_context = [item for result in results.values() for item in result.missing_items if item.blocking]
         final_sufficiency = self.sufficiency_gate.evaluate(
@@ -1043,8 +2047,8 @@ class AgentCollaborationCoordinator:
                 "contract_valid": False,
                 "completion_report_valid": False,
                 "semantic_satisfied": False,
-                "produced_information_slots": [],
-                "missing_information_slots": ["user_facing_report"],
+                "produced_data_names": [],
+                "missing_data_names": ["user_facing_report"],
                 "failure_kind": "terminal_user_facing_report_missing",
                 "retryable": False,
                 "repairable": True,
@@ -1083,24 +2087,27 @@ class AgentCollaborationCoordinator:
             if waiting_internal_context else ""
         )
         internal_count = len([item for item in timeline if item.get("status") not in {"not_executed"}])
-        self.checkpoints.save(RunCheckpoint(
-            run_id=run_id,
-            session_id=session_id,
-            user_id=user_id,
-            status="waiting_user_input" if waiting_user_input else "waiting_context" if waiting_internal_context else "completed" if success else "failed",
-            current_node_id="final_response",
-            capability_plan=dict(plan_meta.get("capability_plan") or {}),
-            task_states={task.task_id: (results[task.task_id].status.value if task.task_id in results else "not_executed") for task in tasks},
-            resolved_entity_refs=[ref.to_dict() for ref in focus_refs],
-            slot_refs=[f"run-slot:{run_id}:{task_id}" for task_id in results],
-            missing_parameters=list(final_sufficiency.missing_parameters) if final_sufficiency else [],
-            missing_context_slots=(
-                [*final_sufficiency.missing_context_slots, *final_sufficiency.unresolved_entities]
-                if final_sufficiency else []
-            ),
-            replan_count=len([item for item in replan_audit if item.get("status") == "executed"]),
-        ))
+        if persist_checkpoint:
+            self.checkpoints.save(RunCheckpoint(
+                run_id=run_id,
+                session_id=session_id,
+                user_id=user_id,
+                status="waiting_user_input" if waiting_user_input else "waiting_context" if waiting_internal_context else "completed" if success else "failed",
+                current_node_id=f"request:{request_id}:final" if request_id else "final_response",
+                capability_plan=dict(plan_meta.get("capability_plan") or {}),
+                task_states={task.task_id: (results[task.task_id].status.value if task.task_id in results else "not_executed") for task in tasks},
+                resolved_entity_refs=[ref.to_dict() for ref in focus_refs],
+                data_refs=[],
+                missing_parameters=list(final_sufficiency.missing_parameters) if final_sufficiency else [],
+                missing_context=(
+                    [*final_sufficiency.missing_context, *final_sufficiency.unresolved_entities]
+                    if final_sufficiency else []
+                ),
+                replan_count=len([item for item in replan_audit if item.get("status") == "executed"]),
+            ))
         return {
+            "request_id": str(request_id or ""),
+            "session_mutation_proposal": session_mutation_proposal.to_dict(),
             "success": success,
             "answer": question if question else context_wait_message if context_wait_message else answer,
             "task_results": public_results,
@@ -1166,7 +2173,7 @@ class AgentCollaborationCoordinator:
         task: GraphAgentTask,
         result: GraphWorkerResult | None,
     ) -> dict[str, Any]:
-        expected_slots = set(task.expected_output_slots)
+        expected_data = set(task.expected_data_names)
         if result is None:
             return {
                 "task_id": task.task_id,
@@ -1175,8 +2182,8 @@ class AgentCollaborationCoordinator:
                 "status": ResultStatus.NOT_EXECUTED.value,
                 "contract_valid": False,
                 "semantic_satisfied": False,
-                "produced_information_slots": [],
-                "missing_information_slots": sorted(expected_slots),
+                "produced_data_names": [],
+                "missing_data_names": sorted(expected_data),
                 "failure_kind": "not_executed",
                 "retryable": False,
                 "repairable": True,
@@ -1196,11 +2203,11 @@ class AgentCollaborationCoordinator:
             except Exception as exc:
                 completion_error = str(exc)
         produced = {
-            str(item) for item in completion.get("produced_information_slots") or [] if str(item)
+            str(item) for item in completion.get("produced_data_names") or [] if str(item)
         }
         missing = {
-            str(item) for item in completion.get("missing_information_slots") or [] if str(item)
-        } or (expected_slots - produced)
+            str(item) for item in completion.get("missing_data_names") or [] if str(item)
+        } or (expected_data - produced)
         if completion_valid:
             decision = flow_decision(
                 result.status,
@@ -1243,9 +2250,9 @@ class AgentCollaborationCoordinator:
             "contract_valid": completion_valid,
             "completion_report_valid": completion_valid,
             "semantic_satisfied": semantic_satisfied,
-            "produced_information_slots": sorted(produced),
-            "missing_information_slots": sorted(missing),
-            "missing_context_slots": sorted({
+            "produced_data_names": sorted(produced),
+            "missing_data_names": sorted(missing),
+            "missing_context": sorted({
                 str(item.key) for item in list(result.missing_items or [])
                 if getattr(item, "blocking", True) and str(getattr(item, "key", "") or "")
             }),
@@ -1362,24 +2369,6 @@ class AgentCollaborationCoordinator:
                     results[task.task_id] = result
                     if self.runtime_services is not None:
                         self.runtime_services.record_result(task, result)
-                    try:
-                        published = self.slot_store.publish_worker_result(task, result)
-                        if published:
-                            flow_event(
-                                "WORKER_SLOTS_PUBLISHED",
-                                {
-                                    "task_id": task.task_id,
-                                    "worker_id": task.worker_id,
-                                    "slot_ids": [record.slot_id for record in published],
-                                    "value_refs": [record.value_ref for record in published],
-                                },
-                                run_id=task.run_id,
-                            )
-                    except Exception as exc:
-                        trace_exception(
-                            "coordinator.slot_publish.failed", exc,
-                            run_id=task.run_id, task_id=task.task_id,
-                        )
                     timeline.append({
                         "task_id": task.task_id,
                         "worker_id": task.worker_id,
@@ -1423,6 +2412,34 @@ class AgentCollaborationCoordinator:
                     for dependency_id in task.dependency_task_ids
                 )
             ]
+            # V23.0.16: W09 consumes the run ContextBundle working memory, not sibling task outputs.
+            # When data-provider Workers are ready in the same layer, execute them first
+            # so their completed (including empty) query results are tagged before W09
+            # evaluates entity-context quality.  This is role metadata, not Worker-ID wiring.
+            if ready:
+                provider_ready = [
+                    task for task in ready
+                    if str(getattr(self.directory.get(task.worker_id or task.assigned_agent), "working_memory_mode", "none")) == "provider"
+                ]
+                if provider_ready:
+                    deferred_consumers = [
+                        task.task_id for task in ready
+                        if str(getattr(self.directory.get(task.worker_id or task.assigned_agent), "working_memory_mode", "none")) == "consumer"
+                    ]
+                    if deferred_consumers:
+                        flow_event(
+                            "WORKING_MEMORY_CONSUMER_DEFERRED",
+                            {
+                                "provider_task_ids": [task.task_id for task in provider_ready],
+                                "consumer_task_ids": deferred_consumers,
+                                "reason": "publish_query_tags_before_entity_analysis",
+                            },
+                            run_id=str(tasks[0].run_id if tasks else ""),
+                        )
+                        ready = [
+                            task for task in ready
+                            if str(getattr(self.directory.get(task.worker_id or task.assigned_agent), "working_memory_mode", "none")) != "consumer"
+                        ]
             if not ready:
                 for task in list(pending.values()):
                     task.metadata.setdefault(
@@ -1463,25 +2480,21 @@ class AgentCollaborationCoordinator:
                 "agents": [task.assigned_agent for task in ready],
                 "parallel": len(ready) > 1,
             })
-            max_workers = min(4, len(ready))
+            max_workers = min(4, self.resource_budget.max_parallel_workers, len(ready))
             if self.runtime_services is not None:
                 for task in ready:
                     self.runtime_services.mark_ready(task)
                     self.runtime_services.mark_running(task)
-            with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                futures = {
-                    pool.submit(
-                        self.specialist.run,
-                        task,
-                        current_user_request=query,
-                        output_dir=output_dir,
-                        db_path=db_path,
-                        default_top_k=default_top_k,
-                        language=language,
+            def run_specialist(task: GraphAgentTask) -> GraphWorkerResult:
+                with self.resource_budget.worker_slot():
+                    return self.specialist.run(
+                        task, current_user_request=query, output_dir=output_dir,
+                        db_path=db_path, default_top_k=default_top_k, language=language,
                         execution_context=execution_context,
-                    ): task
-                    for task in ready
-                }
+                    )
+
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {pool.submit(run_specialist, task): task for task in ready}
                 for future in as_completed(futures):
                     task = futures[future]
                     try:
@@ -1506,24 +2519,6 @@ class AgentCollaborationCoordinator:
                     results[task.task_id] = result
                     if self.runtime_services is not None:
                         self.runtime_services.record_result(task, result)
-                    try:
-                        published = self.slot_store.publish_worker_result(task, result)
-                        if published:
-                            flow_event(
-                                "WORKER_SLOTS_PUBLISHED",
-                                {
-                                    "task_id": task.task_id,
-                                    "worker_id": task.worker_id,
-                                    "slot_ids": [record.slot_id for record in published],
-                                    "value_refs": [record.value_ref for record in published],
-                                },
-                                run_id=task.run_id,
-                            )
-                    except Exception as exc:
-                        trace_exception(
-                            "coordinator.slot_publish.failed", exc,
-                            run_id=task.run_id, task_id=task.task_id,
-                        )
                     timeline.append({
                         "task_id": task.task_id,
                         "worker_id": task.worker_id,

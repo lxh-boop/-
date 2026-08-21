@@ -333,9 +333,10 @@ class MemoryUpdate:
 class CapabilityExecutionTask:
     """Runtime task compiled from a MainAgent capability task.
 
-    The public plan carries a boundary plus a list of business contracts.  The
-    Runtime owns Worker binding and dependency derivation.  No task_type or
-    TaskProfile exists in this execution contract.
+    ``dependency_task_ids`` controls execution order only. Business data is
+    shared through the run ContextBundle and never transported on task edges.
+    ``effect_limit`` is retained as Request semantics for observability; Worker
+    mutation permission is enforced independently by capability permissions.
     """
 
     task_id: str
@@ -348,9 +349,8 @@ class CapabilityExecutionTask:
     contracts: list[dict[str, Any]] = field(default_factory=list)
     worker_id: str = ""
     business_parameters: dict[str, Any] = field(default_factory=dict)
-    resolved_input_bindings: list[dict[str, Any]] = field(default_factory=list)
     dependency_task_ids: list[str] = field(default_factory=list)
-    expected_output_slots: list[str] = field(default_factory=list)
+    expected_data_names: list[str] = field(default_factory=list)
     effect_limit: str = "read"
     execution_mode: str = "agentic"
     focus_refs: list[GraphRef] = field(default_factory=list)
@@ -360,7 +360,7 @@ class CapabilityExecutionTask:
     status: TaskStatus = TaskStatus.CREATED
     attempt: int = 1
     metadata: dict[str, Any] = field(default_factory=dict)
-    contract_version: str = "capability_execution_task.v1"
+    contract_version: str = "capability_execution_task.v2"
 
     def __post_init__(self) -> None:
         self.task_id = str(self.task_id or new_id("task"))
@@ -373,11 +373,8 @@ class CapabilityExecutionTask:
         self.worker_id = str(self.worker_id or "").strip().upper()
         self.contracts = [dict(item) for item in list(self.contracts or []) if isinstance(item, dict)]
         self.business_parameters = dict(self.business_parameters or {})
-        self.resolved_input_bindings = [
-            dict(item) for item in list(self.resolved_input_bindings or []) if isinstance(item, dict)
-        ]
         self.dependency_task_ids = _str_list(self.dependency_task_ids, limit=100)
-        self.expected_output_slots = _str_list(self.expected_output_slots, limit=100)
+        self.expected_data_names = _str_list(self.expected_data_names, limit=100)
         self.effect_limit = str(self.effect_limit or "read").strip().lower()
         self.execution_mode = str(self.execution_mode or "agentic").strip().lower()
         self.focus_refs = refs_from(self.focus_refs)
@@ -385,7 +382,7 @@ class CapabilityExecutionTask:
         self.as_of_time = str(self.as_of_time or "")
         self.status = TaskStatus.from_value(self.status)
         self.metadata = dict(self.metadata or {})
-        self.contract_version = "capability_execution_task.v1"
+        self.contract_version = "capability_execution_task.v2"
         try:
             self.priority = max(0, min(10, int(self.priority)))
         except (TypeError, ValueError):
@@ -397,11 +394,6 @@ class CapabilityExecutionTask:
 
     @property
     def args(self) -> dict[str, Any]:
-        """Compatibility name for existing domain adapters.
-
-        This is not a planner-owned task type contract; it is the ordinary
-        business-parameter bag after Runtime validation.
-        """
         return self.business_parameters
 
     @args.setter
@@ -410,15 +402,8 @@ class CapabilityExecutionTask:
 
     @property
     def inputs(self) -> dict[str, list[dict[str, str]]]:
-        grouped: dict[str, list[dict[str, str]]] = {}
-        for row in self.resolved_input_bindings:
-            role = str(row.get("input_slot_id") or "input")
-            grouped.setdefault(role, []).append({
-                "from_task_id": str(row.get("producer_task_id") or ""),
-                "information_slot": str(row.get("output_slot_id") or role),
-                "expected_output_type": str(row.get("schema_id") or ""),
-            })
-        return grouped
+        # Compatibility view: task edges are order-only and carry no business data.
+        return {}
 
     @property
     def expected_output_type(self) -> str:
@@ -426,7 +411,7 @@ class CapabilityExecutionTask:
 
     @property
     def required_outputs(self) -> list[str]:
-        return list(self.expected_output_slots)
+        return list(self.expected_data_names)
 
     @property
     def completion_contract(self) -> dict[str, Any]:
@@ -434,21 +419,13 @@ class CapabilityExecutionTask:
 
     @completion_contract.setter
     def completion_contract(self, value: dict[str, Any]) -> None:
-        # Legacy callers may assign this field.  The canonical source remains
-        # ``contracts`` and is never replaced by an old task-type contract.
         candidate = dict(value or {})
         if not self.contracts and isinstance(candidate.get("contracts"), list):
             self.contracts = [dict(item) for item in candidate["contracts"] if isinstance(item, dict)]
 
     def input_task_ids(self, role: str | None = None) -> list[str]:
-        result: list[str] = []
-        for row in self.resolved_input_bindings:
-            if role is not None and str(row.get("input_slot_id") or "") != str(role):
-                continue
-            task_id = str(row.get("producer_task_id") or "").strip()
-            if task_id and task_id not in result:
-                result.append(task_id)
-        return result
+        del role
+        return list(self.dependency_task_ids)
 
     def to_dict(self) -> dict[str, Any]:
         return _plain(self)
@@ -465,9 +442,8 @@ class CapabilityExecutionTask:
             "objective": self.objective,
             "contracts": _compact(self.contracts, max_depth=7),
             "business_parameters": _compact(self.business_parameters, max_depth=4),
-            "resolved_input_bindings": _compact(self.resolved_input_bindings, max_depth=5),
             "dependency_task_ids": list(self.dependency_task_ids),
-            "expected_output_slots": list(self.expected_output_slots),
+            "expected_data_names": list(self.expected_data_names),
             "effect_limit": self.effect_limit,
             "execution_mode": self.execution_mode,
             "user_id": self.user_id,
@@ -577,8 +553,8 @@ class GraphWorkerResult:
             if key in {
                 "boundary_id", "attempt", "partial_reason", "proposal_id", "plan_id",
                 "requires_approval", "graph_view_id", "duration_ms",
-                "tool_execution", "resolved_input_slots", "produced_information_slots",
-                "missing_information_slots", "tool_dag_task_count",
+                "tool_execution", "working_memory_context", "produced_data_names",
+                "missing_data_names", "tool_dag_task_count",
             }
         }
         return {

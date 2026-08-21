@@ -89,12 +89,12 @@ def execution_safe_value(
     max_depth: int = 14,
     max_items: int = 240,
 ) -> Any:
-    """Preserve Worker-to-Worker business payloads without leaking blocked internals.
+    """Preserve execution business payloads without leaking blocked internals.
 
-    Unlike ``safe_public_value`` this function is not an audit summarizer.  It is
-    used at delegated Worker boundaries where concrete structured context must be
-    retained.  This separation follows Deep Agents' context-isolation principle:
-    execution context and observer-facing summaries are different projections.
+    Unlike ``safe_public_value`` this function is not an audit summarizer. It is
+    used for ContextBundle working-memory and Worker execution payloads where
+    concrete structured context must be retained. Execution context and
+    observer-facing summaries remain different projections.
     """
 
     if isinstance(value, (int, float, bool)) or value is None:
@@ -154,31 +154,31 @@ def refs_from_dependencies(
     return refs
 
 
-def contract_output_slots(task: Any) -> list[str]:
+def contract_output_data_names(task: Any) -> list[str]:
     result: list[str] = []
     for contract in getattr(task, "contracts", []) or []:
         row = contract if isinstance(contract, dict) else getattr(contract, "to_dict", lambda: {})()
-        for output in row.get("promised_outputs") or []:
+        for output in row.get("promised_data") or []:
             if not isinstance(output, dict):
                 continue
-            slot = str(output.get("slot_id") or "").strip()
-            if slot and slot not in result:
-                result.append(slot)
+            name = str(output.get("name") or output.get("data_name") or "").strip()
+            if name and name not in result:
+                result.append(name)
     return result
 
 
-def contract_input_slots(task: Any, *, required_only: bool = False) -> list[str]:
+def contract_required_data_names(task: Any, *, required_only: bool = False) -> list[str]:
     result: list[str] = []
     for contract in getattr(task, "contracts", []) or []:
         row = contract if isinstance(contract, dict) else getattr(contract, "to_dict", lambda: {})()
-        for item in row.get("required_inputs") or []:
+        for item in row.get("required_data") or []:
             if not isinstance(item, dict):
                 continue
             if required_only and not bool(item.get("required", True)):
                 continue
-            slot = str(item.get("slot_id") or "").strip()
-            if slot and slot not in result:
-                result.append(slot)
+            name = str(item.get("name") or item.get("data_name") or "").strip()
+            if name and name not in result:
+                result.append(name)
     return result
 
 
@@ -193,25 +193,17 @@ def contract_acceptance_rules(task: Any) -> list[str]:
     return result
 
 
-def materialize_promised_slots(
+def materialize_promised_data(
     task: Any,
     value: Any,
     *,
-    per_slot: dict[str, Any] | None = None,
+    per_name: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Materialize every promised Worker output as a concrete runtime Slot.
+    """Materialize every promised business-data name.
 
-    ``data["slots"]`` is the single source of truth for Worker-produced
-    information.  There is intentionally no fallback from expected output names,
-    metadata, or completion reports.  ``per_slot`` can provide a specialized
-    value for a promised key; every other promised key receives ``value``.
+    Empty values are intentionally preserved because a data name is created
+    only after the underlying business operation completes successfully.
     """
-
-    promised = contract_output_slots(task)
-    overrides = dict(per_slot or {})
-    slots: dict[str, Any] = {}
-    for slot_id in promised:
-        slot_value = overrides.get(slot_id, value)
-        if slot_value is not None:
-            slots[slot_id] = slot_value
-    return slots
+    promised = contract_output_data_names(task)
+    overrides = dict(per_name or {})
+    return {name: overrides.get(name, value) for name in promised}
