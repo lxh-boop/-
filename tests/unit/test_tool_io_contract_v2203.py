@@ -23,6 +23,7 @@ from agent.worker_tools.internal_system import (
     build_internal_system_tool_definitions,
 )
 from agent.worker_tools.registry import WorkerToolDirectory
+from agent.artifacts import build_artifact_from_result
 
 
 def _desc(name: str) -> str:
@@ -97,7 +98,12 @@ def test_runtime_maps_raw_tool_result_to_semantic_output_slot() -> None:
         {"code": "600519", "rank": 1}
     ]
     assert "market_ranking_signals" in result.data["produced_information_slots"]
-    assert result.metadata["tool_io_contract_version"] == "tool-io-contract.v1"
+    assert result.metadata["tool_io_contract_version"] == "tool-io-contract.v2"
+    assert result.data["slot_contracts"]["market_ranking_signals"] == {
+        "contract": "market_ranking_signals",
+        "version": "1.0",
+        "schema_id": "RankingSignals.v1",
+    }
 
 
 def test_worker_sees_semantic_contract_but_not_runtime_source_path() -> None:
@@ -122,12 +128,50 @@ def test_worker_sees_semantic_contract_but_not_runtime_source_path() -> None:
     assert details["output_contract"] == [
         {
             "slot_id": "market_ranking_signals",
+            "contract": "market_ranking_signals",
+            "version": "1.0",
             "schema_id": "RankingSignals.v1",
             "description": "ranking facts",
             "provenance_required": True,
         }
     ]
     assert "source_path" not in str(details)
+
+
+def test_artifact_carries_unified_contract_and_provenance() -> None:
+    contract = ToolOutputContract(
+        slot_id="portfolio_risk",
+        schema_id="PortfolioRisk.v1",
+        source_path="data.risk",
+        contract="portfolio.risk",
+        version="1.0",
+    )
+    artifact = build_artifact_from_result(
+        user_id="alice",
+        run_id="run_1",
+        task_id="task_1",
+        producer_id="risk.calculate",
+        result={"success": True, "data": {"risk": {"level": "low"}}},
+        output_contracts=[contract],
+        provenance={
+            "provider_type": "mcp",
+            "server_id": "data",
+            "transport_tool_name": "get_portfolio_risk",
+        },
+    )
+    assert artifact.contract == "portfolio.risk"
+    assert artifact.version == "1.0"
+    assert artifact.schema_id == "PortfolioRisk.v1"
+    assert artifact.provenance["producer_id"] == "risk.calculate"
+    assert artifact.provenance["provider_type"] == "mcp"
+    assert artifact.contracts == [
+        {
+            "slot_id": "portfolio_risk",
+            "contract": "portfolio.risk",
+            "version": "1.0",
+            "schema_id": "PortfolioRisk.v1",
+        }
+    ]
 
 
 def test_validator_requires_semantic_output_slot_for_contracted_tool() -> None:

@@ -40,6 +40,27 @@ def test_contextbundle_keeps_empty_successful_value_as_existing_data_name():
     assert view["available_names"] == ["evidence"]
 
 
+def test_contextbundle_carries_unified_artifact_contract_and_provenance():
+    bundle = ContextBundle(user_id="u", conversation_id="s", run_id="run")
+    bundle.put_business_data(
+        entity_ref=_ref().to_dict(),
+        name="portfolio_risk",
+        value={"level": "low"},
+        contract="portfolio.risk",
+        version="1.0",
+        schema_id="PortfolioRisk.v1",
+        provenance={"producer_id": "RISK_ANALYST", "task_id": "T04"},
+    )
+    view = bundle.business_data_context(entity_refs=[_ref().to_dict()])
+    assert view["schema_version"] == "context_bundle_business_data.v2"
+    assert view["entities"][0]["contracts"]["portfolio_risk"] == {
+        "contract": "portfolio.risk",
+        "version": "1.0",
+        "schema_id": "PortfolioRisk.v1",
+        "provenance": {"producer_id": "RISK_ANALYST", "task_id": "T04"},
+    }
+
+
 def test_failed_result_is_not_published_to_contextbundle():
     runtime = object.__new__(SpecialistRuntime)
     runtime.context_bundle = ContextBundle(user_id="u", conversation_id="s", run_id="run")

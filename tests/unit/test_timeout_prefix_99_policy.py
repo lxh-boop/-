@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
-from agent.mcp.config import example_server_config
+from agent.mcp.config import data_server_config
 from agent.mcp.models import MCPServerConfig, MCPToolInfo
 from agent.runtime_reliability import RuntimePolicy
 from agent.sandbox import run_python_analysis
@@ -43,12 +43,12 @@ def test_agent_task_llm_and_tool_defaults_use_prefix_99_policy() -> None:
     assert _default(run_python_sandbox_analysis, "timeout_seconds") == 995.0
     assert _default(PythonSandboxService.run_analysis, "timeout_seconds") == 995.0
 
-    assert MCPServerConfig.__dataclass_fields__["timeout_seconds"].default == 995.0
-    assert MCPToolInfo.__dataclass_fields__["timeout_seconds"].default == 995.0
-    assert example_server_config().timeout_seconds == 995.0
+    assert MCPServerConfig.__dataclass_fields__["timeout_seconds"].default == 30.0
+    assert MCPToolInfo.__dataclass_fields__["timeout_seconds"].default == 30.0
+    assert data_server_config().timeout_seconds == 30.0
 
     assert DEFAULT_LOCAL_CONFIG["llm_request_timeout_seconds"] == 99120
-    assert DEFAULT_LOCAL_CONFIG["mcp_example_timeout_seconds"] == 995.0
+    assert DEFAULT_LOCAL_CONFIG["mcp_data_timeout_seconds"] == 30.0
 
 
 def test_task_runtime_defaults_use_prefix_99_policy() -> None:

@@ -2,27 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pandas as pd
-
-from agent.mcp.config import build_mcp_context_from_local_config
-from agent.mcp.registry_bridge import default_example_tool_name
 from agent.tool_engine import AGENT_READ, OP_READ, execute_tool, get_tool_registry_v2
 from agent.tools import evidence_adapters
 from agent.tools.stock_news_tool import query_stock_news
 from agent.tools.stock_rag_tool import query_stock_rag
 from database.repositories import NewsRepository
-
-
-def _mcp_context(enabled: bool = True) -> dict:
-    return {
-        "mcp": build_mcp_context_from_local_config(
-            {
-                "mcp_example_enabled": enabled,
-                "mcp_example_allowed_tools": ["market_risk_summary"],
-                "mcp_example_timeout_seconds": 5,
-            }
-        )
-    }
 
 
 def _write_news_fixture(db_path: Path) -> None:
@@ -59,7 +43,6 @@ def test_p2b_evidence_tools_registered_with_legacy_aliases() -> None:
         "evidence.search_rag": ["stock_rag", "rag_search"],
         "evidence.get_stock_evidence": [],
         "evidence.get_market_evidence": [],
-        "evidence.mcp_readonly_evidence": ["mcp_market_risk_summary"],
     }
 
     for canonical, aliases in expected.items():
@@ -74,7 +57,9 @@ def test_p2b_evidence_tools_registered_with_legacy_aliases() -> None:
     assert callable(evidence_adapters.EvidenceSearchRagAdapter)
     assert callable(evidence_adapters.EvidenceGetStockEvidenceAdapter)
     assert callable(evidence_adapters.EvidenceGetMarketEvidenceAdapter)
-    assert callable(evidence_adapters.EvidenceMcpReadonlyAdapter)
+    assert registry.get("evidence.mcp_readonly_evidence") is None
+    assert registry.get("mcp.readonly.invoke") is None
+    assert not hasattr(evidence_adapters, "EvidenceMcpReadonlyAdapter")
 
 
 def test_p2b_stock_news_legacy_wrapper_and_v2_artifact(tmp_path: Path) -> None:
@@ -100,22 +85,23 @@ def test_p2b_stock_news_legacy_wrapper_and_v2_artifact(tmp_path: Path) -> None:
 
 
 def test_p2b_stock_rag_legacy_wrapper_and_empty_safe_return(monkeypatch, tmp_path: Path) -> None:
-    def fake_retrieve_stock_context(code: str, query: str, top_k: int = 5, force_rebuild: bool = False):
-        return pd.DataFrame(
-            [
-                {
-                    "date": "2026-06-23",
-                    "title": "Risk context",
-                    "source": "unit_test_rag",
-                    "url": "https://example.test/rag/1",
-                    "score": 0.88,
-                    "content": "risk context for stock",
-                    "chunk_id": "chunk_1",
-                }
-            ]
-        )
+    def fake_retrieve_stock_context(self, *, stock_code: str, query: str, top_k: int = 5, output_dir="outputs"):
+        return [
+            {
+                "date": "2026-06-23",
+                "title": "Risk context",
+                "source": "unit_test_rag",
+                "url": "https://example.test/rag/1",
+                "score": 0.88,
+                "content": "risk context for stock",
+                "chunk_id": "chunk_1",
+            }
+        ]
 
-    monkeypatch.setattr("rag_retriever.retrieve_stock_context", fake_retrieve_stock_context)
+    monkeypatch.setattr(
+        "agent.services.evidence_service.RagRepository.retrieve_stock_context",
+        fake_retrieve_stock_context,
+    )
 
     legacy = query_stock_rag("000001", query="risk", top_k=1, output_dir=tmp_path)
     migrated = execute_tool(
@@ -145,22 +131,23 @@ def test_p2b_stock_evidence_merges_news_and_rag_sources(monkeypatch, tmp_path: P
     db_path = tmp_path / "agent_quant.db"
     _write_news_fixture(db_path)
 
-    def fake_retrieve_stock_context(code: str, query: str, top_k: int = 5, force_rebuild: bool = False):
-        return pd.DataFrame(
-            [
-                {
-                    "date": "2026-06-23",
-                    "title": "RAG context",
-                    "source": "unit_test_rag",
-                    "url": "https://example.test/rag/1",
-                    "score": 0.5,
-                    "content": "RAG evidence",
-                    "chunk_id": "chunk_1",
-                }
-            ]
-        )
+    def fake_retrieve_stock_context(self, *, stock_code: str, query: str, top_k: int = 5, output_dir="outputs"):
+        return [
+            {
+                "date": "2026-06-23",
+                "title": "RAG context",
+                "source": "unit_test_rag",
+                "url": "https://example.test/rag/1",
+                "score": 0.5,
+                "content": "RAG evidence",
+                "chunk_id": "chunk_1",
+            }
+        ]
 
-    monkeypatch.setattr("rag_retriever.retrieve_stock_context", fake_retrieve_stock_context)
+    monkeypatch.setattr(
+        "agent.services.evidence_service.RagRepository.retrieve_stock_context",
+        fake_retrieve_stock_context,
+    )
 
     result = execute_tool(
         "evidence.get_stock_evidence",
@@ -180,7 +167,10 @@ def test_p2b_rag_unavailable_degrades_safely(monkeypatch, tmp_path: Path) -> Non
     def broken_retrieve(*args, **kwargs):
         raise RuntimeError("index missing")
 
-    monkeypatch.setattr("rag_retriever.retrieve_stock_context", broken_retrieve)
+    monkeypatch.setattr(
+        "agent.services.evidence_service.RagRepository.retrieve_stock_context",
+        broken_retrieve,
+    )
 
     result = execute_tool(
         "stock_rag",
@@ -193,29 +183,3 @@ def test_p2b_rag_unavailable_degrades_safely(monkeypatch, tmp_path: Path) -> Non
     assert result.data["records"] == []
     assert result.data["chunks"] == []
     assert "rag_unavailable" in result.warnings
-
-
-def test_p2b_mcp_readonly_evidence_and_write_block(tmp_path: Path) -> None:
-    pd.DataFrame(
-        [{"rank": 1, "stock_code": "000001", "stock_name": "Ping An Bank", "score": 0.9}]
-    ).to_csv(tmp_path / "ranking_latest.csv", index=False, encoding="utf-8-sig")
-
-    allowed = execute_tool(
-        "evidence.mcp_readonly_evidence",
-        {"mcp_tool_name": default_example_tool_name(), "arguments": {"query": "stable portfolio", "top_k": 1}},
-        context={**_mcp_context(True), "output_dir": tmp_path, "db_path": tmp_path / "agent_quant.db"},
-        agent_type=AGENT_READ,
-    )
-    blocked = execute_tool(
-        "evidence.mcp_readonly_evidence",
-        {"mcp_tool_name": "mcp.local_financial_evidence.unsafe_write_trade", "arguments": {"stock_code": "000001"}},
-        context=_mcp_context(True),
-        agent_type=AGENT_READ,
-    )
-
-    assert allowed.success is True
-    assert allowed.data["read_only"] is True
-    assert allowed.data["mutation_performed"] is False
-    assert allowed.data["sources"]
-    assert blocked.success is False
-    assert "mcp_readonly_tool_not_allowed" in blocked.errors
