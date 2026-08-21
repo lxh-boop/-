@@ -171,8 +171,7 @@ class HandoffPolicy:
         if target not in self.allowed_edges.get(source, frozenset()):
             return False
         if tool_name and tool_name not in self.allowed_tools_for_role(target):
-            if not (target == AgentRole.EVIDENCE_RETRIEVER and str(tool_name).startswith("mcp.")):
-                return False
+            return False
         return True
 
     def allowed_tools_for_role(self, role: AgentRole | str) -> list[str]:
@@ -215,8 +214,6 @@ class HandoffPolicy:
             errors.append(f"handoff_not_allowed:{req.source_role.value}->{req.target_role.value}")
         allowed = set(self.allowed_tools_for_role(req.target_role))
         for tool_name in req.allowed_tools:
-            if tool_name.startswith("mcp.") and req.target_role == AgentRole.EVIDENCE_RETRIEVER:
-                continue
             if tool_name not in allowed:
                 errors.append(f"tool_not_allowed_for_role:{req.target_role.value}:{tool_name}")
         if req.target_role != AgentRole.COORDINATOR:

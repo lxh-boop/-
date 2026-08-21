@@ -9,9 +9,7 @@ import time
 
 from database.repositories import NewsRepository as DbNewsRepository
 
-from agent.mcp.registry_bridge import is_mcp_tool_name
 from agent.tools._common import first_present, latest_trade_date, normalize_stock_code
-from agent.tools.tool_schemas import ToolPermission, ToolResult
 
 
 class SourceFormatter:
@@ -30,7 +28,10 @@ class SourceFormatter:
             "url": str(record.get("url") or ""),
             "as_of_date": str(first_present(record, ["trade_date", "date", "publish_time"], ""))[:10],
             "provider_type": str(record.get("provider_type") or source_type),
-            "untrusted_external_data": bool(record.get("untrusted_evidence") or source_type.startswith("mcp")),
+            "untrusted_external_data": bool(
+                record.get("untrusted_evidence")
+                or str(record.get("provider_type") or "") == "mcp"
+            ),
         }
         return {key: value for key, value in source.items() if value not in ("", None)}
 
@@ -133,7 +134,7 @@ class RagRepository:
             results = retriever.search(
                 query or stock_code,
                 final_top_k=final_rerank_limit,
-                metadata_filter={"stock_code": stock_code},
+                metadata_filter={"stock_code": stock_code} if stock_code else None,
             )
             search_ms = (time.perf_counter() - search_started) * 1000.0
             records: list[dict[str, Any]] = []
@@ -175,57 +176,13 @@ class RagRepository:
             self._cache_put(cache_key, records)
             return records
         except Exception as exc:
-            fallback_started = time.perf_counter()
-            try:
-                from rag_retriever import retrieve_stock_context
-
-                frame = retrieve_stock_context(
-                    code=stock_code,
-                    query=query or stock_code,
-                    top_k=final_rerank_limit,
-                )
-                records = [] if getattr(frame, "empty", True) else [
-                    {
-                        **dict(record),
-                        "retrieval_backend": "legacy_tfidf_fallback",
-                        "fallback_reason": f"{type(exc).__name__}: {exc}",
-                    }
-                    for record in frame.fillna("").to_dict("records")
-                ]
-                self.last_diagnostics = {
-                    "cache_hit": False,
-                    "fallback_used": True,
-                    "fallback_ms": round((time.perf_counter() - fallback_started) * 1000.0, 3),
-                    "total_ms": round((time.perf_counter() - total_started) * 1000.0, 3),
-                    "record_count": len(records),
-                    "primary_error": f"{type(exc).__name__}: {exc}",
-                }
-                self._cache_put(cache_key, records)
-                return records
-            except Exception as fallback_exc:
-                self.last_diagnostics = {
-                    "cache_hit": False,
-                    "fallback_used": True,
-                    "total_ms": round((time.perf_counter() - total_started) * 1000.0, 3),
-                    "primary_error": f"{type(exc).__name__}: {exc}",
-                    "fallback_error": f"{type(fallback_exc).__name__}: {fallback_exc}",
-                }
-                raise RuntimeError(
-                    f"{type(exc).__name__}: {exc}; fallback={type(fallback_exc).__name__}: {fallback_exc}"
-                ) from fallback_exc
-
-
-class McpEvidenceClient:
-    def invoke(
-        self,
-        tool_name: str,
-        arguments: dict[str, Any] | None = None,
-        *,
-        context: dict[str, Any] | None = None,
-    ) -> ToolResult:
-        from agent.services.mcp_readonly_client import mcp_readonly_client
-
-        return mcp_readonly_client.invoke(tool_name, dict(arguments or {}), context=context)
+            self.last_diagnostics = {
+                "cache_hit": False,
+                "fallback_used": False,
+                "total_ms": round((time.perf_counter() - total_started) * 1000.0, 3),
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            raise RuntimeError(f"{type(exc).__name__}: {exc}") from exc
 
 
 class EvidenceService:
@@ -234,11 +191,9 @@ class EvidenceService:
         *,
         source_formatter: SourceFormatter | None = None,
         rag_repository: RagRepository | None = None,
-        mcp_client: McpEvidenceClient | None = None,
     ) -> None:
         self.source_formatter = source_formatter or SourceFormatter()
         self.rag_repository = rag_repository or RagRepository()
-        self.mcp_client = mcp_client or McpEvidenceClient()
 
     def _source(self, source_type: str, record: dict[str, Any], index: int = 0) -> dict[str, Any]:
         return self.source_formatter.format(source_type=source_type, record=record, index=index)
@@ -408,22 +363,38 @@ class EvidenceService:
                 extra={"chunks": []},
             )
         try:
-            chunks = self.rag_repository.retrieve_stock_context(stock_code=code, query=query or code, top_k=top_k, output_dir=output_dir)
+            chunks = self.rag_repository.retrieve_stock_context(
+                stock_code=code,
+                query=query or code,
+                top_k=top_k,
+                output_dir=output_dir,
+            )
             sources = self.format_sources(chunks, source_type="rag_chunk")
             status = "success" if chunks else "no_rag_chunks"
             return self._result(
                 success=bool(chunks),
                 status=status,
-                message="RAG evidence queried." if chunks else "No RAG chunks were found.",
+                message=(
+                    "RAG evidence queried."
+                    if chunks
+                    else "No RAG chunks were found."
+                ),
                 stock_code=code,
                 query=query or code,
                 records=chunks,
                 sources=sources,
-                summary=self.build_evidence_summary(records=chunks, stock_code=code, query=query or code, evidence_type="rag"),
+                summary=self.build_evidence_summary(
+                    records=chunks,
+                    stock_code=code,
+                    query=query or code,
+                    evidence_type="rag",
+                ),
                 tool_name="evidence.search_rag",
                 extra={
                     "chunks": chunks,
-                    "retrieval_diagnostics": dict(self.rag_repository.last_diagnostics or {}),
+                    "retrieval_diagnostics": dict(
+                        self.rag_repository.last_diagnostics or {}
+                    ),
                 },
             )
         except Exception as exc:
@@ -440,10 +411,85 @@ class EvidenceService:
                 extra={
                     "chunks": [],
                     "error": f"{type(exc).__name__}: {exc}",
-                    "retrieval_diagnostics": dict(self.rag_repository.last_diagnostics or {}),
+                    "retrieval_diagnostics": dict(
+                        self.rag_repository.last_diagnostics or {}
+                    ),
                 },
             )
 
+    def search_documents(
+        self,
+        query: str,
+        *,
+        stock_code: str = "",
+        top_k: int = 5,
+        output_dir: str | Path = "outputs",
+    ) -> dict[str, Any]:
+        code = normalize_stock_code(stock_code) if stock_code else ""
+        query_text = str(query or "").strip()
+        if not query_text:
+            return self._result(
+                success=False,
+                status="invalid_query",
+                message="A document search query is required.",
+                stock_code=code,
+                records=[],
+                errors=["invalid_query"],
+                tool_name="evidence.search_documents",
+                extra={"chunks": []},
+            )
+        try:
+            chunks = self.rag_repository.retrieve_stock_context(
+                stock_code=code,
+                query=query_text,
+                top_k=top_k,
+                output_dir=output_dir,
+            )
+            sources = self.format_sources(chunks, source_type="rag_chunk")
+            return self._result(
+                success=bool(chunks),
+                status="success" if chunks else "no_rag_chunks",
+                message=(
+                    "RAG documents queried."
+                    if chunks
+                    else "No RAG documents were found."
+                ),
+                stock_code=code,
+                query=query_text,
+                records=chunks,
+                sources=sources,
+                summary=self.build_evidence_summary(
+                    records=chunks,
+                    stock_code=code,
+                    query=query_text,
+                    evidence_type="rag",
+                ),
+                tool_name="evidence.search_documents",
+                extra={
+                    "chunks": chunks,
+                    "retrieval_diagnostics": dict(
+                        self.rag_repository.last_diagnostics or {}
+                    ),
+                },
+            )
+        except Exception as exc:
+            return self._result(
+                success=False,
+                status="unavailable",
+                message="RAG document search is unavailable.",
+                stock_code=code,
+                query=query_text,
+                records=[],
+                warnings=["rag_unavailable"],
+                errors=[f"{type(exc).__name__}: {exc}"],
+                tool_name="evidence.search_documents",
+                extra={
+                    "chunks": [],
+                    "retrieval_diagnostics": dict(
+                        self.rag_repository.last_diagnostics or {}
+                    ),
+                },
+            )
     def merge_evidence(self, *payloads: dict[str, Any]) -> dict[str, Any]:
         records: list[dict[str, Any]] = []
         sources: list[dict[str, Any]] = []
@@ -531,70 +577,5 @@ class EvidenceService:
             },
             tool_name="evidence.get_market_evidence",
         )
-
-    def get_mcp_readonly_evidence(
-        self,
-        tool_name: str,
-        arguments: dict[str, Any] | None = None,
-        *,
-        context: dict[str, Any] | None = None,
-    ) -> ToolResult:
-        name = str(tool_name or "")
-        if not is_mcp_tool_name(name):
-            return ToolResult(
-                success=False,
-                message="MCP evidence tool name is invalid.",
-                data={
-                    "query": "",
-                    "stock_code": "",
-                    "records": [],
-                    "summary": {"evidence_type": "mcp", "evidence_count": 0},
-                    "sources": [],
-                    "evidence_count": 0,
-                    "as_of_date": "",
-                    "read_only": True,
-                    "mutation_performed": False,
-                },
-                errors=["not_mcp_tool"],
-                permission=ToolPermission.READ,
-                tool_name="evidence.mcp_readonly_evidence",
-            )
-        result = self.mcp_client.invoke(name, dict(arguments or {}), context=context)
-        raw_data = dict(result.data or {})
-        records = []
-        for key in ["records", "evidence", "items", "sources"]:
-            value = raw_data.get(key)
-            if isinstance(value, list):
-                records = [dict(item) if isinstance(item, dict) else {"value": item} for item in value]
-                break
-        if not records and raw_data:
-            records = [{key: value for key, value in raw_data.items() if key not in {"api_key", "token", "authorization"}}]
-        sources = self.format_sources(records, source_type="mcp_evidence")
-        data = {
-            **raw_data,
-            "query": str((arguments or {}).get("query") or ""),
-            "stock_code": normalize_stock_code((arguments or {}).get("stock_code")),
-            "records": records,
-            "summary": self.build_evidence_summary(records=records, query=str((arguments or {}).get("query") or ""), evidence_type="mcp"),
-            "sources": sources,
-            "evidence_count": len(records),
-            "as_of_date": self._as_of_date(records),
-            "read_only": True,
-            "mutation_performed": False,
-            "mcp_canonical_tool": name,
-        }
-        return ToolResult(
-            success=bool(result.success),
-            message=str(result.message or ""),
-            data=data,
-            warnings=list(result.warnings or []),
-            errors=list(result.errors or []),
-            permission=ToolPermission.READ,
-            tool_name="evidence.mcp_readonly_evidence",
-            disclaimer=result.disclaimer,
-            status=result.status,
-            requires_confirmation=False,
-        )
-
 
 evidence_service = EvidenceService()

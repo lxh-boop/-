@@ -8,14 +8,15 @@ from typing import Any
 class MCPServerConfig:
     server_id: str
     name: str
-    transport: str = "local_fixture"
+    transport: str = "stdio"
     command: str = ""
     args: tuple[str, ...] = ()
+    cwd: str = ""
     endpoint: str = ""
     enabled: bool = False
     read_only: bool = True
     allowed_tools: tuple[str, ...] = ()
-    timeout_seconds: float = 995.0
+    timeout_seconds: float = 30.0
     environment_key_names: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -35,7 +36,9 @@ class MCPToolInfo:
     namespaced_name: str
     description: str
     input_schema: dict[str, Any]
+    output_schema: dict[str, Any]
     annotations: dict[str, Any] = field(default_factory=dict)
+    discovery_status: str = "discovered"
     server_enabled: bool = False
     server_read_only: bool = True
     tool_read_only: bool = True
@@ -43,8 +46,8 @@ class MCPToolInfo:
     mapped: bool = False
     mapping_error: str = ""
     discovered_at: str = ""
-    transport: str = "local_fixture"
-    timeout_seconds: float = 995.0
+    transport: str = "stdio"
+    timeout_seconds: float = 30.0
     effective_read_only: bool = True
     effective_permission: str = "read"
     effective_allowed_agents: tuple[str, ...] = ()

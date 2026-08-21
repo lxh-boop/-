@@ -3,12 +3,10 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from agent.mcp.config import EXAMPLE_SERVER_ID, resolve_mcp_server_configs
-from agent.mcp.discovery import discover_mcp_tools
-from agent.mcp.example_server import call_tool as call_example_tool
-from agent.mcp.models import MCPToolInfo
-from agent.mcp.schema_adapter import validate_arguments
-from agent.mcp.security import safe_external_payload
+from agent.mcp.runtime_registry import build_mcp_runtime_registry
+from agent.mcp.schema_adapter import validate_arguments, validate_payload_schema
+from agent.mcp.security import redact_sensitive, safe_external_payload
+from agent.mcp.transport import call_stdio_tool
 from agent.tools.tool_schemas import ToolPermission, ToolResult
 
 
@@ -22,51 +20,56 @@ def parse_mcp_tool_name(namespaced_name: str) -> tuple[str, str]:
     return parts[1], parts[2]
 
 
-def _find_tool(namespaced_name: str, context: dict[str, Any] | None = None) -> MCPToolInfo | None:
-    for result in discover_mcp_tools(context):
-        if not result.success:
-            continue
-        for tool in result.tools:
-            if tool.namespaced_name == namespaced_name:
-                return tool
-    return None
-
-
-def call_mcp_tool(namespaced_name: str, arguments: dict[str, Any] | None = None, *, context: dict[str, Any] | None = None) -> ToolResult:
+def call_mcp_tool(
+    namespaced_name: str,
+    arguments: dict[str, Any] | None = None,
+    *,
+    context: dict[str, Any] | None = None,
+    caller_tool_id: str = "",
+    agent_type: str = "",
+) -> ToolResult:
     context = dict(context or {})
     server_id, tool_name = parse_mcp_tool_name(namespaced_name)
-    tool = _find_tool(namespaced_name, context)
-    if tool is None:
+    runtime_registry = build_mcp_runtime_registry(context)
+    record, authorization_error = runtime_registry.authorize(
+        namespaced_name,
+        caller_tool_id=str(caller_tool_id or ""),
+        agent_type=str(agent_type or ""),
+    )
+    if record is None or record.tool is None or record.server is None:
         return ToolResult(
             success=False,
-            message="MCP tool is unavailable or undiscovered.",
+            message="MCP tool is unavailable to the Runtime Registry.",
             data={
                 "status": "unavailable",
                 "provider_type": "mcp",
                 "server_id": server_id,
                 "tool_name": tool_name,
-                "fallback_recommended": True,
+                "runtime_authority": "runtime_registry",
             },
             warnings=[],
-            errors=[f"mcp_tool_unavailable:{namespaced_name}"],
+            errors=[authorization_error or f"mcp_tool_unavailable:{namespaced_name}"],
             permission=ToolPermission.READ,
             tool_name=namespaced_name,
         )
-    if not tool.mapped or not tool.effective_read_only:
+    if authorization_error:
         return ToolResult(
             success=False,
-            message="MCP tool is blocked by local read-only policy.",
+            message="MCP tool is blocked by the Runtime Registry.",
             data={
                 "status": "blocked",
                 "provider_type": "mcp",
                 "server_id": server_id,
                 "tool_name": tool_name,
-                "fallback_recommended": True,
+                "runtime_authority": "runtime_registry",
+                "caller_tool_id": str(caller_tool_id or ""),
+                "agent_type": str(agent_type or ""),
             },
-            errors=[tool.mapping_error or f"mcp_tool_blocked:{namespaced_name}"],
+            errors=[authorization_error],
             permission=ToolPermission.READ,
             tool_name=namespaced_name,
         )
+    tool = record.tool
 
     ok, errors = validate_arguments(tool.input_schema, dict(arguments or {}))
     if not ok:
@@ -93,12 +96,38 @@ def call_mcp_tool(namespaced_name: str, arguments: dict[str, Any] | None = None,
         time.sleep(float(context.get("mcp_timeout_sleep_seconds") or 2.0))
 
     _CALL_COUNT[namespaced_name] = _CALL_COUNT.get(namespaced_name, 0) + 1
-    if server_id == EXAMPLE_SERVER_ID:
-        raw = call_example_tool(tool_name, dict(arguments or {}), context=context)
-    else:
-        raise RuntimeError(f"dependency_error:unsupported_mcp_server:{server_id}")
+    server = record.server
+    raw = call_stdio_tool(
+        server,
+        tool_name,
+        dict(arguments or {}),
+        context=context,
+    )
 
-    payload = safe_external_payload(raw, max_chars=5000)
+    output_valid, output_errors = validate_payload_schema(tool.output_schema, raw)
+    if not output_valid:
+        return ToolResult(
+            success=False,
+            message="MCP outputSchema validation failed.",
+            data={
+                "status": "output_validation_failed",
+                "provider_type": "mcp",
+                "server_id": server_id,
+                "tool_name": tool_name,
+                "runtime_authority": "runtime_registry",
+                "call_attempted": True,
+            },
+            errors=[f"mcp_output_schema_invalid:{','.join(output_errors)}"],
+            permission=ToolPermission.READ,
+            tool_name=namespaced_name,
+        )
+
+    internal_provider = str(server.metadata.get("provider") or "").lower() == "internal"
+    payload = (
+        redact_sensitive(raw, max_chars=5000)
+        if internal_provider
+        else safe_external_payload(raw, max_chars=5000)
+    )
     data = payload.get("data") if isinstance(payload, dict) else {}
     if not isinstance(data, dict):
         data = {}
@@ -106,7 +135,15 @@ def call_mcp_tool(namespaced_name: str, arguments: dict[str, Any] | None = None,
     data.setdefault("server_id", server_id)
     data.setdefault("tool_name", tool_name)
     data.setdefault("transport", tool.transport)
-    data.setdefault("untrusted_evidence", True)
+    data.setdefault("runtime_authority", "runtime_registry")
+    data.setdefault("caller_tool_id", str(caller_tool_id or ""))
+    data.setdefault("agent_type", str(agent_type or ""))
+    data.setdefault("input_schema_hash", record.input_schema_hash)
+    data.setdefault("output_schema_hash", record.output_schema_hash)
+    data.setdefault(
+        "untrusted_evidence",
+        not internal_provider,
+    )
     return ToolResult(
         success=bool(payload.get("success")) if isinstance(payload, dict) else False,
         message=str(payload.get("message") or "") if isinstance(payload, dict) else "",

@@ -124,22 +124,12 @@ def list_agent_specs() -> list[dict[str, Any]]:
 
 def role_for_intent(intent: str) -> str | None:
     name = str(intent or "")
-    if name.startswith("mcp."):
-        return MARKET_INTELLIGENCE
     return INTENT_ROLE_MAP.get(name)
 
 
 def validate_tool_allowed(role: str, tool_name: str) -> None:
     spec = get_agent_spec(role)
     name = str(tool_name or "")
-    if name.startswith("mcp."):
-        try:
-            from agent.mcp.registry_bridge import validate_mcp_tool_allowed_for_role
-
-            validate_mcp_tool_allowed_for_role(role, name)
-            return
-        except Exception as exc:
-            raise PermissionError(f"tool_not_allowed_for_agent:{role}:{name}") from exc
     if name not in spec.tool_whitelist:
         raise PermissionError(f"tool_not_allowed_for_agent:{role}:{name}")
 
@@ -157,7 +147,6 @@ def is_read_only_multi_agent_candidate(decomposition: dict[str, Any]) -> bool:
     if not isinstance(tasks, list) or len(tasks) < 2:
         return False
     intents = {str(task.get("intent") or "") for task in tasks if isinstance(task, dict)}
-    mcp_intents = {intent for intent in intents if intent.startswith("mcp.")}
-    specialist_intents = (intents & READ_ONLY_MULTI_AGENT_INTENTS) | mcp_intents
-    unsupported = intents - READ_ONLY_MULTI_AGENT_INTENTS - IGNORABLE_READ_ONLY_INTENTS - mcp_intents
+    specialist_intents = intents & READ_ONLY_MULTI_AGENT_INTENTS
+    unsupported = intents - READ_ONLY_MULTI_AGENT_INTENTS - IGNORABLE_READ_ONLY_INTENTS
     return len(specialist_intents) >= 2 and not unsupported

@@ -9,6 +9,7 @@ from agent.graph.impact_service import GraphImpactService
 from agent.graph.provider_adapter import GraphProviderAdapter
 from agent.tool_runtime import TOOL_VISIBILITY_WORKER_PRIVATE, ToolRegistry
 from agent.tool_runtime.validation import input_contracts_for, output_contracts_for
+from agent.tool_runtime import TOOL_IO_CONTRACT_VERSION
 
 
 
@@ -116,7 +117,7 @@ class WorkerToolDirectory:
                 "produced_output_slots": [item.slot_id for item in output_contracts],
                 "effect_limit": definition.operation_type,
                 "side_effect_count": len(definition.side_effects or []),
-                "io_contract_version": "tool-io-contract.v1",
+                "io_contract_version": TOOL_IO_CONTRACT_VERSION,
             })
         return rows
 
@@ -140,7 +141,7 @@ class WorkerToolDirectory:
                 "produced_output_slots": [item.slot_id for item in semantic_outputs],
                 "side_effects": list(definition.side_effects or []),
                 "operation_type": definition.operation_type,
-                "io_contract_version": "tool-io-contract.v1",
+                "io_contract_version": TOOL_IO_CONTRACT_VERSION,
             })
         return rows
 
@@ -149,6 +150,7 @@ def build_worker_tool_registry(
     *,
     provider: GraphProviderAdapter,
     impact_service: GraphImpactService | None = None,
+    mcp_context: dict[str, Any] | None = None,
 ) -> ToolRegistry:
     from .evidence import build_evidence_tool_definitions
     from .graph_context import build_graph_context_tool_definitions
@@ -161,10 +163,22 @@ def build_worker_tool_registry(
         if impact_service is not None
         else []
     )
-    return ToolRegistry([
+    definitions = [
         *build_evidence_tool_definitions(provider),
         *build_internal_system_tool_definitions(provider),
         *build_graph_context_tool_definitions(provider),
         *build_risk_tool_definitions(),
         *graph_relation_tools,
-    ])
+    ]
+    from agent.mcp.runtime_registry import build_mcp_runtime_registry
+
+    projected = set(
+        build_mcp_runtime_registry(mcp_context).projected_worker_tool_ids()
+    )
+    admitted_definitions = [
+        definition
+        for definition in definitions
+        if str((definition.runtime_policy or {}).get("provider_type") or "") != "mcp"
+        or definition.name in projected
+    ]
+    return ToolRegistry(admitted_definitions)

@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import pickle
 import hashlib
+import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from rag.metadata_filter import filter_chunks
 from rag.schemas import RagChunk, RetrievalResult

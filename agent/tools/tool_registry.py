@@ -200,20 +200,8 @@ _SIMPLE_TYPE_MAP: dict[str, tuple[type, ...]] = {
 }
 
 
-def _dynamic_tool_spec(tool_name: str) -> ToolSpec | None:
-    name = str(tool_name or "")
-    if not name.startswith("mcp."):
-        return None
-    try:
-        from agent.mcp.registry_bridge import get_mcp_tool_spec
-
-        return get_mcp_tool_spec(name)
-    except Exception:
-        return None
-
-
 def validate_tool_args(tool_name: str, args: dict[str, Any] | None) -> tuple[bool, list[str]]:
-    spec = get_tool_registry().get(tool_name) or _dynamic_tool_spec(tool_name)
+    spec = get_tool_registry().get(tool_name)
     if spec is None:
         return False, ["unregistered_tool"]
     if args is None:
@@ -280,6 +268,9 @@ def get_tool_registry(
     include_mcp: bool = False,
     mcp_context: dict[str, Any] | None = None,
 ) -> dict[str, ToolSpec]:
+    # Raw MCP capabilities are system-private. The existing signature is kept
+    # for callers, but Runtime projects only registered Worker Tool IDs.
+    del include_mcp, mcp_context
     specs = [
         _spec("stock_lookup", ToolPermission.READ, "Lookup a stock in latest ranking/recommendations.", lookup_stock, input_schema=_schema_for("stock_code", "top_k", "output_dir")),
         _spec("stock_analysis", ToolPermission.READ, "Analyze ranking, AI adjustment, news, RAG, user suitability.", analyze_stock, input_schema=_schema_for("user_id", "stock_code", "top_k", "output_dir", "db_path"), category=ToolCategory.READ_ANALYSIS),
@@ -321,14 +312,6 @@ def get_tool_registry(
         _spec("report", ToolPermission.READ, "List latest generated reports.", query_latest_reports, input_schema=_schema_for("output_dir")),
     ]
     registry = {spec.name: spec for spec in specs}
-    if include_mcp:
-        try:
-            from agent.mcp.registry_bridge import list_mcp_tool_specs
-
-            for spec in list_mcp_tool_specs(mcp_context):
-                registry[spec.name] = spec
-        except Exception:
-            pass
     return registry
 
 

@@ -34,7 +34,6 @@ from agent.tool_runtime.validation import (
 from agent.tools.evidence_adapters import (
     evidence_get_market_evidence_adapter,
     evidence_get_stock_evidence_adapter,
-    evidence_mcp_readonly_adapter,
     evidence_search_news_adapter,
     evidence_search_rag_adapter,
 )
@@ -514,28 +513,6 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             aliases=[],
         ),
         ToolDefinition(
-            name="evidence.mcp_readonly_evidence",
-            display_name="MCP Read-only Evidence",
-            description=_description(
-                "Invoke one allowlisted read-only MCP evidence tool and normalize its evidence fields.",
-                "An external MCP evidence tool has been selected for market or risk context.",
-                "Any write, destructive, broker, paper-trading, strategy, cash or database mutation tool.",
-                "mcp_tool_name and arguments.",
-                "MCP evidence records, source metadata, warnings and read-only audit markers.",
-                side_effects="None; read-only MCP evidence bridge, write tools are blocked before execution.",
-            ),
-            input_schema=_schema({"mcp_tool_name": {"type": "string"}, "tool_name": {"type": "string"}, "arguments": {"type": "object"}}, required=["mcp_tool_name"]),
-            output_schema=_result_schema(),
-            execution_handler=evidence_mcp_readonly_adapter,
-            supported_actions=["query", "retrieve_evidence"],
-            supported_objects=["mcp_evidence", "market_evidence"],
-            produced_outputs=["market_evidence", "evidence", "mcp_sources", "sources", "limitations"],
-            operation_type=OP_READ,
-            allowed_agent_types=[AGENT_MAIN, AGENT_READ],
-            permission_scope=OP_READ,
-            aliases=["mcp_market_risk_summary"],
-        ),
-        ToolDefinition(
             name="system.scheduler_status",
             display_name="Scheduler Status",
             description=_description(
@@ -679,34 +656,6 @@ def build_core_tool_definitions() -> list[ToolDefinition]:
             permission_scope=OP_SYSTEM,
             runtime_policy={"max_attempts": 1, "tool_timeout_seconds": 9910},
             aliases=["python_sandbox_analysis"],
-        ),
-        ToolDefinition(
-            name="mcp.readonly.invoke",
-            display_name="MCP Read-only Invoke",
-            description=_description(
-                "Invoke one allowlisted read-only MCP evidence tool through the v2 ToolExecutor.",
-                "A selected MCP tool has been discovered as read-only and is needed as external evidence.",
-                "Any write, destructive, broker, paper-trading, strategy, cash or database mutation tool.",
-                "mcp_tool_name and arguments.",
-                "MCP evidence payload, source metadata, warnings and read-only audit markers.",
-                side_effects="None; read-only MCP bridge, write tools are blocked before execution.",
-            ),
-            input_schema=_schema(
-                {
-                    "mcp_tool_name": {"type": "string"},
-                    "arguments": {"type": "object"},
-                },
-                required=["mcp_tool_name"],
-            ),
-            output_schema=_result_schema(),
-            execution_handler=evidence_mcp_readonly_adapter,
-            supported_actions=["query", "retrieve_evidence"],
-            supported_objects=["mcp_evidence", "market_evidence"],
-            produced_outputs=["market_evidence", "evidence", "mcp_sources", "limitations"],
-            operation_type=OP_READ,
-            allowed_agent_types=[AGENT_MAIN, AGENT_READ],
-            permission_scope=OP_READ,
-            aliases=["mcp_tool"],
         ),
         ToolDefinition(
             name="portfolio.recommend_position",
@@ -1673,4 +1622,3 @@ def execute_tool(
         agent_type=agent_type,
         approval_granted=approval_granted,
     )
-

@@ -11,9 +11,7 @@ import pandas as pd
 
 from agent.collaboration.worker_directory import PORTFOLIO_ANALYST
 from agent.graph.provider_adapter import GraphProviderAdapter
-from agent.services.market_analysis_service import market_analysis_service
-from agent.services.portfolio_service import portfolio_service
-from agent.services.user_profile_service import user_profile_service
+from agent.mcp.worker_adapter import invoke_worker_mcp
 from agent.tool_runtime import (
     OP_READ,
     TOOL_VISIBILITY_WORKER_PRIVATE,
@@ -91,10 +89,6 @@ def _prediction_record(row: dict[str, Any]) -> dict[str, Any]:
             pass
     return result
 
-def _output_dir(context: dict[str, Any]) -> str | Path:
-    return context.get("output_dir") or "outputs"
-
-
 def _stock_code(arguments: dict[str, Any]) -> str:
     text = str(arguments.get("security_node_id") or "")
     match = re.search(r"(?<!\d)(\d{6})(?!\d)", text)
@@ -121,14 +115,16 @@ def build_internal_system_tool_definitions(
     def get_prediction(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         code = _stock_code(arguments)
         top_k = max(1, min(int(arguments.get("top_k") or 10), 500))
-        result = market_analysis_service.get_ranking(
-            stock_code=code,
-            top_k="all_rows",
-            output_dir=_output_dir(context),
-            model_name=str(arguments.get("model_name") or "") or None,
+        result = invoke_worker_mcp(
+            "model",
+            "predict_stock_score",
+            {"stock_code": code},
+            context,
+            caller_tool_id=INTERNAL_PREDICTION_GET_STOCK,
         )
-        records = [dict(row) for row in result.get("records") or [] if isinstance(row, dict)]
-        total_count = int(result.get("total_count") or 0)
+        data = dict(result.get("data") or {})
+        records = [dict(row) for row in data.get("records") or [] if isinstance(row, dict)]
+        total_count = int(data.get("record_count") or len(records))
         if not result.get("success"):
             return {
                 "success": False,
@@ -136,7 +132,7 @@ def build_internal_system_tool_definitions(
                 "data": {
                     "found": False,
                     "record": {},
-                    "data_date": str(result.get("as_of_date") or ""),
+                    "data_date": str(data.get("as_of_date") or ""),
                     "rank": None,
                     "is_topk": False,
                     "total_count": total_count,
@@ -159,7 +155,7 @@ def build_internal_system_tool_definitions(
             "data": {
                 "found": bool(record),
                 "record": _prediction_record(record),
-                "data_date": str(result.get("as_of_date") or ""),
+                "data_date": str(data.get("as_of_date") or ""),
                 "rank": rank,
                 "is_topk": bool(rank is not None and rank <= top_k),
                 "total_count": total_count,
@@ -170,23 +166,26 @@ def build_internal_system_tool_definitions(
             },
             "warnings": [],
             "errors": [],
-            "sources": [{"source_id": "ranking_latest", "as_of_date": str(result.get("as_of_date") or "")}],
+            "sources": [{"source_id": "ranking_latest", "as_of_date": str(data.get("as_of_date") or "")}],
         }
 
     def get_ranking(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         top_k = max(1, min(int(arguments.get("top_k") or 10), 500))
-        result = market_analysis_service.get_ranking(
-            top_k=top_k,
-            output_dir=_output_dir(context),
-            model_name=str(arguments.get("model_name") or "") or None,
+        result = invoke_worker_mcp(
+            "model",
+            "predict_rank",
+            {"top_k": top_k},
+            context,
+            caller_tool_id=INTERNAL_RANKING_GET_LATEST,
         )
+        data = dict(result.get("data") or {})
         return {
             "success": bool(result.get("success")),
             "message": str(result.get("message") or ""),
             "data": {
-                "records": _jsonable(result.get("records") or []),
-                "summary": _jsonable(result.get("summary") or {}),
-                "data_date": str(result.get("as_of_date") or ""),
+                "records": _jsonable(data.get("records") or []),
+                "summary": {"returned_count": int(data.get("record_count") or 0)},
+                "data_date": str(data.get("as_of_date") or ""),
                 "source_id": "ranking_latest",
             },
             "warnings": [],
@@ -378,14 +377,22 @@ def build_internal_system_tool_definitions(
         }
 
     def get_portfolio(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-        raw = provider.read_portfolio_state(
-            user_id=str(arguments.get("user_id") or context.get("user_id") or "default"),
-            output_dir=_output_dir(context),
-            db_path=context.get("db_path"),
+        raw = invoke_worker_mcp(
+            "data",
+            "get_portfolio_state",
+            {
+                "user_id": str(
+                    arguments.get("user_id")
+                    or context.get("user_id")
+                    or "default"
+                )
+            },
+            context,
+            caller_tool_id=INTERNAL_PORTFOLIO_GET_STATE,
         )
         if raw.get("success") is not True:
             return raw
-        portfolio = dict(raw.get("portfolio") or {})
+        portfolio = dict(raw.get("data") or {})
         positions = [
             dict(item)
             for item in (portfolio.get("active_positions") or portfolio.get("positions") or [])
@@ -419,18 +426,49 @@ def build_internal_system_tool_definitions(
         }
 
     def get_account(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-        value = portfolio_service.get_account_summary(
-            str(arguments.get("user_id") or context.get("user_id") or "default"),
-            output_dir=_output_dir(context),
-            db_path=context.get("db_path"),
+        raw = invoke_worker_mcp(
+            "data",
+            "get_portfolio_state",
+            {
+                "user_id": str(
+                    arguments.get("user_id")
+                    or context.get("user_id")
+                    or "default"
+                )
+            },
+            context,
+            caller_tool_id=INTERNAL_ACCOUNT_GET_STATE,
         )
-        return {"success": True, "message": "Account state queried.", "data": _jsonable(value), "warnings": [], "errors": [], "sources": []}
+        value = dict(raw.get("data") or {})
+        return {
+            "success": bool(raw.get("success")),
+            "message": str(raw.get("message") or "Account state queried."),
+            "data": _jsonable(
+                {
+                    "account": value.get("account") or {},
+                    "account_summary": value.get("account_summary") or {},
+                    "as_of_date": value.get("as_of_date") or "",
+                    "source_id": "database/portfolio",
+                }
+            ),
+            "warnings": list(raw.get("warnings") or []),
+            "errors": list(raw.get("errors") or []),
+            "sources": list(value.get("sources") or []),
+        }
 
     def get_profile(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-        raw = user_profile_service.get_user_profile(
-            str(arguments.get("user_id") or context.get("user_id") or "default"),
-            output_dir=_output_dir(context),
-            db_path=context.get("db_path"),
+        raw = invoke_worker_mcp(
+            "data",
+            "get_user_profile",
+            {
+                "user_id": str(
+                    arguments.get("user_id")
+                    or context.get("user_id")
+                    or "default"
+                )
+            },
+            context,
+            caller_tool_id=INTERNAL_USER_PROFILE_GET,
         )
         data = dict(raw.get("data") or {})
         constraints = data.pop("constraints", {})
@@ -520,6 +558,8 @@ def build_internal_system_tool_definitions(
                     schema_id="RankingSignals.v1",
                     source_path="data",
                     description="Latest model ranking facts, including ranked records and snapshot metadata.",
+                    contract="market.ranking",
+                    version="1.0",
                 )
             ]
         if tool_name == INTERNAL_ENTITY_RESOLVE_RANKED_SECURITY:
@@ -530,6 +570,8 @@ def build_internal_system_tool_definitions(
                     required=True,
                     accepted_sources=("upstream_tool",),
                     description="Structured ranking facts from an upstream ranking Tool.",
+                    contract="market.ranking",
+                    version="1.0",
                 )
             ], [
                 ToolOutputContract(
@@ -537,12 +579,16 @@ def build_internal_system_tool_definitions(
                     schema_id="GraphRef.v1",
                     source_path="data.selected_entity_ref",
                     description="Authoritative GraphRef for the selected ranked security.",
+                    contract="graph.entity-ref",
+                    version="1.0",
                 ),
                 ToolOutputContract(
                     slot_id="security_node_id",
                     schema_id="SecurityNodeId.v1",
                     source_path="data.security_node_id",
                     description="Authoritative graph node id consumed by entity-specific internal Tools.",
+                    contract="graph.security-node-id",
+                    version="1.0",
                 ),
             ]
         if tool_name == INTERNAL_PREDICTION_GET_STOCK:
@@ -553,6 +599,8 @@ def build_internal_system_tool_definitions(
                     required=True,
                     accepted_sources=("context", "upstream_tool"),
                     description="Authoritative security node id from runtime context or entity resolution.",
+                    contract="graph.security-node-id",
+                    version="1.0",
                 )
             ], [
                 ToolOutputContract(
@@ -560,6 +608,8 @@ def build_internal_system_tool_definitions(
                     schema_id="EntityModelSignals.v1",
                     source_path="data",
                     description="Model prediction and ranking facts for one authoritative security.",
+                    contract="model.stock-signals",
+                    version="1.0",
                 )
             ]
         if tool_name == INTERNAL_MODEL_GET_METRICS:
@@ -591,37 +641,71 @@ def build_internal_system_tool_definitions(
             return [], [
                 ToolOutputContract(
                     slot_id="current_portfolio_state",
+                    schema_id="PortfolioState.v1",
                     source_path="data.portfolio_state",
                     description="Authoritative current portfolio snapshot.",
+                    contract="portfolio.state",
+                    version="1.0",
                 ),
                 ToolOutputContract(
                     slot_id="portfolio_positions",
+                    schema_id="PortfolioPositions.v1",
                     source_path="data.portfolio_positions",
                     description="Current portfolio position records only.",
+                    contract="portfolio.positions",
+                    version="1.0",
                 ),
             ]
         if tool_name == INTERNAL_ACCOUNT_GET_STATE:
             return [], [
                 ToolOutputContract(
                     slot_id="account_financial_state",
+                    schema_id="AccountFinancialState.v1",
                     source_path="data",
                     description="Current account financial summary.",
+                    contract="portfolio.account",
+                    version="1.0",
                 )
             ]
         if tool_name == INTERNAL_USER_PROFILE_GET:
             return [], [
                 ToolOutputContract(
                     slot_id="user_profile_state",
+                    schema_id="UserProfileState.v1",
                     source_path="data.profile_state",
                     description="Current user profile, risk assessment and investment goal.",
+                    contract="user.profile",
+                    version="1.0",
                 ),
                 ToolOutputContract(
                     slot_id="user_constraints",
+                    schema_id="UserConstraints.v1",
                     source_path="data.constraints",
                     description="Current explicit user constraints only.",
+                    contract="user.constraints",
+                    version="1.0",
                 ),
             ]
         return [], []
+
+    def mcp_runtime_policy(tool_name: str) -> dict[str, Any]:
+        bindings = {
+            INTERNAL_PREDICTION_GET_STOCK: ("model", "predict_stock_score"),
+            INTERNAL_RANKING_GET_LATEST: ("model", "predict_rank"),
+            INTERNAL_PORTFOLIO_GET_STATE: ("data", "get_portfolio_state"),
+            INTERNAL_ACCOUNT_GET_STATE: ("data", "get_portfolio_state"),
+            INTERNAL_USER_PROFILE_GET: ("data", "get_user_profile"),
+        }
+        binding = bindings.get(tool_name)
+        if binding is None:
+            return {}
+        return {
+            "provider_type": "mcp",
+            "server_id": binding[0],
+            "transport_tool_name": binding[1],
+            "transport": "stdio",
+            "projection_kind": "worker_adapter",
+        }
 
     common_properties = {
         "security_node_id": {"type": "string"},
@@ -684,6 +768,7 @@ def build_internal_system_tool_definitions(
                 mutates_business_state=False,
                 idempotency="read_only",
                 audit_level="full",
+                runtime_policy=mcp_runtime_policy(str(spec["name"])),
                 tags=["worker_private", "internal_system", "read_only"],
             )
         )

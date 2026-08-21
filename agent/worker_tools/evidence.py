@@ -7,7 +7,6 @@ coverage-validation step; no Tool writes Neo4j or business state.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Callable
 
 import hashlib
@@ -15,7 +14,7 @@ import hashlib
 from agent.collaboration.worker_directory import EVIDENCE_COLLECTOR
 from agent.graph.contracts import GraphNodeKind, GraphRef, refs_from
 from agent.graph.provider_adapter import GraphProviderAdapter
-from agent.services.evidence_service import EvidenceService
+from agent.mcp.worker_adapter import invoke_worker_mcp
 from agent.tool_runtime import (
     OP_READ,
     TOOL_VISIBILITY_WORKER_PRIVATE,
@@ -42,10 +41,6 @@ def _object_refs(arguments: dict[str, Any]) -> list[GraphRef]:
     if not refs:
         raise ValueError("object_refs_required")
     return refs
-
-
-def _path(context: dict[str, Any], key: str, default: str | Path) -> str | Path:
-    return context.get(key) or default
 
 
 def _raw_data(raw: dict[str, Any]) -> dict[str, Any]:
@@ -343,8 +338,6 @@ def build_evidence_tool_definitions(
 ) -> list[ToolDefinition]:
     """Bind atomic W01 tools to run-scoped dependencies."""
 
-    service = EvidenceService()
-
     def search_news(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         refs = _object_refs(arguments)
         top_k = max(1, min(int(arguments.get("top_k") or 20), 100))
@@ -353,11 +346,16 @@ def build_evidence_tool_definitions(
             provider=provider,
             refs=refs,
             source_name="news_and_announcements",
-            collector=lambda code: service.search_news(
-                code,
-                as_of_date=as_of_time or None,
-                db_path=context.get("db_path"),
-                limit=top_k,
+            collector=lambda code: invoke_worker_mcp(
+                "rag",
+                "search_news",
+                {
+                    "stock_code": code,
+                    "as_of_date": as_of_time,
+                    "limit": top_k,
+                },
+                context,
+                caller_tool_id=EVIDENCE_SEARCH_NEWS_TOOL,
             ),
         )
 
@@ -369,11 +367,16 @@ def build_evidence_tool_definitions(
             provider=provider,
             refs=refs,
             source_name="rag_evidence",
-            collector=lambda code: service.search_rag(
-                code,
-                query=query or code,
-                top_k=top_k,
-                output_dir=_path(context, "output_dir", "outputs"),
+            collector=lambda code: invoke_worker_mcp(
+                "rag",
+                "search_documents",
+                {
+                    "stock_code": code,
+                    "query": query or code,
+                    "top_k": top_k,
+                },
+                context,
+                caller_tool_id=EVIDENCE_SEARCH_RAG_TOOL,
             ),
         )
 
@@ -574,17 +577,29 @@ def build_evidence_tool_definitions(
             supported_objects=["financial_object_graph_ref_set"],
             produced_outputs=["results", "news_evidence"],
             input_contracts=[
-                ToolInputContract(slot_id="object_refs", required=True),
+                ToolInputContract(
+                    slot_id="object_refs",
+                    required=True,
+                    contract="graph.object-refs",
+                    version="1.0",
+                ),
                 ToolInputContract(slot_id="query", required=False),
                 ToolInputContract(slot_id="top_k", required=False),
                 ToolInputContract(slot_id="as_of_time", required=False),
             ],
             output_contracts=[
-                ToolOutputContract(slot_id="results", source_path="data.results"),
+                ToolOutputContract(
+                    slot_id="results",
+                    source_path="data.results",
+                    contract="evidence.source-results",
+                    version="1.0",
+                ),
                 ToolOutputContract(
                     slot_id="news_evidence",
                     schema_id="EvidenceSourceCollection.v1",
                     source_path="data",
+                    contract="evidence.source-collection",
+                    version="1.0",
                 ),
             ],
             operation_type=OP_READ,
@@ -595,6 +610,13 @@ def build_evidence_tool_definitions(
             mutates_business_state=False,
             idempotency="read_only",
             audit_level="full",
+            runtime_policy={
+                "provider_type": "mcp",
+                "server_id": "rag",
+                "transport_tool_name": "search_news",
+                "transport": "stdio",
+                "projection_kind": "worker_adapter",
+            },
             tags=["worker_private", "evidence", "news", "atomic", "read_only"],
         ),
         ToolDefinition(
@@ -617,17 +639,29 @@ def build_evidence_tool_definitions(
             supported_objects=["financial_object_graph_ref_set"],
             produced_outputs=["results", "rag_evidence"],
             input_contracts=[
-                ToolInputContract(slot_id="object_refs", required=True),
+                ToolInputContract(
+                    slot_id="object_refs",
+                    required=True,
+                    contract="graph.object-refs",
+                    version="1.0",
+                ),
                 ToolInputContract(slot_id="query", required=True),
                 ToolInputContract(slot_id="top_k", required=False),
                 ToolInputContract(slot_id="as_of_time", required=False),
             ],
             output_contracts=[
-                ToolOutputContract(slot_id="results", source_path="data.results"),
+                ToolOutputContract(
+                    slot_id="results",
+                    source_path="data.results",
+                    contract="evidence.source-results",
+                    version="1.0",
+                ),
                 ToolOutputContract(
                     slot_id="rag_evidence",
                     schema_id="EvidenceSourceCollection.v1",
                     source_path="data",
+                    contract="evidence.source-collection",
+                    version="1.0",
                 ),
             ],
             operation_type=OP_READ,
@@ -638,6 +672,13 @@ def build_evidence_tool_definitions(
             mutates_business_state=False,
             idempotency="read_only",
             audit_level="full",
+            runtime_policy={
+                "provider_type": "mcp",
+                "server_id": "rag",
+                "transport_tool_name": "search_documents",
+                "transport": "stdio",
+                "projection_kind": "worker_adapter",
+            },
             tags=["worker_private", "evidence", "rag", "atomic", "read_only"],
         ),
         ToolDefinition(
@@ -687,6 +728,8 @@ def build_evidence_tool_definitions(
                     accepted_sources=("upstream_tool",),
                     cardinality="many",
                     description="One or more evidence-source semantic payloads selected by the Tool DAG.",
+                    contract="evidence.source-collection",
+                    version="1.0",
                 ),
                 ToolInputContract(slot_id="required_object_refs", required=True),
                 ToolInputContract(slot_id="collection_goal", required=False),

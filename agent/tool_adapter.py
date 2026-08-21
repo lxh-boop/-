@@ -148,7 +148,6 @@ def tool_query_latest_ranking(topk: int = 10, model_name: str | None = None) -> 
         topk=topk,
         model_name=model_name,
         output_dir=OUTPUT_DIR,
-        ranking_path=RANKING_LATEST_PATH,
     )
 
     df, path, message = _load_latest_ranking_df(model_name=model_name)
@@ -576,21 +575,18 @@ def tool_query_news_mapping(query: str) -> dict:
 
 def tool_query_rag(question: str, topk: int = 5) -> dict:
     try:
-        from rag_retriever import retrieve_for_agent
+        from agent.services.evidence_service import evidence_service
 
-        result = retrieve_for_agent(question=question, topk=topk)
-        try:
-            from agent.services.evidence_service import evidence_service
-
-            evidence = result.get("evidence") if isinstance(result, dict) else []
-            if isinstance(evidence, list):
-                result["sources"] = evidence_service.format_sources(
-                    [item for item in evidence if isinstance(item, dict)],
-                    source_type="rag_chunk",
-                )
-        except Exception:
-            pass
-        return result
+        result = evidence_service.search_documents(
+            question,
+            top_k=max(1, min(int(topk or 5), 5)),
+        )
+        data = dict(result.get("data") or {})
+        return {
+            **result,
+            "evidence": list(data.get("records") or []),
+            "sources": list(data.get("sources") or []),
+        }
     except Exception as exc:
         return {
             "success": False,

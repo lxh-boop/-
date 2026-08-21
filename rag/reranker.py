@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
 from typing import Any
+
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from rag.schemas import RetrievalResult
 

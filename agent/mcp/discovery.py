@@ -3,11 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from agent.agent_specs import MARKET_INTELLIGENCE
 from agent.mcp.config import discovery_ttl_seconds, mcp_sdk_version, resolve_mcp_server_configs
-from agent.mcp.example_server import tool_definitions
 from agent.mcp.models import MCPDiscoveryResult, MCPServerConfig, MCPToolInfo
 from agent.mcp.security import is_write_like_tool
+from agent.mcp.transport import list_stdio_tools
 
 
 _DISCOVERY_CACHE: dict[str, tuple[float, MCPDiscoveryResult]] = {}
@@ -27,6 +26,9 @@ def _cache_key(server: MCPServerConfig) -> str:
         [
             server.server_id,
             server.transport,
+            server.command,
+            ",".join(server.args),
+            server.cwd,
             str(server.enabled),
             ",".join(sorted(server.allowed_tools)),
             str(server.timeout_seconds),
@@ -34,61 +36,72 @@ def _cache_key(server: MCPServerConfig) -> str:
     )
 
 
-def _raw_tool_definitions(server: MCPServerConfig) -> list[dict[str, Any]]:
-    if server.transport in {"local_fixture", "inprocess", "stdio"} and server.server_id == "local_financial_evidence":
-        return tool_definitions()
-    raise RuntimeError(f"dependency_error:unsupported_mcp_transport:{server.transport}:{server.server_id}")
+def _raw_tool_definitions(
+    server: MCPServerConfig,
+    context: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    return list_stdio_tools(server, context=context)
 
 
 def _tool_info(server: MCPServerConfig, raw: dict[str, Any], discovered_at: str) -> MCPToolInfo:
     tool_name = str(raw.get("name") or "").strip()
     description = str(raw.get("description") or "")
     annotations = dict(raw.get("annotations") or {})
-    declared_read_only = bool(annotations.get("readOnlyHint", True))
+    declared_read_only = bool(
+        annotations.get("readOnlyHint", annotations.get("read_only_hint", True))
+    )
     write_like = is_write_like_tool(tool_name, description, annotations)
     tool_read_only = declared_read_only and not write_like
-    allowlisted = tool_name in set(server.allowed_tools)
-    mapped = bool(server.enabled and server.read_only and tool_read_only and allowlisted)
-    effective_permission = "read" if mapped else "blocked"
-    mapping_error = ""
-    if not allowlisted:
-        mapping_error = "tool_not_in_server_allowlist"
-    elif not server.read_only or not tool_read_only:
-        mapping_error = "mcp_write_tool_blocked"
-
     return MCPToolInfo(
         server_id=server.server_id,
         server_name=server.name,
         tool_name=tool_name,
         namespaced_name=f"mcp.{server.server_id}.{tool_name}",
         description=description,
-        input_schema=dict(raw.get("input_schema") or {"type": "object", "properties": {}}),
+        input_schema=dict(
+            raw.get("inputSchema")
+            or raw.get("input_schema")
+            or {"type": "object", "properties": {}}
+        ),
+        output_schema=dict(
+            raw.get("outputSchema")
+            or raw.get("output_schema")
+            or {"type": "object"}
+        ),
         annotations=annotations,
+        discovery_status="discovered",
         server_enabled=server.enabled,
         server_read_only=server.read_only,
         tool_read_only=tool_read_only,
-        allowlisted=allowlisted,
-        mapped=mapped,
-        mapping_error=mapping_error,
+        allowlisted=False,
+        mapped=False,
+        mapping_error="runtime_admission_required",
         discovered_at=discovered_at,
         transport=server.transport,
         timeout_seconds=server.timeout_seconds,
-        effective_read_only=mapped,
-        effective_permission=effective_permission,
-        effective_allowed_agents=(MARKET_INTELLIGENCE,) if mapped else (),
+        effective_read_only=False,
+        effective_permission="discovered",
+        effective_allowed_agents=(),
         requires_confirmation=False,
         metadata={
             "provider_type": "mcp",
             "sdk_version": mcp_sdk_version(),
-            "local_security_source": "server_tool_allowlist",
+            "discovery_only": True,
         },
     )
 
 
-def discover_mcp_tools(context: dict[str, Any] | None = None, *, force: bool = False) -> list[MCPDiscoveryResult]:
+def discover_mcp_tools(
+    context: dict[str, Any] | None = None,
+    *,
+    force: bool = False,
+    server_id: str = "",
+) -> list[MCPDiscoveryResult]:
     ttl = discovery_ttl_seconds(context)
     results: list[MCPDiscoveryResult] = []
     for server in resolve_mcp_server_configs(context):
+        if server_id and server.server_id != server_id:
+            continue
         if not server.enabled:
             results.append(
                 MCPDiscoveryResult(
@@ -128,7 +141,10 @@ def discover_mcp_tools(context: dict[str, Any] | None = None, *, force: bool = F
         _DISCOVERY_COUNT[server.server_id] = _DISCOVERY_COUNT.get(server.server_id, 0) + 1
         discovered_at = _now_text()
         try:
-            tools = tuple(_tool_info(server, raw, discovered_at) for raw in _raw_tool_definitions(server))
+            tools = tuple(
+                _tool_info(server, raw, discovered_at)
+                for raw in _raw_tool_definitions(server, context)
+            )
             result = MCPDiscoveryResult(
                 server_id=server.server_id,
                 server_name=server.name,
