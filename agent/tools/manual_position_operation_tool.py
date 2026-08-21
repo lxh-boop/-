@@ -166,6 +166,7 @@ def _preview_stable_portfolio_rebalance(
     db_path: str | Path | None,
     top_k: int,
     session_id: str,
+    canonical_proposal_id: str = "",
 ) -> ToolResult:
     positions = [
         dict(item or {})
@@ -194,7 +195,9 @@ def _preview_stable_portfolio_rebalance(
     requested_cash = None if cash_weight is None else max(0.0, min(1.0, float(cash_weight)))
     minimum_cash = max(current_cash / total_assets, requested_cash or 0.0)
 
-    ranking = query_ranking(top_k=max(10, int(top_k or 50)), output_dir=output_dir)
+    ranking = query_ranking(
+        top_k=max(10, int(top_k or 50)), output_dir=output_dir, db_path=db_path
+    )
     ranking_rows = [dict(item or {}) for item in (ranking.get("records") or [])]
     ranking_by_code = {
         normalize_stock_code(row.get("code") or row.get("stock_code")): row
@@ -424,12 +427,23 @@ def _preview_stable_portfolio_rebalance(
             "确定性预案只对现有超限持仓减仓，不新增股票，也不修改长期策略。",
         ],
     }
-    plan = create_confirmation_plan(
-        user_id,
-        "execute_portfolio_rebalance",
-        payload,
-        output_dir=output_dir,
-        db_path=db_path,
+    canonical = bool(str(canonical_proposal_id or "").strip())
+    plan = (
+        {
+            "plan_id": str(canonical_proposal_id),
+            "confirmation_token": "",
+            "expires_at": "",
+            "plan_hash": "",
+            "business_state_version": "",
+        }
+        if canonical
+        else create_confirmation_plan(
+            user_id,
+            "execute_portfolio_rebalance",
+            payload,
+            output_dir=output_dir,
+            db_path=db_path,
+        )
     )
     data = {
         **payload,
@@ -441,15 +455,16 @@ def _preview_stable_portfolio_rebalance(
         "not_committed": True,
         "long_term_strategy_changed": False,
     }
-    write_agent_confirmation_log(
-        user_id,
-        plan_id=str(plan["plan_id"]),
-        confirmation_status="pending",
-        expires_at=str(plan["expires_at"]),
-        session_id=session_id,
-        output_dir=output_dir,
-        db_path=db_path,
-    )
+    if not canonical:
+        write_agent_confirmation_log(
+            user_id,
+            plan_id=str(plan["plan_id"]),
+            confirmation_status="pending",
+            expires_at=str(plan["expires_at"]),
+            session_id=session_id,
+            output_dir=output_dir,
+            db_path=db_path,
+        )
     write_agent_action_log(
         user_id,
         intent="one_time_position_operation",
@@ -457,8 +472,8 @@ def _preview_stable_portfolio_rebalance(
         tool_input={"query": query, "portfolio_level": True},
         tool_output_summary={"plan_id": plan["plan_id"], "change_count": len(changes)},
         plan_id=str(plan["plan_id"]),
-        confirmation_status="pending",
-        execution_status="preview_only",
+        confirmation_status="canonical_approved" if canonical else "pending",
+        execution_status="canonical_preflight" if canonical else "preview_only",
         trade_date=trade_date,
         session_id=session_id,
         output_dir=output_dir,
@@ -471,8 +486,8 @@ def _preview_stable_portfolio_rebalance(
         warnings=list(payload["warnings"]),
         permission=ToolPermission.PREVIEW,
         tool_name="manual_position_operation_tool",
-        requires_confirmation=True,
-        confirmation_token=str(plan["confirmation_token"]),
+        requires_confirmation=not canonical,
+        confirmation_token=str(plan["confirmation_token"]) if not canonical else "",
     )
 
 
@@ -489,6 +504,7 @@ def preview_manual_position_operation(
     db_path: str | Path | None = None,
     top_k: int = 50,
     session_id: str = "",
+    canonical_proposal_id: str = "",
 ) -> ToolResult:
     code = normalize_stock_code(stock_code)
     state = query_portfolio_state(user_id, output_dir=output_dir, db_path=db_path)
@@ -519,6 +535,7 @@ def preview_manual_position_operation(
                 db_path=db_path,
                 top_k=top_k,
                 session_id=session_id,
+                canonical_proposal_id=canonical_proposal_id,
             )
         return ToolResult(
             success=False,
@@ -554,6 +571,7 @@ def preview_manual_position_operation(
             db_path=db_path,
             top_k=top_k,
             session_id=session_id,
+            canonical_proposal_id=canonical_proposal_id,
         )
     else:
         result = preview_add_stock_to_paper(
@@ -564,6 +582,7 @@ def preview_manual_position_operation(
             db_path=db_path,
             top_k=top_k,
             session_id=session_id,
+            canonical_proposal_id=canonical_proposal_id,
         )
 
     data = dict(result.data or {})
@@ -602,6 +621,6 @@ def preview_manual_position_operation(
         errors=list(result.errors or []),
         permission=ToolPermission.PREVIEW,
         tool_name="manual_position_operation_tool",
-        requires_confirmation=bool(data.get("plan_id")),
-        confirmation_token=data.get("confirmation_token"),
+        requires_confirmation=bool(data.get("plan_id")) and not bool(canonical_proposal_id),
+        confirmation_token=data.get("confirmation_token") if not canonical_proposal_id else "",
     )

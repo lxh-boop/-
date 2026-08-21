@@ -23,6 +23,7 @@ def preview_add_stock_to_paper(
     db_path: str | Path | None = None,
     top_k: int = 50,
     session_id: str = "",
+    canonical_proposal_id: str = "",
 ) -> ToolResult:
     recommendation_result = recommend_position_weight(
         user_id=user_id,
@@ -156,7 +157,18 @@ def preview_add_stock_to_paper(
             "本次操作只影响待确认的模拟盘订单，不会修改长期持仓策略。"
         ],
     }
-    plan = create_confirmation_plan(user_id, "execute_add_stock", payload, output_dir=output_dir, db_path=db_path)
+    canonical = bool(str(canonical_proposal_id or "").strip())
+    plan = (
+        {
+            "plan_id": str(canonical_proposal_id),
+            "confirmation_token": "",
+            "expires_at": "",
+        }
+        if canonical
+        else create_confirmation_plan(
+            user_id, "execute_add_stock", payload, output_dir=output_dir, db_path=db_path
+        )
+    )
     preview = PaperTradePreview(
         plan_id=str(plan["plan_id"]),
         confirmation_token=str(plan["confirmation_token"]),
@@ -176,15 +188,16 @@ def preview_add_stock_to_paper(
         risk_warning=str(recommendation.get("risk_warning") or ""),
         reason=str(recommendation.get("reason") or ""),
     )
-    write_agent_confirmation_log(
-        user_id,
-        plan_id=preview.plan_id,
-        confirmation_status="pending",
-        expires_at=preview.expires_at,
-        session_id=session_id,
-        output_dir=output_dir,
-        db_path=db_path,
-    )
+    if not canonical:
+        write_agent_confirmation_log(
+            user_id,
+            plan_id=preview.plan_id,
+            confirmation_status="pending",
+            expires_at=preview.expires_at,
+            session_id=session_id,
+            output_dir=output_dir,
+            db_path=db_path,
+        )
     write_agent_action_log(
         user_id,
         intent="preview_add_stock",
@@ -192,8 +205,8 @@ def preview_add_stock_to_paper(
         tool_input={"stock_code": stock_code, "requested_weight": requested_weight},
         tool_output_summary={"plan_id": preview.plan_id, "estimated_cost": preview.estimated_cost},
         plan_id=preview.plan_id,
-        confirmation_status="pending",
-        execution_status="preview_only",
+        confirmation_status="canonical_approved" if canonical else "pending",
+        execution_status="canonical_preflight" if canonical else "preview_only",
         trade_date=preview.trade_date,
         session_id=session_id,
         output_dir=output_dir,
@@ -206,6 +219,7 @@ def preview_add_stock_to_paper(
             "source_type": "manual_one_time_operation",
             "expires_after_execution": True,
             "long_term_strategy_changed": False,
+            "execution_payload": payload,
         }
     )
     return ToolResult(
@@ -215,8 +229,8 @@ def preview_add_stock_to_paper(
         warnings=list(recommendation_result.warnings),
         permission=ToolPermission.PREVIEW,
         tool_name="rebalance_plan_preview",
-        requires_confirmation=True,
-        confirmation_token=preview.confirmation_token,
+        requires_confirmation=not canonical,
+        confirmation_token=preview.confirmation_token if not canonical else "",
     )
 
 
@@ -249,6 +263,7 @@ def preview_adjust_position_to_weight(
     db_path: str | Path | None = None,
     top_k: int = 50,
     session_id: str = "",
+    canonical_proposal_id: str = "",
 ) -> ToolResult:
     _ = top_k
     code = _stock_code(stock_code)
@@ -452,7 +467,18 @@ def preview_adjust_position_to_weight(
             "本次操作只影响待确认的模拟盘订单，不会修改长期持仓策略。"
         ],
     }
-    plan = create_confirmation_plan(user_id, "execute_adjust_position", payload, output_dir=output_dir, db_path=db_path)
+    canonical = bool(str(canonical_proposal_id or "").strip())
+    plan = (
+        {
+            "plan_id": str(canonical_proposal_id),
+            "confirmation_token": "",
+            "expires_at": "",
+        }
+        if canonical
+        else create_confirmation_plan(
+            user_id, "execute_adjust_position", payload, output_dir=output_dir, db_path=db_path
+        )
+    )
     preview = PaperTradePreview(
         plan_id=str(plan["plan_id"]),
         confirmation_token=str(plan["confirmation_token"]),
@@ -472,15 +498,16 @@ def preview_adjust_position_to_weight(
         risk_warning="",
         reason="Confirmation will adjust this paper position to the target weight.",
     )
-    write_agent_confirmation_log(
-        user_id,
-        plan_id=preview.plan_id,
-        confirmation_status="pending",
-        expires_at=preview.expires_at,
-        session_id=session_id,
-        output_dir=output_dir,
-        db_path=db_path,
-    )
+    if not canonical:
+        write_agent_confirmation_log(
+            user_id,
+            plan_id=preview.plan_id,
+            confirmation_status="pending",
+            expires_at=preview.expires_at,
+            session_id=session_id,
+            output_dir=output_dir,
+            db_path=db_path,
+        )
     write_agent_action_log(
         user_id,
         intent="adjust_position",
@@ -497,8 +524,8 @@ def preview_adjust_position_to_weight(
             "estimated_quantity": preview.estimated_quantity,
         },
         plan_id=preview.plan_id,
-        confirmation_status="pending",
-        execution_status="preview_only",
+        confirmation_status="canonical_approved" if canonical else "pending",
+        execution_status="canonical_preflight" if canonical else "preview_only",
         trade_date=preview.trade_date,
         session_id=session_id,
         output_dir=output_dir,
@@ -516,6 +543,7 @@ def preview_adjust_position_to_weight(
             "action": action,
             "current_quantity": current_quantity,
             "target_quantity": target_quantity,
+            "execution_payload": payload,
         }
     )
     return ToolResult(
@@ -524,6 +552,6 @@ def preview_adjust_position_to_weight(
         data=preview_data,
         permission=ToolPermission.PREVIEW,
         tool_name="adjust_position_preview",
-        requires_confirmation=True,
-        confirmation_token=preview.confirmation_token,
+        requires_confirmation=not canonical,
+        confirmation_token=preview.confirmation_token if not canonical else "",
     )

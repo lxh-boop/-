@@ -114,6 +114,7 @@ def _execute_adjust_position_plan(
     output_dir: str | Path,
     db_path: str | Path | None,
     session_id: str,
+    canonical_approval: bool = False,
 ) -> ToolResult:
     code = _stock_code(plan.get("stock_code"))
     trade_date = str(plan.get("trade_date") or "")[:10]
@@ -276,18 +277,19 @@ def _execute_adjust_position_plan(
         trade_date=trade_date,
         decision_time=_decision_time_token(decision_time),
     )
-    mark_plan_executed(
-        user_id,
-        plan_id,
-        output_dir=output_dir,
-        db_path=db_path,
-        order_ids=order_ids,
-        execution_status=execution_status,
-    )
+    if not canonical_approval:
+        mark_plan_executed(
+            user_id,
+            plan_id,
+            output_dir=output_dir,
+            db_path=db_path,
+            order_ids=order_ids,
+            execution_status=execution_status,
+        )
     write_agent_confirmation_log(
         user_id,
         plan_id=plan_id,
-        confirmation_status="confirmed",
+        confirmation_status="canonical_approved" if canonical_approval else "confirmed",
         expires_at=str(plan.get("expires_at") or ""),
         session_id=session_id,
         output_dir=output_dir,
@@ -300,7 +302,7 @@ def _execute_adjust_position_plan(
         tool_input={"plan_id": plan_id},
         tool_output_summary={"order_ids": order_ids, "execution_status": execution_status},
         plan_id=plan_id,
-        confirmation_status="confirmed",
+        confirmation_status="canonical_approved" if canonical_approval else "confirmed",
         execution_status=execution_status,
         trade_date=trade_date,
         session_id=session_id,
@@ -350,6 +352,7 @@ def _execute_portfolio_rebalance_plan(
     output_dir: str | Path,
     db_path: str | Path | None,
     session_id: str,
+    canonical_approval: bool = False,
 ) -> ToolResult:
     target_rows = [dict(item or {}) for item in (plan.get("target_positions") or [])]
     changed_rows = [
@@ -525,13 +528,14 @@ def _execute_portfolio_rebalance_plan(
                 shutil.rmtree(portfolio_dir)
             if portfolio_existed and files_backup.exists():
                 shutil.copytree(files_backup, portfolio_dir)
-            mark_plan_revalidation_failed(
-                user_id,
-                plan_id,
-                output_dir=output_dir,
-                db_path=db_path,
-                reason=f"portfolio_commit_rolled_back:{type(exc).__name__}",
-            )
+            if not canonical_approval:
+                mark_plan_revalidation_failed(
+                    user_id,
+                    plan_id,
+                    output_dir=output_dir,
+                    db_path=db_path,
+                    reason=f"portfolio_commit_rolled_back:{type(exc).__name__}",
+                )
             return ToolResult(
                 success=False,
                 message="Portfolio commit failed and all paper-account changes were rolled back.",
@@ -542,18 +546,22 @@ def _execute_portfolio_rebalance_plan(
             )
 
     order_ids = [str(order.order_id) for order in orders]
-    executed_plan = mark_plan_executed(
-        user_id,
-        plan_id,
-        output_dir=output_dir,
-        db_path=db_path,
-        order_ids=order_ids,
-        execution_status="executed",
+    executed_plan = (
+        {}
+        if canonical_approval
+        else mark_plan_executed(
+            user_id,
+            plan_id,
+            output_dir=output_dir,
+            db_path=db_path,
+            order_ids=order_ids,
+            execution_status="executed",
+        )
     )
     write_agent_confirmation_log(
         user_id,
         plan_id=plan_id,
-        confirmation_status="confirmed",
+        confirmation_status="canonical_approved" if canonical_approval else "confirmed",
         expires_at=str(plan.get("expires_at") or ""),
         session_id=session_id,
         output_dir=output_dir,
@@ -566,7 +574,7 @@ def _execute_portfolio_rebalance_plan(
         tool_input={"plan_id": plan_id},
         tool_output_summary={"order_ids": order_ids, "execution_status": "executed"},
         plan_id=plan_id,
-        confirmation_status="confirmed",
+        confirmation_status="canonical_approved" if canonical_approval else "confirmed",
         execution_status="executed",
         trade_date=trade_date,
         session_id=session_id,
@@ -589,6 +597,350 @@ def _execute_portfolio_rebalance_plan(
         },
         permission=ToolPermission.WRITE,
         tool_name="paper_trade_execute",
+    )
+
+
+def _preflight_portfolio_plan(
+    user_id: str,
+    plan_id: str,
+    plan: dict[str, Any],
+    *,
+    intent: str,
+    output_dir: str | Path,
+    db_path: str | Path | None,
+) -> ToolResult | None:
+    before = dict(plan.get("before") or plan.get("before_state_summary") or {})
+    if before:
+        current_state = query_portfolio_state(user_id, output_dir=output_dir, db_path=db_path)
+        mismatches: list[str] = []
+        for field in ["cash", "total_assets", "position_count"]:
+            if field not in before:
+                continue
+            expected = safe_float(before.get(field), 0.0)
+            current = safe_float(current_state.get(field), 0.0)
+            if abs(expected - current) > 1e-6:
+                mismatches.append(field)
+        expected_positions = before.get("position_snapshot") or []
+        if expected_positions:
+            current_positions = []
+            for item in current_state.get("positions") or []:
+                row = dict(item or {})
+                if safe_float(row.get("quantity"), 0.0) <= 0:
+                    continue
+                current_positions.append(
+                    {
+                        "stock_code": _stock_code(row.get("stock_code")),
+                        "quantity": round(safe_float(row.get("quantity"), 0.0), 6),
+                        "current_price": round(
+                            safe_float(
+                                row.get("current_price")
+                                or row.get("last_price")
+                                or row.get("close")
+                                or row.get("price"),
+                                0.0,
+                            ),
+                            6,
+                        ),
+                    }
+                )
+            current_positions.sort(key=lambda item: item["stock_code"])
+            if json.dumps(expected_positions, ensure_ascii=False, sort_keys=True) != json.dumps(
+                current_positions, ensure_ascii=False, sort_keys=True
+            ):
+                mismatches.append("position_snapshot")
+        if intent == "execute_portfolio_rebalance" and plan.get("constraint_version"):
+            try:
+                _, _, _, live_constraints = load_user_context(
+                    user_id, db_path=db_path, output_dir=output_dir
+                )
+                encoded = json.dumps(live_constraints, ensure_ascii=False, sort_keys=True, default=str)
+                import hashlib
+
+                live_constraint_version = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+                if str(plan.get("constraint_version")) != live_constraint_version:
+                    mismatches.append("constraint_version")
+            except Exception:
+                mismatches.append("constraint_version")
+        if mismatches:
+            message = "Business state changed after preview; regenerate the paper-trading proposal."
+            _record_rejected_commit(
+                plan,
+                db_path=db_path,
+                error_type="business_state_changed",
+                message=message,
+                result_summary={
+                    "plan_id": plan_id,
+                    "mismatched_fields": mismatches,
+                    "business_state_version": plan.get("business_state_version"),
+                },
+            )
+            return ToolResult(
+                success=False,
+                message=message,
+                data={
+                    "plan_id": plan_id,
+                    "mismatched_fields": mismatches,
+                    "business_state_version": plan.get("business_state_version"),
+                },
+                errors=["business_state_changed"],
+                permission=ToolPermission.WRITE,
+                tool_name="paper_trade_execute",
+            )
+    trade_date = str(plan.get("trade_date") or "")
+    if trade_date and not is_trading_day(trade_date):
+        message = f"{trade_date} is not an A-share trading day; no paper order was generated."
+        _record_rejected_commit(
+            plan,
+            db_path=db_path,
+            error_type="non_trading_day",
+            message=message,
+            result_summary={"plan_id": plan_id, "trade_date": trade_date},
+        )
+        return ToolResult(
+            success=False,
+            message=message,
+            data={"plan_id": plan_id, "trade_date": trade_date},
+            errors=["non_trading_day"],
+            permission=ToolPermission.WRITE,
+            tool_name="paper_trade_execute",
+        )
+    return None
+
+
+def _execute_add_stock_plan(
+    user_id: str,
+    plan_id: str,
+    plan: dict[str, Any],
+    *,
+    output_dir: str | Path,
+    db_path: str | Path | None,
+    session_id: str,
+    canonical_approval: bool = False,
+) -> ToolResult:
+    trade_date = str(plan.get("trade_date") or "")
+    price = safe_float(plan.get("current_price"), 0.0)
+    quantity = safe_float(plan.get("estimated_quantity"), 0.0)
+    if not is_valid_agent_price(price) or quantity <= 0 or quantity % 100 != 0:
+        message = "Invalid price or A-share lot quantity; paper order was rejected."
+        _record_rejected_commit(
+            plan,
+            db_path=db_path,
+            error_type="invalid_price_or_quantity",
+            message=message,
+            result_summary={"plan_id": plan_id, "price": price, "quantity": quantity},
+        )
+        return ToolResult(
+            success=False,
+            message=message,
+            data={"plan_id": plan_id, "price": price, "quantity": quantity},
+            errors=["invalid_price_or_quantity"],
+            permission=ToolPermission.WRITE,
+            tool_name="paper_trade_execute",
+        )
+    target_weight = safe_float(plan.get("recommended_weight"), 0.0)
+    maximum_allowed = safe_float(plan.get("maximum_allowed_weight"), 1.0)
+    if target_weight > maximum_allowed + 1e-9:
+        message = "Target weight exceeds the user risk cap."
+        _record_rejected_commit(
+            plan,
+            db_path=db_path,
+            error_type="risk_cap_exceeded",
+            message=message,
+            result_summary={
+                "plan_id": plan_id,
+                "target_weight": target_weight,
+                "maximum_allowed_weight": maximum_allowed,
+            },
+        )
+        return ToolResult(
+            success=False,
+            message=message,
+            data={
+                "plan_id": plan_id,
+                "target_weight": target_weight,
+                "maximum_allowed_weight": maximum_allowed,
+            },
+            errors=["risk_cap_exceeded"],
+            permission=ToolPermission.WRITE,
+            tool_name="paper_trade_execute",
+        )
+    context = PipelineContext(
+        user_id=user_id,
+        trade_date=trade_date,
+        decision_time=now_text(),
+        top_k=1,
+        output_dir=output_dir,
+        db_path=db_path,
+        dry_run=False,
+        paper_trading_enabled=True,
+        run_id=str(plan_id),
+        execution_source="canonical_proposal" if canonical_approval else "agent_confirmed",
+    )
+    paper = run_paper_trading_pipeline(
+        context,
+        [dict(plan.get("recommendation_record") or {})],
+        output_dir=Path(output_dir) / "portfolio" / str(user_id),
+    )
+    if paper.status != PipelineStatus.SUCCESS:
+        _record_rejected_commit(
+            plan,
+            db_path=db_path,
+            error_type="paper_pipeline_failed",
+            message=paper.message,
+            result_summary={"plan_id": plan_id, "pipeline_status": paper.status},
+        )
+        return ToolResult(
+            success=False,
+            message=paper.message,
+            data={"plan_id": plan_id, "pipeline": paper.to_dict()},
+            errors=list(paper.errors or ["paper_pipeline_failed"]),
+            permission=ToolPermission.WRITE,
+            tool_name="paper_trade_execute",
+        )
+    order_ids = [str(order.order_id) for order in paper.orders]
+    execution_status = "executed" if order_ids else "executed_no_order"
+    if not canonical_approval:
+        mark_plan_executed(
+            user_id,
+            plan_id,
+            output_dir=output_dir,
+            db_path=db_path,
+            order_ids=order_ids,
+            execution_status=execution_status,
+        )
+    confirmation_status = "canonical_approved" if canonical_approval else "confirmed"
+    write_agent_confirmation_log(
+        user_id,
+        plan_id=plan_id,
+        confirmation_status=confirmation_status,
+        expires_at=str(plan.get("expires_at") or ""),
+        session_id=session_id,
+        output_dir=output_dir,
+        db_path=db_path,
+    )
+    write_agent_action_log(
+        user_id,
+        intent="execute_add_stock",
+        tool_name="paper_trade_execute",
+        tool_input={"proposal_id" if canonical_approval else "plan_id": plan_id},
+        tool_output_summary={"order_ids": order_ids, "execution_status": execution_status},
+        plan_id=plan_id,
+        confirmation_status=confirmation_status,
+        execution_status=execution_status,
+        trade_date=trade_date,
+        session_id=session_id,
+        output_dir=output_dir,
+        db_path=db_path,
+    )
+    result = PaperTradeExecutionResult(
+        success=bool(order_ids),
+        plan_id=str(plan_id),
+        confirmation_status=confirmation_status,
+        execution_status=execution_status,
+        order_ids=order_ids,
+        position_count_after=len(paper.positions),
+        message=(
+            f"Executed {len(order_ids)} paper orders."
+            if order_ids
+            else "Plan executed but no nonzero paper order was produced."
+        ),
+        output_paths=dict(paper.output_paths or {}),
+        warnings=list(paper.warnings or []),
+        errors=[] if order_ids else ["no_order_generated"],
+    )
+    return ToolResult(
+        success=result.success,
+        message=result.message,
+        data=result.to_dict(),
+        warnings=result.warnings,
+        errors=result.errors,
+        permission=ToolPermission.WRITE,
+        tool_name="paper_trade_execute",
+    )
+
+
+def _execute_preflighted_portfolio_plan(
+    user_id: str,
+    plan_id: str,
+    plan: dict[str, Any],
+    *,
+    intent: str,
+    output_dir: str | Path,
+    db_path: str | Path | None,
+    session_id: str,
+    canonical_approval: bool,
+) -> ToolResult:
+    if intent == "execute_portfolio_rebalance":
+        return _execute_portfolio_rebalance_plan(
+            user_id,
+            plan_id,
+            plan,
+            output_dir=output_dir,
+            db_path=db_path,
+            session_id=session_id,
+            canonical_approval=canonical_approval,
+        )
+    if intent == "execute_adjust_position":
+        return _execute_adjust_position_plan(
+            user_id,
+            plan_id,
+            plan,
+            output_dir=output_dir,
+            db_path=db_path,
+            session_id=session_id,
+            canonical_approval=canonical_approval,
+        )
+    return _execute_add_stock_plan(
+        user_id,
+        plan_id,
+        plan,
+        output_dir=output_dir,
+        db_path=db_path,
+        session_id=session_id,
+        canonical_approval=canonical_approval,
+    )
+
+
+def execute_canonical_portfolio_proposal(
+    *,
+    user_id: str,
+    proposal_id: str,
+    intent: str,
+    execution_payload: dict[str, Any],
+    output_dir: str | Path = "outputs",
+    db_path: str | Path | None = None,
+    session_id: str = "",
+) -> ToolResult:
+    allowed = {"execute_add_stock", "execute_adjust_position", "execute_portfolio_rebalance"}
+    if intent not in allowed:
+        return ToolResult(
+            success=False,
+            message="Canonical portfolio Proposal has an unsupported mutation intent.",
+            data={"proposal_id": proposal_id, "intent": intent},
+            errors=["unsupported_proposal_intent"],
+            permission=ToolPermission.WRITE,
+            tool_name="paper_trade_execute",
+        )
+    plan = dict(execution_payload or {})
+    preflight = _preflight_portfolio_plan(
+        user_id,
+        proposal_id,
+        plan,
+        intent=intent,
+        output_dir=output_dir,
+        db_path=db_path,
+    )
+    if preflight is not None:
+        return preflight
+    return _execute_preflighted_portfolio_plan(
+        user_id,
+        proposal_id,
+        plan,
+        intent=intent,
+        output_dir=output_dir,
+        db_path=db_path,
+        session_id=session_id,
+        canonical_approval=True,
     )
 
 
@@ -652,97 +1004,16 @@ def execute_confirmed_paper_trade_plan(
             permission=ToolPermission.WRITE,
             tool_name="paper_trade_execute",
         )
-    before = dict(plan.get("before") or plan.get("before_state_summary") or {})
-    if before:
-        current_state = query_portfolio_state(user_id, output_dir=output_dir, db_path=db_path)
-        mismatches: list[str] = []
-        for field in ["cash", "total_assets", "position_count"]:
-            if field not in before:
-                continue
-            expected = safe_float(before.get(field), 0.0)
-            current = safe_float(current_state.get(field), 0.0)
-            if abs(expected - current) > 1e-6:
-                mismatches.append(field)
-        expected_positions = before.get("position_snapshot") or []
-        if expected_positions:
-            current_positions = []
-            for item in current_state.get("positions") or []:
-                row = dict(item or {})
-                if safe_float(row.get("quantity"), 0.0) <= 0:
-                    continue
-                current_positions.append(
-                    {
-                        "stock_code": _stock_code(row.get("stock_code")),
-                        "quantity": round(safe_float(row.get("quantity"), 0.0), 6),
-                        "current_price": round(
-                            safe_float(
-                                row.get("current_price")
-                                or row.get("last_price")
-                                or row.get("close")
-                                or row.get("price"),
-                                0.0,
-                            ),
-                            6,
-                        ),
-                    }
-                )
-            current_positions.sort(key=lambda item: item["stock_code"])
-            if json.dumps(expected_positions, ensure_ascii=False, sort_keys=True) != json.dumps(current_positions, ensure_ascii=False, sort_keys=True):
-                mismatches.append("position_snapshot")
-        if intent == "execute_portfolio_rebalance" and plan.get("constraint_version"):
-            try:
-                _, _, _, live_constraints = load_user_context(user_id, db_path=db_path, output_dir=output_dir)
-                encoded = json.dumps(live_constraints, ensure_ascii=False, sort_keys=True, default=str)
-                import hashlib
-
-                live_constraint_version = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-                if str(plan.get("constraint_version")) != live_constraint_version:
-                    mismatches.append("constraint_version")
-            except Exception:
-                mismatches.append("constraint_version")
-        if mismatches:
-            message = "Business state changed after preview; regenerate the paper-trading proposal."
-            _record_rejected_commit(
-                plan,
-                db_path=db_path,
-                error_type="business_state_changed",
-                message=message,
-                result_summary={
-                    "plan_id": plan_id,
-                    "mismatched_fields": mismatches,
-                    "business_state_version": plan.get("business_state_version"),
-                },
-            )
-            return ToolResult(
-                success=False,
-                message=message,
-                data={
-                    "plan_id": plan_id,
-                    "mismatched_fields": mismatches,
-                    "business_state_version": plan.get("business_state_version"),
-                },
-                errors=["business_state_changed"],
-                permission=ToolPermission.WRITE,
-                tool_name="paper_trade_execute",
-            )
-    trade_date = str(plan.get("trade_date") or "")
-    if trade_date and not is_trading_day(trade_date):
-        message = f"{trade_date} is not an A-share trading day; no paper order was generated."
-        _record_rejected_commit(
-            plan,
-            db_path=db_path,
-            error_type="non_trading_day",
-            message=message,
-            result_summary={"plan_id": plan_id, "trade_date": trade_date},
-        )
-        return ToolResult(
-            success=False,
-            message=message,
-            data={"plan_id": plan_id, "trade_date": trade_date},
-            errors=["non_trading_day"],
-            permission=ToolPermission.WRITE,
-            tool_name="paper_trade_execute",
-        )
+    preflight = _preflight_portfolio_plan(
+        user_id,
+        plan_id,
+        plan,
+        intent=intent,
+        output_dir=output_dir,
+        db_path=db_path,
+    )
+    if preflight is not None:
+        return preflight
     ok, status, confirmed_plan = validate_confirmation(
         user_id,
         plan_id,
@@ -760,152 +1031,13 @@ def execute_confirmed_paper_trade_plan(
             tool_name="paper_trade_execute",
         )
     plan = confirmed_plan
-    if intent == "execute_portfolio_rebalance":
-        return _execute_portfolio_rebalance_plan(
-            user_id,
-            plan_id,
-            plan,
-            output_dir=output_dir,
-            db_path=db_path,
-            session_id=session_id,
-        )
-    if intent == "execute_adjust_position":
-        return _execute_adjust_position_plan(
-            user_id,
-            plan_id,
-            plan,
-            output_dir=output_dir,
-            db_path=db_path,
-            session_id=session_id,
-        )
-
-    price = safe_float(plan.get("current_price"), 0.0)
-    quantity = safe_float(plan.get("estimated_quantity"), 0.0)
-    if not is_valid_agent_price(price) or quantity <= 0 or quantity % 100 != 0:
-        message = "Invalid price or A-share lot quantity; paper order was rejected."
-        _record_rejected_commit(
-            plan,
-            db_path=db_path,
-            error_type="invalid_price_or_quantity",
-            message=message,
-            result_summary={"plan_id": plan_id, "price": price, "quantity": quantity},
-        )
-        return ToolResult(
-            success=False,
-            message=message,
-            data={"plan_id": plan_id, "price": price, "quantity": quantity},
-            errors=["invalid_price_or_quantity"],
-            permission=ToolPermission.WRITE,
-            tool_name="paper_trade_execute",
-        )
-    target_weight = safe_float(plan.get("recommended_weight"), 0.0)
-    maximum_allowed = safe_float(plan.get("maximum_allowed_weight"), 1.0)
-    if target_weight > maximum_allowed + 1e-9:
-        message = "Target weight exceeds the user risk cap."
-        _record_rejected_commit(
-            plan,
-            db_path=db_path,
-            error_type="risk_cap_exceeded",
-            message=message,
-            result_summary={
-                "plan_id": plan_id,
-                "target_weight": target_weight,
-                "maximum_allowed_weight": maximum_allowed,
-            },
-        )
-        return ToolResult(
-            success=False,
-            message=message,
-            data={"plan_id": plan_id, "target_weight": target_weight, "maximum_allowed_weight": maximum_allowed},
-            errors=["risk_cap_exceeded"],
-            permission=ToolPermission.WRITE,
-            tool_name="paper_trade_execute",
-        )
-    recommendation_record = dict(plan.get("recommendation_record") or {})
-    context = PipelineContext(
-        user_id=user_id,
-        trade_date=trade_date,
-        decision_time=now_text(),
-        top_k=1,
-        output_dir=output_dir,
-        db_path=db_path,
-        dry_run=False,
-        paper_trading_enabled=True,
-        run_id=str(plan_id),
-        execution_source="agent_confirmed",
-    )
-    paper = run_paper_trading_pipeline(
-        context,
-        [recommendation_record],
-        output_dir=Path(output_dir) / "portfolio" / str(user_id),
-    )
-    if paper.status != PipelineStatus.SUCCESS:
-        _record_rejected_commit(
-            plan,
-            db_path=db_path,
-            error_type="paper_pipeline_failed",
-            message=paper.message,
-            result_summary={"plan_id": plan_id, "pipeline_status": paper.status},
-        )
-        return ToolResult(
-            success=False,
-            message=paper.message,
-            data={"plan_id": plan_id, "pipeline": paper.to_dict()},
-            errors=list(paper.errors or ["paper_pipeline_failed"]),
-            permission=ToolPermission.WRITE,
-            tool_name="paper_trade_execute",
-        )
-    order_ids = [str(order.order_id) for order in paper.orders]
-    execution_status = "executed" if order_ids else "executed_no_order"
-    mark_plan_executed(
+    return _execute_preflighted_portfolio_plan(
         user_id,
         plan_id,
+        plan,
+        intent=intent,
         output_dir=output_dir,
         db_path=db_path,
-        order_ids=order_ids,
-        execution_status=execution_status,
-    )
-    write_agent_confirmation_log(
-        user_id,
-        plan_id=plan_id,
-        confirmation_status="confirmed",
-        expires_at=str(plan.get("expires_at") or ""),
         session_id=session_id,
-        output_dir=output_dir,
-        db_path=db_path,
-    )
-    write_agent_action_log(
-        user_id,
-        intent="execute_add_stock",
-        tool_name="paper_trade_execute",
-        tool_input={"plan_id": plan_id},
-        tool_output_summary={"order_ids": order_ids, "execution_status": execution_status},
-        plan_id=plan_id,
-        confirmation_status="confirmed",
-        execution_status=execution_status,
-        trade_date=trade_date,
-        session_id=session_id,
-        output_dir=output_dir,
-        db_path=db_path,
-    )
-    result = PaperTradeExecutionResult(
-        success=bool(order_ids),
-        plan_id=str(plan_id),
-        confirmation_status="confirmed",
-        execution_status=execution_status,
-        order_ids=order_ids,
-        position_count_after=len(paper.positions),
-        message=f"Executed {len(order_ids)} paper orders." if order_ids else "Plan executed but no nonzero paper order was produced.",
-        output_paths=dict(paper.output_paths or {}),
-        warnings=list(paper.warnings or []),
-        errors=[] if order_ids else ["no_order_generated"],
-    )
-    return ToolResult(
-        success=result.success,
-        message=result.message,
-        data=result.to_dict(),
-        warnings=result.warnings,
-        errors=result.errors,
-        permission=ToolPermission.WRITE,
-        tool_name="paper_trade_execute",
+        canonical_approval=False,
     )

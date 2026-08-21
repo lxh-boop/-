@@ -71,7 +71,7 @@ export interface AgentRunDetail {
 }
 
 export interface AgentPendingAction {
-  plan_id: string
+  proposal_id: string
   run_id: string
   intent: string
   operation_type: string
